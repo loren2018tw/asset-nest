@@ -36,6 +36,17 @@ impl ApiError {
         self
     }
 
+    /// 附加結構錯誤的額外細節（如衝突網段）；可與 [`ApiError::field`] 併用。
+    pub fn detail(mut self, key: &str, value: Value) -> Self {
+        let mut map = match self.details.take() {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        map.insert(key.to_string(), value);
+        self.details = Some(Value::Object(map));
+        self
+    }
+
     /// 404：資源不存在。
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)

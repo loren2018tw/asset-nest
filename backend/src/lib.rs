@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod interfaces;
 pub mod kea;
+pub mod subnets;
 pub mod web;
 
 use std::path::PathBuf;

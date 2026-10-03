@@ -1,0 +1,105 @@
+//! `/api/v1` 網段設定路由（見 spec §4.2、§5）。
+
+use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Serialize;
+
+use crate::AppState;
+use crate::api::ApiError;
+use crate::subnets::{self, Subnet, SubnetInput, SubnetPatch, SubnetSummary};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/subnets", get(list_subnets).post(create_subnet))
+        .route(
+            "/subnets/{id}",
+            get(get_subnet).patch(update_subnet).delete(delete_subnet),
+        )
+}
+
+/// 網段清單回應；`items` 為列表摘要（統計欄位見票 07）。
+#[derive(Debug, Serialize)]
+struct SubnetItems {
+    items: Vec<SubnetSummary>,
+}
+
+async fn list_subnets(State(state): State<AppState>) -> Result<Json<SubnetItems>, ApiError> {
+    let items = subnets::list(&state.db)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段清單失敗", error))?;
+
+    Ok(Json(SubnetItems { items }))
+}
+
+async fn get_subnet(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<Json<Subnet>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
+
+    let subnet = subnets::get(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
+
+    Ok(Json(subnet))
+}
+
+async fn create_subnet(
+    State(state): State<AppState>,
+    payload: Result<Json<SubnetInput>, JsonRejection>,
+) -> Result<(StatusCode, Json<Subnet>), ApiError> {
+    let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
+    let valid = input.validate()?;
+
+    subnets::ensure_no_conflicts(&state.db, &valid, None).await?;
+
+    let subnet = subnets::create(&state.db, valid)
+        .await
+        .map_err(|error| ApiError::internal("新增網段失敗", error))?;
+
+    Ok((StatusCode::CREATED, Json(subnet)))
+}
+
+async fn update_subnet(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+    payload: Result<Json<SubnetPatch>, JsonRejection>,
+) -> Result<Json<Subnet>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
+    let Json(patch) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
+
+    let existing = subnets::get(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
+
+    let valid = patch.apply_to(&existing)?;
+    subnets::ensure_no_conflicts(&state.db, &valid, Some(id)).await?;
+
+    subnets::update(&state.db, id, valid)
+        .await
+        .map_err(|error| ApiError::internal("更新網段失敗", error))?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("找不到網段"))
+}
+
+async fn delete_subnet(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
+
+    let deleted = subnets::delete(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("刪除網段失敗", error))?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("找不到網段"))
+    }
+}
