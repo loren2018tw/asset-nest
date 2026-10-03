@@ -31,3 +31,4 @@
 - 測試：`backend/tests/subnets.rs` 7 個整合測試（記憶體 SQLite＋`sqlx::migrate!`）涵蓋 CRUD／404／CIDR 必填與正規化／重疊各形式（含編輯排除自身、v6 重疊）／gateway（含僅縮小 CIDR 的合併狀態）／pool 範圍與段間重疊／v6 限制（含 v4→v6 殘留欄位）／kea_subnet_id 唯一（含 DB UNIQUE 直寫驗證）；`subnets.rs` 內 6 個單元測試（正規化、必填、gateway、v6 限制、pool 規則、地址族判斷）
 - 驗收：`cargo test`（14 單元＋22 整合全綠）、`cargo fmt --check`、`pnpm typecheck`、`pnpm lint:check` 全綠
 - 與規格差異：列表「已用／總數／衝突數」依票 07、刪除非空網段的防護依票 08 尚未實作；`GET /subnets/{id}` 為規格 §5 未列之新增（供編輯對話框載入 pools）
+- 實作 commit：`bafc6b9`（`03 網段設定：網段 CRUD、結構驗證與列表頁（後端＋前端）`）
