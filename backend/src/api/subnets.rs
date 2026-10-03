@@ -20,16 +20,14 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// 網段清單回應；`items` 為列表摘要（統計欄位見票 07）。
+/// 網段清單回應；`items` 為列表摘要（含已用／總數／衝突數，見票 07）。
 #[derive(Debug, Serialize)]
 struct SubnetItems {
     items: Vec<SubnetSummary>,
 }
 
 async fn list_subnets(State(state): State<AppState>) -> Result<Json<SubnetItems>, ApiError> {
-    let items = subnets::list(&state.db)
-        .await
-        .map_err(|error| ApiError::internal("讀取網段清單失敗", error))?;
+    let items = subnets::list(&state.db).await?;
 
     Ok(Json(SubnetItems { items }))
 }

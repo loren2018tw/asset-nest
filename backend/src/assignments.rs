@@ -2,7 +2,8 @@
 //!
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§3.1、
 //! §4.3、§5，決策見 ADR-0005（指派以 Interface 為對象）與 ADR-0006（結構錯誤阻擋）。
-//! v6 採登錄制：新增即指派、用途固定 static；語意衝突標記為票 07。
+//! v6 採登錄制：新增即指派、用途固定 static；語意衝突偵測見 [`crate::conflicts`]
+//! （票 07）——更新既有指派時，出界／落池不再重驗、改以標記呈現。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -181,31 +182,19 @@ pub struct AssetAssignment {
 
 /// 指派位址（或改用途）；結構錯誤阻擋儲存（見 spec §3.1）。
 ///
-/// v4：位址須為 host（扣除 network/broadcast）且不在 pool 內；
-/// v6：登錄制，位址須落在 CIDR 內（含 network 位址；無 host 扣除概念），
+/// v4：新指派位址須為 host（扣除 network/broadcast）且不在 pool 內；
+/// v6：登錄制，新指派位址須落在 CIDR 內（含 network 位址；無 host 扣除概念），
 /// 用途固定 static。同一網段同一位址已指派給其他介面時阻擋，須先取消再
 /// 重新指派（換介面即取消＋重新指派，見 CONTEXT.md／ADR-0005）。
+///
+/// 更新既有指派（同介面同位址）時不重驗出界／落池：網段編輯可能使既有
+/// 位址出界或落池，該情形以語意衝突標記呈現、不阻擋儲存（見 ADR-0006、票 07）。
 pub async fn assign(
     pool: &SqlitePool,
     subnet: &Subnet,
     address: IpAddr,
     valid: ValidAssignment,
 ) -> Result<Assignment, ApiError> {
-    validate_address(subnet, address, valid.purpose)?;
-
-    let interface = interfaces::get(pool, valid.interface_id)
-        .await
-        .map_err(|error| ApiError::internal("讀取介面失敗", error))?
-        .ok_or_else(|| ApiError::validation("找不到介面").field("interface_id"))?;
-
-    if valid.purpose == "reservation" && interface.mac.is_none() {
-        return Err(
-            ApiError::validation("保留需介面有 MAC；無 MAC 的介面僅能手動設定")
-                .field("purpose")
-                .detail("interface_id", json!(interface.id)),
-        );
-    }
-
     let address_text = address.to_string();
 
     let existing_address = fetch_by_address(pool, subnet.id, &address_text)
@@ -218,6 +207,22 @@ pub async fn assign(
                 .field("address")
                 .detail("interface_id", json!(existing.interface_id)));
         }
+    }
+
+    // 同介面同位址＝更新：出界／落池為語意衝突，交由標記呈現（見票 07）。
+    validate_address(subnet, address, valid.purpose, existing_address.is_some())?;
+
+    let interface = interfaces::get(pool, valid.interface_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面失敗", error))?
+        .ok_or_else(|| ApiError::validation("找不到介面").field("interface_id"))?;
+
+    if valid.purpose == "reservation" && interface.mac.is_none() {
+        return Err(
+            ApiError::validation("保留需介面有 MAC；無 MAC 的介面僅能手動設定")
+                .field("purpose")
+                .detail("interface_id", json!(interface.id)),
+        );
     }
 
     if let Some(existing) = fetch_by_interface(pool, subnet.id, valid.interface_id)
@@ -283,30 +288,40 @@ pub async fn cancel(pool: &SqlitePool, subnet_id: i64, address: IpAddr) -> sqlx:
 
 /// 位址結構驗證：地址族須與網段相符、落在 CIDR 內（v4 另扣 network/broadcast
 /// 與 pool）；v6 用途固定 static（見 spec §2.4、§7）。
-fn validate_address(subnet: &Subnet, address: IpAddr, purpose: &str) -> Result<(), ApiError> {
+///
+/// `existing`＝同介面同位址的更新：出界／落池為語意衝突（網段編輯造成），
+/// 不重驗、由標記呈現（見 ADR-0006、票 07）；地址族與 v6 用途仍為結構規則。
+fn validate_address(
+    subnet: &Subnet,
+    address: IpAddr,
+    purpose: &str,
+    existing: bool,
+) -> Result<(), ApiError> {
     let network = parse_network(&subnet.cidr)?;
 
     match (network, address) {
         (IpNet::V4(network), IpAddr::V4(address)) => {
-            let range = HostRange::of(&network);
-            if !range.contains(address) {
-                return Err(ApiError::validation(format!(
-                    "位址 {address} 不在網段 {} 的可用範圍內（network/broadcast 不可指派）",
-                    subnet.cidr
-                ))
-                .field("address")
-                .detail("cidr", json!(subnet.cidr)));
-            }
+            if !existing {
+                let range = HostRange::of(&network);
+                if !range.contains(address) {
+                    return Err(ApiError::validation(format!(
+                        "位址 {address} 不在網段 {} 的可用範圍內（network/broadcast 不可指派）",
+                        subnet.cidr
+                    ))
+                    .field("address")
+                    .detail("cidr", json!(subnet.cidr)));
+                }
 
-            if is_in_pool(subnet, address)? {
-                return Err(ApiError::validation(format!(
-                    "位址 {address} 落在 DHCP 位址池內，不可指派"
-                ))
-                .field("address"));
+                if is_in_pool(subnet, address)? {
+                    return Err(ApiError::validation(format!(
+                        "位址 {address} 落在 DHCP 位址池內，不可指派"
+                    ))
+                    .field("address"));
+                }
             }
         }
         (IpNet::V6(network), IpAddr::V6(address)) => {
-            if !network.contains(&address) {
+            if !existing && !network.contains(&address) {
                 return Err(ApiError::validation(format!(
                     "位址 {address} 不在網段 {} 內",
                     subnet.cidr

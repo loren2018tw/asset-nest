@@ -24,12 +24,18 @@ export interface Subnet {
   updated_at: string;
 }
 
-/** 列表摘要：名稱、CIDR、地址族（已用／總數／衝突數見票 07）。 */
+/** 列表摘要：名稱、CIDR、地址族與統計（見 spec §2.3、票 07）。 */
 export interface SubnetSummary {
   id: number;
   cidr: string;
   name: string | null;
   family: AddressFamily;
+  /** 已用：static＋reservation 指派數（v6 即已登錄數）。 */
+  used: number;
+  /** 總數：v4 為 host 數（扣 network/broadcast）；v6 為已登錄數。 */
+  total: number;
+  /** 衝突數：命中至少一條語意規則的指派筆數。 */
+  conflicts: number;
 }
 
 /** pool 輸入（僅 IPv4）。 */

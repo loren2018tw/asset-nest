@@ -37,6 +37,27 @@
           {{ props.value === "ipv4" ? "IPv4" : "IPv6" }}
         </q-td>
       </template>
+      <template #body-cell-usage="props">
+        <q-td :props="props">
+          {{
+            props.row.family === "ipv6"
+              ? `已登錄 ${props.row.used}`
+              : `${props.row.used} / ${props.row.total}`
+          }}
+        </q-td>
+      </template>
+      <template #body-cell-conflicts="props">
+        <q-td :props="props">
+          <q-badge
+            v-if="props.row.conflicts > 0"
+            color="warning"
+            text-color="black"
+          >
+            {{ props.row.conflicts }}
+          </q-badge>
+          <span v-else class="text-grey-6">0</span>
+        </q-td>
+      </template>
       <template #body-cell-actions="props">
         <q-td :props="props" class="text-right">
           <q-btn
@@ -96,6 +117,8 @@ const columns: QTableProps["columns"] = [
   { name: "name", label: "名稱", field: "name", align: "left" },
   { name: "cidr", label: "CIDR", field: "cidr", align: "left" },
   { name: "family", label: "地址族", field: "family", align: "left" },
+  { name: "usage", label: "已用／總數", field: "used", align: "left" },
+  { name: "conflicts", label: "衝突數", field: "conflicts", align: "left" },
   { name: "actions", label: "操作", field: "id", align: "right" }
 ];
 

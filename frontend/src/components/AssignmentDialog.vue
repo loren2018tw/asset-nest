@@ -544,12 +544,15 @@ async function submit() {
 
   saving.value = true;
   try {
-    await assignIp(props.subnetId, address.value, {
+    const saved = await assignIp(props.subnetId, address.value, {
       interface_id: interfaceId,
       purpose: purpose.value,
       hostname:
         purpose.value === "reservation" ? textOrNull(hostname.value) : null
     });
+    for (const warning of saved.warnings) {
+      $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
+    }
     $q.notify({
       type: "positive",
       message: isEdit.value ? "已更新指派" : "已指派"
@@ -577,10 +580,13 @@ async function submitRegistry() {
 
   saving.value = true;
   try {
-    await registerIp(props.subnetId, {
+    const saved = await registerIp(props.subnetId, {
       address: text,
       interface_id: selectedInterfaceId.value
     });
+    for (const warning of saved.warnings) {
+      $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
+    }
     $q.notify({ type: "positive", message: "已登錄並指派" });
     emit("saved");
     open.value = false;

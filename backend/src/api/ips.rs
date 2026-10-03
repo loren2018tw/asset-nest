@@ -2,7 +2,7 @@
 //!
 //! v4 提供清單與指派／改用途、取消指派；v6（票 06）為登錄制：
 //! `POST /subnets/{id}/ips` 新增即指派，清單僅列登錄位址，指派端點限 static。
-//! 衝突標記（票 07）後續擴充。
+//! 衝突標記（票 07）由 `GET` 列徽章與儲存回應的 `warnings` 呈現（見 ADR-0006）。
 
 use std::net::IpAddr;
 
@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment, AssignmentInput, RegisterInput};
+use crate::conflicts;
+use crate::interfaces::Warning;
 use crate::ips::{self, IpEntry, IpFilter, IpStatusFilter};
 use crate::subnets;
 
@@ -50,6 +52,34 @@ struct IpPage {
     total: u64,
     page: i64,
     per_page: i64,
+}
+
+/// 指派儲存回應：指派欄位攤平，加上不阻擋的語意警示（見 ADR-0006）。
+#[derive(Debug, Serialize)]
+struct AssignmentResponse {
+    #[serde(flatten)]
+    assignment: Assignment,
+    warnings: Vec<Warning>,
+}
+
+/// 建立指派儲存回應：重新偵測該網段衝突並附上警示（僅提示、不阻擋）。
+///
+/// 每次儲存即時重算：新增保留可能使既有保留也命中 DuplicateHwAddress；
+/// 取消指派後的下一次讀取亦同（見票 07）。
+async fn respond_with_warnings(
+    state: &AppState,
+    subnet: &subnets::Subnet,
+    assignment: Assignment,
+) -> Result<Json<AssignmentResponse>, ApiError> {
+    let listed = assignments::list_for_subnet(&state.db, subnet.id)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
+    let warnings = conflicts::warnings_for(subnet, &listed, &assignment.address)?;
+
+    Ok(Json(AssignmentResponse {
+        assignment,
+        warnings,
+    }))
 }
 
 async fn list_subnet_ips(
@@ -111,7 +141,7 @@ async fn post_subnet_ip(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
     payload: Result<Json<RegisterInput>, JsonRejection>,
-) -> Result<(StatusCode, Json<Assignment>), ApiError> {
+) -> Result<(StatusCode, Json<AssignmentResponse>), ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
     let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
 
@@ -122,8 +152,9 @@ async fn post_subnet_ip(
 
     let (address, interface_id) = input.validate()?;
     let assignment = assignments::register(&state.db, &subnet, address, interface_id).await?;
+    let response = respond_with_warnings(&state, &subnet, assignment).await?;
 
-    Ok((StatusCode::CREATED, Json(assignment)))
+    Ok((StatusCode::CREATED, response))
 }
 
 /// 指派或改用途（含 hostname）；結構錯誤回 400＋明確 `details`。
@@ -131,7 +162,7 @@ async fn put_assignment(
     State(state): State<AppState>,
     path: Result<Path<(i64, String)>, PathRejection>,
     payload: Result<Json<AssignmentInput>, JsonRejection>,
-) -> Result<Json<Assignment>, ApiError> {
+) -> Result<Json<AssignmentResponse>, ApiError> {
     let Path((id, address)) = path.map_err(|_| ApiError::validation("路徑參數格式錯誤"))?;
     let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
 
@@ -145,10 +176,13 @@ async fn put_assignment(
 
     let assignment = assignments::assign(&state.db, &subnet, address, valid).await?;
 
-    Ok(Json(assignment))
+    respond_with_warnings(&state, &subnet, assignment).await
 }
 
 /// 取消指派；不存在回 404。
+///
+/// 回應維持 204；其他列的衝突（如 DuplicateHwAddress）於下一次讀取時
+/// 即時重算、自然消失（見票 07）。
 async fn delete_assignment(
     State(state): State<AppState>,
     path: Result<Path<(i64, String)>, PathRejection>,

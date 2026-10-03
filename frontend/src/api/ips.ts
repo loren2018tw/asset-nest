@@ -1,4 +1,5 @@
 import { apiDelete, apiGet, apiPost, apiPut } from "@/api/client";
+import type { Warning } from "@/api/interfaces";
 
 /** IP 狀態：可用、池內、手動設定（static）或保留（reservation）。 */
 export type IpStatus = "available" | "in_pool" | "static" | "reservation";
@@ -29,7 +30,8 @@ export interface IpEntry {
   purpose: IpPurpose | null;
   /** 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 null。 */
   assignment: IpAssignmentTarget | null;
-  /** 衝突標記；票 07 實作，本票恆為空。 */
+  /** 衝突標記：命中的語意規則代碼（IpInPool／IpOutOfSubnet／DuplicateHwAddress；
+   *  僅標記、不阻擋，見 ADR-0006）。 */
   conflicts: string[];
 }
 
@@ -43,6 +45,11 @@ export interface Assignment {
   hostname: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 指派儲存結果：指派欄位＋不阻擋的語意警示（見 ADR-0006，沿用票 02 機制）。 */
+export interface AssignmentSaved extends Assignment {
+  warnings: Warning[];
 }
 
 /** 指派／改用途的輸入。 */
@@ -98,17 +105,18 @@ export function listSubnetIps(
 export function registerIp(
   subnetId: number,
   input: RegistryInput
-): Promise<Assignment> {
-  return apiPost<Assignment>(`/api/v1/subnets/${subnetId}/ips`, input);
+): Promise<AssignmentSaved> {
+  return apiPost<AssignmentSaved>(`/api/v1/subnets/${subnetId}/ips`, input);
 }
 
-/** 指派或改用途（含 hostname）；結構錯誤由後端回 400 與明確訊息。 */
+/** 指派或改用途（含 hostname）；結構錯誤由後端回 400 與明確訊息，
+ *  語意衝突由回應 `warnings` 提示、不阻擋儲存。 */
 export function assignIp(
   subnetId: number,
   address: string,
   input: AssignmentInput
-): Promise<Assignment> {
-  return apiPut<Assignment>(
+): Promise<AssignmentSaved> {
+  return apiPut<AssignmentSaved>(
     `/api/v1/subnets/${subnetId}/ips/${encodeURIComponent(address)}/assignment`,
     input
   );

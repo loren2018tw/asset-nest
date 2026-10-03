@@ -106,6 +106,23 @@
           <span v-else class="text-grey-6">—</span>
         </q-td>
       </template>
+      <template #body-cell-conflicts="props">
+        <q-td :props="props">
+          <template v-if="props.row.conflicts.length > 0">
+            <q-badge
+              v-for="code in props.row.conflicts"
+              :key="code"
+              color="warning"
+              text-color="black"
+              class="q-mr-xs"
+            >
+              {{ conflictLabel(code) }}
+              <q-tooltip>{{ conflictHint(code) }}</q-tooltip>
+            </q-badge>
+          </template>
+          <span v-else class="text-grey-6">—</span>
+        </q-td>
+      </template>
       <template #body-cell-actions="props">
         <q-td :props="props" class="text-right">
           <!-- 池內且未指派：不可指派（見 spec §7） -->
@@ -222,8 +239,33 @@ const columns: QTableProps["columns"] = [
   },
   { name: "status", label: "狀態／用途", field: "status", align: "left" },
   { name: "assignment", label: "指派對象", field: "address", align: "left" },
+  { name: "conflicts", label: "衝突", field: "conflicts", align: "left" },
   { name: "actions", label: "操作", field: "address", align: "right" }
 ];
+
+/** 衝突規則代碼的中文標籤與說明（僅提示、不阻擋，見 ADR-0006）。 */
+const conflictInfo: Record<string, { label: string; hint: string }> = {
+  IpInPool: {
+    label: "池內",
+    hint: "指派的位址落在 DHCP 位址池內（僅提示，不阻擋）"
+  },
+  IpOutOfSubnet: {
+    label: "出界",
+    hint: "指派的位址不在網段 CIDR 內（僅提示，不阻擋）"
+  },
+  DuplicateHwAddress: {
+    label: "MAC 重複",
+    hint: "同一 MAC 在同一網段出現多筆保留（僅提示，不阻擋）"
+  }
+};
+
+function conflictLabel(code: string): string {
+  return conflictInfo[code]?.label ?? code;
+}
+
+function conflictHint(code: string): string {
+  return conflictInfo[code]?.hint ?? "語意衝突（僅提示，不阻擋）";
+}
 
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);

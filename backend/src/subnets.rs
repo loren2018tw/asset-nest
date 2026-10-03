@@ -12,6 +12,9 @@ use sqlx::{FromRow, SqlitePool};
 
 use crate::api::ApiError;
 use crate::assets::{double_option, optional_text};
+use crate::assignments;
+use crate::conflicts;
+use crate::ips::HostRange;
 
 /// `subnets` 資料表完整欄位清單。
 const COLUMNS: &str = "id, cidr, name, note, gateway, kea_subnet_id, created_at, updated_at";
@@ -60,7 +63,7 @@ pub struct Subnet {
     pub updated_at: String,
 }
 
-/// 列表摘要：名稱、CIDR 與地址族（已用／總數／衝突數見票 07）。
+/// 列表摘要：名稱、CIDR、地址族與統計（見 spec §2.3、票 07）。
 #[derive(Debug, Serialize)]
 pub struct SubnetSummary {
     pub id: i64,
@@ -68,6 +71,14 @@ pub struct SubnetSummary {
     pub name: Option<String>,
     /// `ipv4` 或 `ipv6`。
     pub family: &'static str,
+    /// 已用：static＋reservation 指派數（v6 即已登錄數）。
+    pub used: u64,
+    /// 總數：v4 為 host 數（扣 network/broadcast；`/31`、`/32` 全列）；
+    /// v6 為已登錄數（= `used`，UI 顯示為「已登錄 N」）。
+    pub total: u64,
+    /// 衝突數：命中至少一條語意規則的指派筆數（同一筆命中多條規則仍計 1；
+    /// 見 [`crate::conflicts::detect`]）。
+    pub conflicts: u64,
 }
 
 /// 新增網段的 pool 輸入。
@@ -329,14 +340,49 @@ fn describe(cidr: &str, name: Option<&str>) -> String {
     }
 }
 
-/// 網段清單：依建立順序（id 升冪）。
-pub async fn list(pool: &SqlitePool) -> sqlx::Result<Vec<SubnetSummary>> {
+/// 網段清單：依建立順序（id 升冪），附已用／總數／衝突數統計（見票 07）。
+///
+/// 統計即時計算、無快取：逐網段讀取 pools 與指派並偵測衝突；網段編輯
+/// （縮小 CIDR、擴大 pool）或指派異動後，下一次讀取即反映最新結果。
+pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
     let rows =
         sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
             .fetch_all(pool)
-            .await?;
+            .await
+            .map_err(|error| ApiError::internal("讀取網段清單失敗", error))?;
 
-    Ok(rows.into_iter().map(SubnetRow::into_summary).collect())
+    let mut summaries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let pools = fetch_pools(pool, row.id)
+            .await
+            .map_err(|error| ApiError::internal("讀取網段 pools 失敗", error))?;
+        let subnet = row.into_subnet(pools);
+
+        let assignments = assignments::list_for_subnet(pool, subnet.id)
+            .await
+            .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
+        let used = assignments.len() as u64;
+        let conflicts = conflicts::detect(&subnet, &assignments)?.len() as u64;
+
+        let family = family_of(&subnet.cidr);
+        let total = match subnet.cidr.parse::<IpNet>() {
+            Ok(IpNet::V4(network)) => HostRange::of(&network).count(),
+            Ok(IpNet::V6(_)) => used,
+            Err(error) => return Err(ApiError::internal("網段 CIDR 格式錯誤", error)),
+        };
+
+        summaries.push(SubnetSummary {
+            id: subnet.id,
+            cidr: subnet.cidr,
+            name: subnet.name,
+            family,
+            used,
+            total,
+            conflicts,
+        });
+    }
+
+    Ok(summaries)
 }
 
 /// 讀取單一網段（含 pools）；不存在回傳 `None`。
@@ -459,16 +505,6 @@ async fn insert_pools(
 }
 
 impl SubnetRow {
-    fn into_summary(self) -> SubnetSummary {
-        let family = family_of(&self.cidr);
-        SubnetSummary {
-            id: self.id,
-            cidr: self.cidr,
-            name: self.name,
-            family,
-        }
-    }
-
     fn into_subnet(self, pools: Vec<Pool>) -> Subnet {
         Subnet {
             id: self.id,

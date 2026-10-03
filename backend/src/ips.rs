@@ -1,9 +1,10 @@
 //! IP 位址（IpAddress）領域模組：v4 位址枚舉、v6 登錄制清單、pool/gateway
-//! 標示與分頁瀏覽。
+//! 標示、衝突標記與分頁瀏覽。
 //!
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§4.3、§7。
 //! v4 位址由 Subnet 範圍伺服器端推導；v6 採登錄制，僅列出已指派（登錄）位址，
-//! 不枚舉空閒位址。指派為票 05、v6 登錄制為票 06、衝突標記為票 07。
+//! 不枚舉空閒位址。指派為票 05、v6 登錄制為票 06、衝突標記為票 07
+//! （偵測集中於 [`crate::conflicts`]）。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -13,6 +14,7 @@ use serde::Serialize;
 
 use crate::api::ApiError;
 use crate::assignments::{IpAssignment, ListedAssignment};
+use crate::conflicts;
 use crate::subnets::Subnet;
 
 /// v4 網段的 host 位址範圍；端點皆含。
@@ -137,14 +139,17 @@ pub struct IpEntry {
     pub purpose: Option<&'static str>,
     /// 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 `null`。
     pub assignment: Option<IpAssignment>,
-    /// 衝突標記；票 07 實作，本票恆為空。
+    /// 衝突標記：命中的語意規則代碼（見 [`crate::conflicts`]；
+    /// 依固定順序排列，僅標記、不阻擋）。
     pub conflicts: Vec<&'static str>,
 }
 
 /// 由網段推導一頁 IP 列；回傳（當頁列、符合總數）。
 ///
-/// v4 枚舉全部 host 位址；v6 為登錄制，僅列出已指派（登錄）位址。
-/// 搜尋、狀態篩選與分頁皆為伺服器端。`assignments` 為該網段的指派列（見票 05）。
+/// v4 枚舉全部 host 位址，並聯集出界指派列（網段縮小造成；見票 07）；
+/// v6 為登錄制，僅列出已指派（登錄）位址。
+/// 搜尋、狀態篩選與分頁皆為伺服器端。`assignments` 為該網段的指派列（見票 05）；
+/// 每列 `conflicts` 由 [`crate::conflicts`] 即時偵測填入。
 pub fn list(
     subnet: &Subnet,
     filter: &IpFilter,
@@ -169,16 +174,29 @@ fn list_v4(
     let pools = parse_pools(subnet)?;
     let gateway = parse_gateway_v4(subnet.gateway.as_deref())?;
     let range = HostRange::of(network);
+    let conflicts = conflicts::by_address(subnet, assignments)?;
 
     // 指派資料以位址文字索引；用途經資料庫 CHECK 驗證，異常視為內部錯誤。
     let mut by_address: HashMap<&str, &ListedAssignment> =
         HashMap::with_capacity(assignments.len());
+    // 出界指派（如網段縮小造成）：不在 host 範圍仍須出現於清單（見票 07），
+    // 以「host 範圍列 ∪ 指派列」呈現，並由衝突標記說明。
+    let mut extras: Vec<Ipv4Addr> = Vec::new();
     for assignment in assignments {
         if assignment.purpose != "static" && assignment.purpose != "reservation" {
             return Err(ApiError::internal("指派用途資料異常", &assignment.purpose));
         }
         by_address.insert(&assignment.address, assignment);
+
+        let address: Ipv4Addr = assignment
+            .address
+            .parse()
+            .map_err(|error| ApiError::internal("指派位址格式錯誤", error))?;
+        if !range.contains(address) {
+            extras.push(address);
+        }
     }
+    extras.sort_unstable();
 
     let per_page = u64::try_from(filter.per_page).unwrap_or(1).max(1);
     let offset = u64::try_from(filter.page.max(1) - 1)
@@ -190,9 +208,10 @@ fn list_v4(
     if filter.status.is_none() {
         if let Some(q) = query {
             if let Ok(exact) = q.parse::<Ipv4Addr>() {
-                let total = u64::from(range.contains(exact));
+                let total =
+                    u64::from(range.contains(exact) || extras.binary_search(&exact).is_ok());
                 let items = if offset == 0 && total == 1 {
-                    vec![entry_v4(exact, &pools, gateway, &by_address)]
+                    vec![entry_v4(exact, &pools, gateway, &by_address, &conflicts)]
                 } else {
                     Vec::new()
                 };
@@ -201,42 +220,89 @@ fn list_v4(
         }
     }
 
-    // 無條件：以算術位移取得當頁（比照票 04）。
-    if query.is_none() && filter.status.is_none() {
+    // 無條件且無出界列：以算術位移取得當頁（比照票 04）。
+    if query.is_none() && filter.status.is_none() && extras.is_empty() {
         let total = range.count();
         let end = offset.saturating_add(per_page).min(total);
         let items = (offset..end)
             .filter_map(|index| range.nth(index))
-            .map(|address| entry_v4(address, &pools, gateway, &by_address))
+            .map(|address| entry_v4(address, &pools, gateway, &by_address, &conflicts))
             .collect();
         return Ok((items, total));
     }
 
-    // 一般情況：線性掃描位址並依關鍵字／狀態過濾；極大前綴成本較高，
-    // 實務網段規模（/16–/32）可忽略（見票 04 註記）。
-    let query_lower = query.map(str::to_lowercase);
-    let mut total: u64 = 0;
-    let mut items = Vec::new();
+    // 一般情況：線性掃描位址並依關鍵字／狀態過濾，出界指派列以數值順序合併；
+    // 極大前綴成本較高，實務網段規模（/16–/32）可忽略（見票 04 註記）。
+    let mut scanner = V4Scanner {
+        pools: &pools,
+        gateway,
+        assignments: &by_address,
+        conflicts: &conflicts,
+        status: filter.status,
+        query_lower: query.map(str::to_lowercase),
+        offset,
+        per_page,
+        total: 0,
+        items: Vec::new(),
+    };
+    let mut extras_iter = extras.iter().peekable();
     for address in range.iter() {
-        let text = address.to_string();
-        let assignment = by_address.get(text.as_str()).copied();
-        if let Some(status) = filter.status {
-            if status_of(&pools, address, assignment) != status.as_str() {
-                continue;
+        while extras_iter.peek().is_some_and(|extra| **extra < address) {
+            if let Some(extra) = extras_iter.next() {
+                scanner.consider(*extra);
             }
         }
-        if let Some(query) = &query_lower {
-            if !matches_query(assignment, &text, query) {
-                continue;
-            }
-        }
-        if total >= offset && (items.len() as u64) < per_page {
-            items.push(entry_v4(address, &pools, gateway, &by_address));
-        }
-        total += 1;
+        scanner.consider(address);
+    }
+    for extra in extras_iter {
+        scanner.consider(*extra);
     }
 
-    Ok((items, total))
+    Ok((scanner.items, scanner.total))
+}
+
+/// v4 清單掃描：合併 host 範圍與出界指派列，依序套用篩選與分頁。
+struct V4Scanner<'a> {
+    pools: &'a [PoolRange],
+    gateway: Option<Ipv4Addr>,
+    assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
+    conflicts: &'a HashMap<String, Vec<&'static str>>,
+    status: Option<IpStatusFilter>,
+    query_lower: Option<String>,
+    offset: u64,
+    per_page: u64,
+    total: u64,
+    items: Vec<IpEntry>,
+}
+
+impl V4Scanner<'_> {
+    /// 考慮一個位址：符合篩選時計入總數，並在當頁範圍內收列。
+    fn consider(&mut self, address: Ipv4Addr) {
+        let text = address.to_string();
+        let assignment = self.assignments.get(text.as_str()).copied();
+
+        if let Some(status) = self.status {
+            if status_of(self.pools, address, assignment) != status.as_str() {
+                return;
+            }
+        }
+        if let Some(query) = &self.query_lower {
+            if !matches_query(assignment, &text, query) {
+                return;
+            }
+        }
+
+        if self.total >= self.offset && (self.items.len() as u64) < self.per_page {
+            self.items.push(entry_v4(
+                address,
+                self.pools,
+                self.gateway,
+                self.assignments,
+                self.conflicts,
+            ));
+        }
+        self.total += 1;
+    }
 }
 
 /// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool 內為「可用」。
@@ -245,9 +311,11 @@ fn entry_v4(
     pools: &[PoolRange],
     gateway: Option<Ipv4Addr>,
     assignments: &HashMap<&str, &ListedAssignment>,
+    conflicts: &HashMap<String, Vec<&'static str>>,
 ) -> IpEntry {
     let in_pool = pools.iter().any(|pool| pool.contains(address));
-    let assignment = assignments.get(address.to_string().as_str()).copied();
+    let text = address.to_string();
+    let assignment = assignments.get(text.as_str()).copied();
     IpEntry {
         address: IpAddr::V4(address),
         in_pool,
@@ -255,7 +323,10 @@ fn entry_v4(
         status: status_of(pools, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
-        conflicts: Vec::new(),
+        conflicts: assignment
+            .and_then(|item| conflicts.get(&item.address))
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -264,13 +335,14 @@ fn entry_v4(
 /// 列以數值（u128）升冪排序；支援關鍵字與狀態篩選、伺服器端分頁。
 /// 狀態恆為 `static`（v6 用途固定手動）；`available`、`in_pool`、
 /// `reservation` 篩選皆回空集合。登錄位址即使因網段縮小而出界仍會列出，
-/// 衝突標記由票 07 以 IpOutOfSubnet 呈現。
+/// 並以 IpOutOfSubnet 衝突標記呈現（見票 06、07）。
 fn list_v6(
     subnet: &Subnet,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
     let gateway = parse_gateway_v6(subnet.gateway.as_deref())?;
+    let conflicts = conflicts::by_address(subnet, assignments)?;
 
     // 指派資料即登錄清單；用途經資料庫 CHECK 驗證，v6 恆為 static，
     // 異常（如直接寫入 reservation）視為內部錯誤。
@@ -319,7 +391,7 @@ fn list_v6(
             }
         }
         if total >= offset && (items.len() as u64) < per_page {
-            items.push(entry_v6(address, gateway, assignment));
+            items.push(entry_v6(address, gateway, assignment, &conflicts));
         }
         total += 1;
     }
@@ -332,6 +404,7 @@ fn entry_v6(
     address: Ipv6Addr,
     gateway: Option<Ipv6Addr>,
     assignment: &ListedAssignment,
+    conflicts: &HashMap<String, Vec<&'static str>>,
 ) -> IpEntry {
     IpEntry {
         address: IpAddr::V6(address),
@@ -340,7 +413,10 @@ fn entry_v6(
         status: "static",
         purpose: Some("static"),
         assignment: Some(assignment.target()),
-        conflicts: Vec::new(),
+        conflicts: conflicts
+            .get(&assignment.address)
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -598,7 +674,7 @@ mod tests {
         assert!(!entry("10.0.0.2").is_gateway);
         assert_eq!(entry("10.0.0.2").status, "in_pool");
         assert_eq!(entry("10.0.0.2").purpose, None, "票 05 前無指派用途");
-        assert!(entry("10.0.0.2").conflicts.is_empty(), "票 07 前無衝突");
+        assert!(entry("10.0.0.2").conflicts.is_empty(), "無指派不標記衝突");
 
         assert_eq!(entry("10.0.0.4").status, "available");
     }
@@ -642,7 +718,7 @@ mod tests {
 
     #[test]
     fn assigned_rows_report_status_and_target() {
-        // .6 落在 pool 內卻已指派：狀態以用途為準、仍標示池內（衝突標記見票 07）。
+        // .6 落在 pool 內卻已指派：狀態以用途為準、仍標示池內（衝突標記 IpInPool）。
         let subnet = subnet("10.0.0.0/29", None, &[("10.0.0.6", "10.0.0.6")]);
         let assignments = [
             listed("10.0.0.1", "static", "資料庫主機", Some("eth0"), None),
@@ -692,12 +768,17 @@ mod tests {
         let in_pool_assigned = entry("10.0.0.6");
         assert!(in_pool_assigned.in_pool);
         assert_eq!(in_pool_assigned.status, "static", "已指派以用途為狀態");
+        assert_eq!(
+            in_pool_assigned.conflicts,
+            vec!["IpInPool"],
+            "指派落在 pool 內：標記衝突（見票 07）"
+        );
 
         let available = entry("10.0.0.3");
         assert_eq!(available.status, "available");
         assert_eq!(available.purpose, None);
         assert!(available.assignment.is_none());
-        assert!(available.conflicts.is_empty(), "票 07 前無衝突");
+        assert!(available.conflicts.is_empty(), "無指派不標記衝突");
     }
 
     #[test]
@@ -841,7 +922,7 @@ mod tests {
                 .asset_description,
             "閘道"
         );
-        assert!(first.conflicts.is_empty(), "票 07 前無衝突");
+        assert!(first.conflicts.is_empty(), "網段內登錄位址無衝突");
 
         // 無登錄：空清單（不枚舉空閒位址）
         let (items, total) = list(&subnet, &filter(None, 1, 50), &[]).expect("推導成功");
@@ -915,7 +996,7 @@ mod tests {
 
     #[test]
     fn v6_list_keeps_out_of_subnet_registered_addresses() {
-        // 網段縮小造成既有登錄位址出界：仍列出（衝突標記見票 07）
+        // 網段縮小造成既有登錄位址出界：仍列出並標記 IpOutOfSubnet（見票 07）
         let subnet = subnet("fd00:0:0:1::/64", None, &[]);
         let assignments = [
             listed("fd00:0:0:1::5", "static", "主機", Some("eth0"), None),
@@ -925,6 +1006,102 @@ mod tests {
         let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
         assert_eq!(total, 2);
         assert_eq!(addresses(&items), ["fd00::5", "fd00:0:0:1::5"]);
+        assert_eq!(
+            items[0].conflicts,
+            vec!["IpOutOfSubnet"],
+            "出界登錄位址標記衝突"
+        );
+        assert!(items[1].conflicts.is_empty(), "網段內登錄位址無衝突");
+    }
+
+    #[test]
+    fn v4_list_keeps_out_of_subnet_assignments_in_numeric_order() {
+        // /25（126 個 host）聯集一筆 /24 時代的出界指派（.200）：總數 127。
+        let subnet = subnet("10.0.0.0/25", None, &[]);
+        let assignments = [listed(
+            "10.0.0.200",
+            "static",
+            "出界主機",
+            Some("eth0"),
+            None,
+        )];
+
+        // 無條件：出界列排在數值順序位置（第 127 筆）
+        let (items, total) = list(&subnet, &filter(None, 3, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 127);
+        assert_eq!(items.len(), 27, "第 3 頁：host 101–126 與出界列");
+        assert_eq!(items[26].address, addr("10.0.0.200"));
+        assert_eq!(items[26].conflicts, vec!["IpOutOfSubnet"]);
+        assert_eq!(items[26].status, "static");
+        assert_eq!(
+            items[26]
+                .assignment
+                .as_ref()
+                .expect("含指派對象")
+                .asset_description,
+            "出界主機"
+        );
+
+        // 完整位址精確比對涵蓋出界列
+        let (items, total) =
+            list(&subnet, &filter(Some("10.0.0.200"), 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.200"]);
+
+        // 狀態篩選涵蓋出界列
+        let (items, total) = list(
+            &subnet,
+            &status_filter(IpStatusFilter::Static),
+            &assignments,
+        )
+        .expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.200"]);
+
+        let (_, total) = list(
+            &subnet,
+            &status_filter(IpStatusFilter::Available),
+            &assignments,
+        )
+        .expect("推導成功");
+        assert_eq!(total, 126, "可用列仍為 host 數");
+
+        // 關鍵字子字串比對涵蓋出界列
+        let (items, total) =
+            list(&subnet, &filter(Some("出界"), 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.200"]);
+    }
+
+    #[test]
+    fn v4_list_marks_assignment_in_pool_and_out_of_subnet() {
+        // 網段縮小且 pool 涵蓋出界位址：兩條規則並存（見 conflicts 固定順序）。
+        let subnet = subnet("10.0.0.128/25", None, &[("10.0.0.130", "10.0.0.200")]);
+        let assignments = [
+            listed("10.0.0.5", "static", "出界主機", Some("eth0"), None),
+            listed("10.0.0.150", "static", "池內主機", Some("eth1"), None),
+        ];
+
+        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 127, "126 個 host 加 1 筆出界列");
+
+        let entry = |address: &str| {
+            items
+                .iter()
+                .find(|entry| entry.address == addr(address))
+                .expect("位址存在")
+        };
+
+        assert_eq!(
+            entry("10.0.0.5").conflicts,
+            vec!["IpOutOfSubnet"],
+            "出界且不在 pool 內"
+        );
+        assert_eq!(
+            entry("10.0.0.150").conflicts,
+            vec!["IpInPool"],
+            "在 pool 內"
+        );
     }
 
     #[test]
