@@ -91,6 +91,14 @@ async fn delete_subnet(
 ) -> Result<StatusCode, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
 
+    let subnet = subnets::get(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
+
+    // 非空網段不可刪除（含保留與 v6 登錄；見 spec §2.3、票 08）。
+    subnets::ensure_deletable(&state.db, &subnet).await?;
+
     let deleted = subnets::delete(&state.db, id)
         .await
         .map_err(|error| ApiError::internal("刪除網段失敗", error))?;

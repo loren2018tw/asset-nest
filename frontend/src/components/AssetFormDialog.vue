@@ -520,9 +520,16 @@ function confirmRemoveInterface(row: InterfaceDraft) {
         ? row.mac.trim()
         : "未命名介面";
 
+  // 連動影響：已儲存介面可能已有指派（含保留；見 spec §2.2、票 08）。
+  const affected =
+    row.id === null
+      ? 0
+      : assignments.value.filter(item => item.interface_id === row.id).length;
+  const impact = affected > 0 ? `將連動刪除 ${affected} 筆指派。` : "";
+
   $q.dialog({
     title: "刪除介面",
-    message: `確定要刪除介面「${label}」？${
+    message: `確定要刪除介面「${label}」？${impact}${
       row.id === null ? "（尚未儲存）" : "儲存後才會生效。"
     }`,
     cancel: true,

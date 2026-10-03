@@ -185,7 +185,7 @@ pub async fn update(
     Ok(fetch_row(pool, id).await?.map(InterfaceRow::into_interface))
 }
 
-/// 刪除介面；回傳是否確實刪除（指派連動刪除見 spec §2.2）。
+/// 刪除介面；回傳是否確實刪除（指派由外鍵連動刪除，見 spec §2.2、票 08）。
 pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     let result = sqlx::query("DELETE FROM interfaces WHERE id = ?")
         .bind(id)

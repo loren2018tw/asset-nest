@@ -451,7 +451,27 @@ pub async fn update(
     get(pool, id).await
 }
 
-/// 刪除網段；pools 連動刪除（有指派時的防護見票 08）。
+/// 刪除前防護：有任何指派或保留（v4／v6）即不可刪除（見 spec §2.3、§3.1）。
+///
+/// 回應 409 `conflict`，`details.assignments` 附指派筆數（含保留），
+/// 供前端顯示明確錯誤（見票 08）。
+pub async fn ensure_deletable(pool: &SqlitePool, subnet: &Subnet) -> Result<(), ApiError> {
+    let count = assignments::count_for_subnet(pool, subnet.id)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派筆數失敗", error))?;
+
+    if count > 0 {
+        return Err(ApiError::conflict(format!(
+            "網段{}尚有 {count} 筆指派（含保留），不可刪除；請先取消所有指派",
+            describe(&subnet.cidr, subnet.name.as_deref())
+        ))
+        .detail("assignments", json!(count)));
+    }
+
+    Ok(())
+}
+
+/// 刪除網段；pools 連動刪除。有指派時呼叫端須先經 [`ensure_deletable`] 阻擋。
 pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     let result = sqlx::query("DELETE FROM subnets WHERE id = ?")
         .bind(id)

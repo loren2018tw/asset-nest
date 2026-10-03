@@ -286,7 +286,7 @@ pub async fn update(pool: &SqlitePool, id: i64, patch: ValidPatch) -> sqlx::Resu
         .map(|row| row.into_asset(today())))
 }
 
-/// 刪除資產；回傳是否確實刪除（後續票補上連動刪除與影響數量，見票 08）。
+/// 刪除資產；介面與指派由外鍵連動刪除（確認數量由前端讀詳情計算，見票 08）。
 pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     let result = sqlx::query("DELETE FROM assets WHERE id = ?")
         .bind(id)

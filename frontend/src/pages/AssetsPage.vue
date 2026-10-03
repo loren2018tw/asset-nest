@@ -108,10 +108,12 @@ import { onMounted, ref } from "vue";
 
 import {
   deleteAsset,
+  fetchAsset,
   fetchBrands,
   fetchLocations,
   listAssets,
-  type Asset
+  type Asset,
+  type AssetDetail
 } from "@/api/assets";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 
@@ -221,9 +223,30 @@ function onSaved() {
 }
 
 function confirmDelete(asset: Asset) {
+  void confirmDeleteWithImpact(asset);
+}
+
+/** 先讀取連動影響數量（介面、指派、其中保留）再顯示確認；讀取失敗不進入刪除流程。 */
+async function confirmDeleteWithImpact(asset: Asset) {
+  let detail: AssetDetail;
+  try {
+    detail = await fetchAsset(asset.id);
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+    return;
+  }
+
+  const interfaceCount = detail.interfaces.length;
+  const assignmentCount = detail.assignments.length;
+  const reservationCount = detail.assignments.filter(
+    item => item.purpose === "reservation"
+  ).length;
+
   $q.dialog({
     title: "刪除資產",
-    message: `確定要刪除「${asset.description}」？`,
+    message:
+      `將刪除 ${interfaceCount} 個介面、${assignmentCount} 筆指派` +
+      `（含 ${reservationCount} 筆保留）。確定要刪除「${asset.description}」？`,
     cancel: true,
     persistent: true
   }).onOk(() => {

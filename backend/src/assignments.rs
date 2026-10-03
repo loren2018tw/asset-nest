@@ -349,6 +349,14 @@ fn validate_address(
     Ok(())
 }
 
+/// 某網段的指派筆數（static＋reservation）；供網段刪除防護（見票 08）。
+pub async fn count_for_subnet(pool: &SqlitePool, subnet_id: i64) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM ip_assignments WHERE subnet_id = ?")
+        .bind(subnet_id)
+        .fetch_one(pool)
+        .await
+}
+
 /// 讀取某網段的全部指派（含資產與介面資訊），供 IP 清單合併。
 pub async fn list_for_subnet(
     pool: &SqlitePool,

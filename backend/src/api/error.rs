@@ -52,6 +52,11 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }
 
+    /// 409：與資源目前狀態衝突（如刪除非空網段）；請求本身合法（見票 08）。
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", message)
+    }
+
     /// 501：端點已存在，但此情境尚未實作。
     pub fn not_implemented(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", message)
