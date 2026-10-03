@@ -22,6 +22,16 @@
       <template #body-cell-name="props">
         <q-td :props="props">{{ props.value || "—" }}</q-td>
       </template>
+      <template #body-cell-cidr="props">
+        <q-td :props="props">
+          <router-link
+            class="text-primary"
+            :to="`/subnets/${props.row.id}/ips`"
+          >
+            {{ props.value }}
+          </router-link>
+        </q-td>
+      </template>
       <template #body-cell-family="props">
         <q-td :props="props">
           {{ props.value === "ipv4" ? "IPv4" : "IPv6" }}
@@ -29,6 +39,14 @@
       </template>
       <template #body-cell-actions="props">
         <q-td :props="props" class="text-right">
+          <q-btn
+            flat
+            dense
+            round
+            icon="format_list_numbered"
+            aria-label="IP 清單"
+            :to="`/subnets/${props.row.id}/ips`"
+          />
           <q-btn
             flat
             dense

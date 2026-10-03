@@ -31,7 +31,7 @@
           </q-item-section>
           <q-item-section> 資產管理 </q-item-section>
         </q-item>
-        <q-item clickable to="/ips" exact>
+        <q-item clickable to="/ips" :active="ipSection">
           <q-item-section avatar>
             <q-icon name="lan" />
           </q-item-section>
@@ -47,9 +47,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import { useRoute } from "vue-router";
+
+const route = useRoute();
 
 const leftDrawerOpen = ref(false);
+
+/** IP 管理區段：網段列表（/ips）與各網段的 IP 頁（/subnets/:id/ips）。 */
+const ipSection = computed(
+  () => route.path.startsWith("/ips") || route.path.startsWith("/subnets/")
+);
 
 function toggleLeftDrawer() {
   leftDrawerOpen.value = !leftDrawerOpen.value;

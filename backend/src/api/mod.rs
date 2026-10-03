@@ -10,6 +10,7 @@ use crate::AppState;
 mod assets;
 mod error;
 mod interfaces;
+mod ips;
 mod subnets;
 
 pub use error::ApiError;
@@ -32,6 +33,7 @@ mod v1 {
             .merge(super::assets::router())
             .merge(super::interfaces::router())
             .merge(super::subnets::router())
+            .merge(super::ips::router())
     }
 }
 
