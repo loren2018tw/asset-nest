@@ -272,27 +272,29 @@ async fn search_matches_exact_address_or_substring() {
 }
 
 #[tokio::test]
-async fn v6_subnet_returns_structured_error() {
+async fn v6_subnet_lists_no_free_addresses() {
     let pool = test_pool().await;
     let subnet = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
     let id = subnet["id"].as_i64().expect("回應含 id");
 
+    // v6 為登錄制（票 06）：尚無登錄時清單為空，不枚舉空閒位址
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(page["total"], 0);
+    assert_eq!(page["page"], 1);
+    assert_eq!(page["per_page"], 50);
+    assert!(addresses(&page).is_empty());
+
+    // 未知狀態值仍回 400
     let (status, body) = send(
         &pool,
         Method::GET,
-        &format!("/api/v1/subnets/{id}/ips"),
+        &format!("/api/v1/subnets/{id}/ips?status=dhcp"),
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "v6 尚未支援（票 06）");
-    assert_eq!(body["error"], "not_implemented");
-    assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("IPv6")),
-        "訊息說明 v6 尚未支援：{}",
-        body["message"]
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "status");
 }
 
 #[tokio::test]

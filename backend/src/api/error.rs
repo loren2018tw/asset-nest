@@ -52,7 +52,7 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }
 
-    /// 501：端點已存在，但此情境尚未實作（如 v6 IP 清單見票 06）。
+    /// 501：端點已存在，但此情境尚未實作。
     pub fn not_implemented(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", message)
     }

@@ -1,12 +1,12 @@
-//! 指派（Assignment）領域模組：指派／改用途、取消與指派對象查詢。
+//! 指派（Assignment）領域模組：指派／改用途、v6 登錄、取消與指派對象查詢。
 //!
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§3.1、
 //! §4.3、§5，決策見 ADR-0005（指派以 Interface 為對象）與 ADR-0006（結構錯誤阻擋）。
-//! v6 指派為票 06、語意衝突標記為票 07。
+//! v6 採登錄制：新增即指派、用途固定 static；語意衝突標記為票 07。
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, SqlitePool};
@@ -96,6 +96,31 @@ impl AssignmentInput {
     }
 }
 
+/// v6 登錄位址的輸入（新增即指派）；用途固定 static、無 hostname。
+#[derive(Debug, Default, Deserialize)]
+pub struct RegisterInput {
+    pub address: Option<String>,
+    pub interface_id: Option<i64>,
+}
+
+impl RegisterInput {
+    /// 驗證輸入；位址須為合法 IPv6（是否落在網段內由 [`register`] 檢查）。
+    pub fn validate(self) -> Result<(Ipv6Addr, i64), ApiError> {
+        let text = optional_text(self.address)
+            .ok_or_else(|| ApiError::validation("位址為必填").field("address"))?;
+        let address: Ipv6Addr = text.parse().map_err(|_| {
+            ApiError::validation(format!("位址格式錯誤：{text}（須為合法 IPv6 位址）"))
+                .field("address")
+        })?;
+
+        let interface_id = self
+            .interface_id
+            .ok_or_else(|| ApiError::validation("介面為必填").field("interface_id"))?;
+
+        Ok((address, interface_id))
+    }
+}
+
 /// IP 清單中的指派對象（見 spec §4.3）。
 #[derive(Debug, Clone, Serialize)]
 pub struct IpAssignment {
@@ -156,32 +181,17 @@ pub struct AssetAssignment {
 
 /// 指派位址（或改用途）；結構錯誤阻擋儲存（見 spec §3.1）。
 ///
-/// 同一網段同一位址已指派給其他介面時阻擋，須先取消再重新指派
-/// （換介面即取消＋重新指派，見 CONTEXT.md／ADR-0005）。
+/// v4：位址須為 host（扣除 network/broadcast）且不在 pool 內；
+/// v6：登錄制，位址須落在 CIDR 內（含 network 位址；無 host 扣除概念），
+/// 用途固定 static。同一網段同一位址已指派給其他介面時阻擋，須先取消再
+/// 重新指派（換介面即取消＋重新指派，見 CONTEXT.md／ADR-0005）。
 pub async fn assign(
     pool: &SqlitePool,
     subnet: &Subnet,
-    address: Ipv4Addr,
+    address: IpAddr,
     valid: ValidAssignment,
 ) -> Result<Assignment, ApiError> {
-    let network = parse_v4_network(&subnet.cidr)?;
-    let range = HostRange::of(&network);
-
-    if !range.contains(address) {
-        return Err(ApiError::validation(format!(
-            "位址 {address} 不在網段 {} 的可用範圍內（network/broadcast 不可指派）",
-            subnet.cidr
-        ))
-        .field("address")
-        .detail("cidr", json!(subnet.cidr)));
-    }
-
-    if is_in_pool(subnet, address)? {
-        return Err(
-            ApiError::validation(format!("位址 {address} 落在 DHCP 位址池內，不可指派"))
-                .field("address"),
-        );
-    }
+    validate_address(subnet, address, valid.purpose)?;
 
     let interface = interfaces::get(pool, valid.interface_id)
         .await
@@ -227,14 +237,101 @@ pub async fn assign(
     write(pool, subnet.id, &address_text, existing_address, valid).await
 }
 
-/// 取消指派；回傳是否確實刪除（不存在回傳 `false`）。
-pub async fn cancel(pool: &SqlitePool, subnet_id: i64, address: Ipv4Addr) -> sqlx::Result<bool> {
+/// v6 登錄位址（新增即指派）：建立即為手動設定（static）。
+///
+/// 僅適用 IPv6 網段；v4 網段呼叫回 400（v4 走 [`assign`]／既有指派端點）。
+/// 同網段同一位址已登錄即回 400（含同一介面；不採冪等更新）。
+pub async fn register(
+    pool: &SqlitePool,
+    subnet: &Subnet,
+    address: Ipv6Addr,
+    interface_id: i64,
+) -> Result<Assignment, ApiError> {
+    let network = parse_network(&subnet.cidr)?;
+    if !network.addr().is_ipv6() {
+        return Err(ApiError::validation("此端點僅適用於 IPv6 網段（v6 登錄制）").field("cidr"));
+    }
+
+    if let Some(existing) = fetch_by_address(pool, subnet.id, &address.to_string())
+        .await
+        .map_err(|error| ApiError::internal("讀取指派失敗", error))?
+    {
+        return Err(ApiError::validation(format!(
+            "位址 {address} 已登錄（同一網段同一位址僅能一筆）"
+        ))
+        .field("address")
+        .detail("interface_id", json!(existing.interface_id)));
+    }
+
+    let valid = ValidAssignment {
+        interface_id,
+        purpose: "static",
+        hostname: None,
+    };
+    assign(pool, subnet, IpAddr::V6(address), valid).await
+}
+
+/// 取消指派；回傳是否確實刪除（不存在回傳 `false`）。v6 即刪除登錄。
+pub async fn cancel(pool: &SqlitePool, subnet_id: i64, address: IpAddr) -> sqlx::Result<bool> {
     let result = sqlx::query("DELETE FROM ip_assignments WHERE subnet_id = ? AND address = ?")
         .bind(subnet_id)
         .bind(address.to_string())
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// 位址結構驗證：地址族須與網段相符、落在 CIDR 內（v4 另扣 network/broadcast
+/// 與 pool）；v6 用途固定 static（見 spec §2.4、§7）。
+fn validate_address(subnet: &Subnet, address: IpAddr, purpose: &str) -> Result<(), ApiError> {
+    let network = parse_network(&subnet.cidr)?;
+
+    match (network, address) {
+        (IpNet::V4(network), IpAddr::V4(address)) => {
+            let range = HostRange::of(&network);
+            if !range.contains(address) {
+                return Err(ApiError::validation(format!(
+                    "位址 {address} 不在網段 {} 的可用範圍內（network/broadcast 不可指派）",
+                    subnet.cidr
+                ))
+                .field("address")
+                .detail("cidr", json!(subnet.cidr)));
+            }
+
+            if is_in_pool(subnet, address)? {
+                return Err(ApiError::validation(format!(
+                    "位址 {address} 落在 DHCP 位址池內，不可指派"
+                ))
+                .field("address"));
+            }
+        }
+        (IpNet::V6(network), IpAddr::V6(address)) => {
+            if !network.contains(&address) {
+                return Err(ApiError::validation(format!(
+                    "位址 {address} 不在網段 {} 內",
+                    subnet.cidr
+                ))
+                .field("address")
+                .detail("cidr", json!(subnet.cidr)));
+            }
+
+            if purpose != "static" {
+                return Err(
+                    ApiError::validation("IPv6 位址用途固定為手動設定（static）").field("purpose"),
+                );
+            }
+        }
+        _ => {
+            return Err(ApiError::validation(format!(
+                "位址 {address} 與網段 {} 的地址族不符",
+                subnet.cidr
+            ))
+            .field("address")
+            .detail("cidr", json!(subnet.cidr)));
+        }
+    }
+
+    Ok(())
 }
 
 /// 讀取某網段的全部指派（含資產與介面資訊），供 IP 清單合併。
@@ -338,13 +435,10 @@ fn map_write_error(error: sqlx::Error) -> ApiError {
     ApiError::internal("寫入指派失敗", error)
 }
 
-/// 解析網段 CIDR；v6 指派尚未支援（票 06）。
-fn parse_v4_network(cidr: &str) -> Result<Ipv4Net, ApiError> {
-    match cidr.parse::<IpNet>() {
-        Ok(IpNet::V4(network)) => Ok(network),
-        Ok(IpNet::V6(_)) => Err(ApiError::validation("IPv6 網段的指派尚未支援（見票 06）")),
-        Err(_) => Err(ApiError::internal("網段 CIDR 格式錯誤", cidr)),
-    }
+/// 解析網段 CIDR（v4／v6）；資料異常回傳內部錯誤。
+fn parse_network(cidr: &str) -> Result<IpNet, ApiError> {
+    cidr.parse()
+        .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))
 }
 
 /// 位址是否落在網段任一 pool 內（端點皆含）；池內位址不可指派（見 spec §7）。
@@ -488,5 +582,47 @@ mod tests {
             .is_err(),
             "手動設定不可填 hostname"
         );
+    }
+
+    #[test]
+    fn register_input_requires_ipv6_address_and_interface() {
+        assert!(
+            RegisterInput {
+                address: None,
+                interface_id: Some(1),
+            }
+            .validate()
+            .is_err(),
+            "缺位址應阻擋"
+        );
+        assert!(
+            RegisterInput {
+                address: Some("fd00::1".to_string()),
+                interface_id: None,
+            }
+            .validate()
+            .is_err(),
+            "缺介面應阻擋"
+        );
+        for invalid in ["abc", "10.0.0.1", "fd00::gg", "fd00::1/64"] {
+            assert!(
+                RegisterInput {
+                    address: Some(invalid.to_string()),
+                    interface_id: Some(1),
+                }
+                .validate()
+                .is_err(),
+                "{invalid} 非合法 IPv6 應阻擋"
+            );
+        }
+
+        let (address, interface_id) = RegisterInput {
+            address: Some(" fd00:0:0:0:0:0:0:1 ".to_string()),
+            interface_id: Some(7),
+        }
+        .validate()
+        .expect("合法輸入");
+        assert_eq!(address.to_string(), "fd00::1", "解析後為壓縮正規形式");
+        assert_eq!(interface_id, 7);
     }
 }

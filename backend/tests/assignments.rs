@@ -406,39 +406,37 @@ async fn address_must_be_v4_host_inside_subnet_and_out_of_pool() {
         body["message"]
     );
 
-    // 非法位址與 v6 位址（本票僅 v4）
-    for address in ["abc", "fd00::1"] {
-        let (status, body) = put_assignment(&pool, subnet_id, address, static_input.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{address} 應被阻擋");
-        assert_eq!(body["details"]["field"], "address");
-    }
+    // 非法位址
+    let (status, body) = put_assignment(&pool, subnet_id, "abc", static_input.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "abc 應被阻擋");
+    assert_eq!(body["details"]["field"], "address");
 
     // gateway 可指派（僅標記，見 spec §7）
     let (status, _) = put_assignment(&pool, subnet_id, "10.0.0.1", static_input.clone()).await;
     assert_eq!(status, StatusCode::OK);
 
-    // v6 網段指派尚未支援（票 06）
-    let v6_subnet_id = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
-    let (status, body) =
-        put_assignment(&pool, v6_subnet_id, "10.0.0.1", static_input.clone()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("IPv6")),
-        "訊息說明 v6 尚未支援：{}",
-        body["message"]
-    );
-
-    // v6 位址本身（v4 位址路徑解析即擋下）
-    let (status, body) = put_assignment(&pool, subnet_id, "fd00::1", static_input).await;
+    // v6 位址指派到 v4 網段：地址族不符（v6 走登錄端點，見票 06）
+    let (status, body) = put_assignment(&pool, subnet_id, "fd00::1", static_input.clone()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["details"]["field"], "address");
     assert!(
         body["message"]
             .as_str()
-            .is_some_and(|message| message.contains("IPv6")),
-        "訊息說明僅支援 IPv4：{}",
+            .is_some_and(|message| message.contains("地址族")),
+        "訊息說明地址族不符：{}",
+        body["message"]
+    );
+
+    // v4 位址指派到 v6 網段：地址族不符
+    let v6_subnet_id = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let (status, body) = put_assignment(&pool, v6_subnet_id, "10.0.0.1", static_input).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["details"]["field"], "address");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("地址族")),
+        "訊息說明地址族不符：{}",
         body["message"]
     );
 }

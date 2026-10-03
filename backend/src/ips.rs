@@ -1,11 +1,12 @@
-//! IP 位址（IpAddress）領域模組：v4 位址枚舉、pool/gateway 標示與分頁瀏覽。
+//! IP 位址（IpAddress）領域模組：v4 位址枚舉、v6 登錄制清單、pool/gateway
+//! 標示與分頁瀏覽。
 //!
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§4.3、§7。
-//! 位址不建表，一律由 Subnet 範圍伺服器端推導。本票（04）為唯讀清單：
-//! 指派為票 05、v6 登錄制為票 06、衝突標記為票 07。
+//! v4 位址由 Subnet 範圍伺服器端推導；v6 採登錄制，僅列出已指派（登錄）位址，
+//! 不枚舉空閒位址。指派為票 05、v6 登錄制為票 06、衝突標記為票 07。
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net};
 use serde::Serialize;
@@ -123,8 +124,9 @@ impl IpStatusFilter {
 /// API 回傳的 IP 列。
 #[derive(Debug, Serialize)]
 pub struct IpEntry {
-    pub address: Ipv4Addr,
-    /// 落在 DHCP 位址池內；池內位址不可指派（見 CONTEXT.md）。
+    /// v4 或 v6 位址（JSON 序列化為文字）。
+    pub address: IpAddr,
+    /// 落在 DHCP 位址池內；池內位址不可指派（v6 恆為 `false`，見 CONTEXT.md）。
     pub in_pool: bool,
     /// 是否為網段設定的 gateway（僅標記，仍可被指派）。
     pub is_gateway: bool,
@@ -141,18 +143,32 @@ pub struct IpEntry {
 
 /// 由網段推導一頁 IP 列；回傳（當頁列、符合總數）。
 ///
-/// v6 網段尚未支援，回傳 `not_implemented`（票 06）。列以數值升冪排序，
-/// 枚舉順序即排序；無關鍵字、無狀態篩選時總數與當頁皆以算術位移取得，
-/// 不需掃描全部位址。`assignments` 為該網段的指派列（見票 05）。
+/// v4 枚舉全部 host 位址；v6 為登錄制，僅列出已指派（登錄）位址。
+/// 搜尋、狀態篩選與分頁皆為伺服器端。`assignments` 為該網段的指派列（見票 05）。
 pub fn list(
     subnet: &Subnet,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
-    let network = parse_network(&subnet.cidr)?;
+    match parse_network(&subnet.cidr)? {
+        IpNet::V4(network) => list_v4(subnet, &network, filter, assignments),
+        IpNet::V6(_) => list_v6(subnet, filter, assignments),
+    }
+}
+
+/// v4：由網段範圍枚舉一頁 IP 列；回傳（當頁列、符合總數）。
+///
+/// 列以數值升冪排序，枚舉順序即排序；無關鍵字、無狀態篩選時總數與當頁
+/// 皆以算術位移取得，不需掃描全部位址。
+fn list_v4(
+    subnet: &Subnet,
+    network: &Ipv4Net,
+    filter: &IpFilter,
+    assignments: &[ListedAssignment],
+) -> Result<(Vec<IpEntry>, u64), ApiError> {
     let pools = parse_pools(subnet)?;
-    let gateway = parse_gateway(subnet.gateway.as_deref())?;
-    let range = HostRange::of(&network);
+    let gateway = parse_gateway_v4(subnet.gateway.as_deref())?;
+    let range = HostRange::of(network);
 
     // 指派資料以位址文字索引；用途經資料庫 CHECK 驗證，異常視為內部錯誤。
     let mut by_address: HashMap<&str, &ListedAssignment> =
@@ -176,7 +192,7 @@ pub fn list(
             if let Ok(exact) = q.parse::<Ipv4Addr>() {
                 let total = u64::from(range.contains(exact));
                 let items = if offset == 0 && total == 1 {
-                    vec![entry(exact, &pools, gateway, &by_address)]
+                    vec![entry_v4(exact, &pools, gateway, &by_address)]
                 } else {
                     Vec::new()
                 };
@@ -191,7 +207,7 @@ pub fn list(
         let end = offset.saturating_add(per_page).min(total);
         let items = (offset..end)
             .filter_map(|index| range.nth(index))
-            .map(|address| entry(address, &pools, gateway, &by_address))
+            .map(|address| entry_v4(address, &pools, gateway, &by_address))
             .collect();
         return Ok((items, total));
     }
@@ -215,7 +231,7 @@ pub fn list(
             }
         }
         if total >= offset && (items.len() as u64) < per_page {
-            items.push(entry(address, &pools, gateway, &by_address));
+            items.push(entry_v4(address, &pools, gateway, &by_address));
         }
         total += 1;
     }
@@ -223,8 +239,8 @@ pub fn list(
     Ok((items, total))
 }
 
-/// 建立一列；狀態由指派資料推導，未指派且不在 pool 內為「可用」。
-fn entry(
+/// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool 內為「可用」。
+fn entry_v4(
     address: Ipv4Addr,
     pools: &[PoolRange],
     gateway: Option<Ipv4Addr>,
@@ -233,12 +249,97 @@ fn entry(
     let in_pool = pools.iter().any(|pool| pool.contains(address));
     let assignment = assignments.get(address.to_string().as_str()).copied();
     IpEntry {
-        address,
+        address: IpAddr::V4(address),
         in_pool,
         is_gateway: gateway == Some(address),
         status: status_of(pools, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
+        conflicts: Vec::new(),
+    }
+}
+
+/// v6：登錄制，僅列出該網段已登錄（有指派）的位址；無 pool、無空閒列。
+///
+/// 列以數值（u128）升冪排序；支援關鍵字與狀態篩選、伺服器端分頁。
+/// 狀態恆為 `static`（v6 用途固定手動）；`available`、`in_pool`、
+/// `reservation` 篩選皆回空集合。登錄位址即使因網段縮小而出界仍會列出，
+/// 衝突標記由票 07 以 IpOutOfSubnet 呈現。
+fn list_v6(
+    subnet: &Subnet,
+    filter: &IpFilter,
+    assignments: &[ListedAssignment],
+) -> Result<(Vec<IpEntry>, u64), ApiError> {
+    let gateway = parse_gateway_v6(subnet.gateway.as_deref())?;
+
+    // 指派資料即登錄清單；用途經資料庫 CHECK 驗證，v6 恆為 static，
+    // 異常（如直接寫入 reservation）視為內部錯誤。
+    let mut registered: Vec<(&ListedAssignment, Ipv6Addr)> = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        if assignment.purpose != "static" {
+            return Err(ApiError::internal(
+                "v6 指派用途資料異常",
+                &assignment.purpose,
+            ));
+        }
+        let address: Ipv6Addr = assignment
+            .address
+            .parse()
+            .map_err(|error| ApiError::internal("v6 位址格式錯誤", error))?;
+        registered.push((assignment, address));
+    }
+    registered.sort_by_key(|(_, address)| u128::from(*address));
+
+    let per_page = u64::try_from(filter.per_page).unwrap_or(1).max(1);
+    let offset = u64::try_from(filter.page.max(1) - 1)
+        .unwrap_or(0)
+        .saturating_mul(per_page);
+    let query = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    // 完整位址：解析後以數值精確比對（容許不同壓縮寫法）。
+    let query_address: Option<Ipv6Addr> = query.and_then(|q| q.parse().ok());
+    let query_lower = query.map(str::to_lowercase);
+
+    let mut total: u64 = 0;
+    let mut items = Vec::new();
+    for (assignment, address) in registered {
+        if filter
+            .status
+            .is_some_and(|status| status != IpStatusFilter::Static)
+        {
+            continue;
+        }
+        if let Some(parsed) = query_address {
+            if address != parsed {
+                continue;
+            }
+        } else if let Some(query) = &query_lower {
+            let text = address.to_string();
+            if !matches_query(Some(assignment), &text, query) {
+                continue;
+            }
+        }
+        if total >= offset && (items.len() as u64) < per_page {
+            items.push(entry_v6(address, gateway, assignment));
+        }
+        total += 1;
+    }
+
+    Ok((items, total))
+}
+
+/// 建立一列 v6 登錄位址；狀態恆為「手動設定」。
+fn entry_v6(
+    address: Ipv6Addr,
+    gateway: Option<Ipv6Addr>,
+    assignment: &ListedAssignment,
+) -> IpEntry {
+    IpEntry {
+        address: IpAddr::V6(address),
+        in_pool: false,
+        is_gateway: gateway == Some(address),
+        status: "static",
+        purpose: Some("static"),
+        assignment: Some(assignment.target()),
         conflicts: Vec::new(),
     }
 }
@@ -294,15 +395,10 @@ fn matches_query(
             .is_some_and(|mac| mac.to_lowercase().contains(query_lower))
 }
 
-/// 解析網段 CIDR；v6 尚未支援（票 06），資料異常回傳內部錯誤。
-fn parse_network(cidr: &str) -> Result<Ipv4Net, ApiError> {
-    match cidr.parse::<IpNet>() {
-        Ok(IpNet::V4(network)) => Ok(network),
-        Ok(IpNet::V6(_)) => Err(ApiError::not_implemented(
-            "IPv6 網段的 IP 清單尚未支援（見票 06）",
-        )),
-        Err(_) => Err(ApiError::internal("網段 CIDR 格式錯誤", cidr)),
-    }
+/// 解析網段 CIDR（v4／v6）；資料異常回傳內部錯誤。
+fn parse_network(cidr: &str) -> Result<IpNet, ApiError> {
+    cidr.parse()
+        .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))
 }
 
 /// 解析網段的所有 pool 範圍；資料庫內容經結構驗證，格式異常視為內部錯誤。
@@ -319,9 +415,19 @@ fn parse_pools(subnet: &Subnet) -> Result<Vec<PoolRange>, ApiError> {
         .collect()
 }
 
-/// 解析 gateway；未設定為 `None`。
-fn parse_gateway(value: Option<&str>) -> Result<Option<Ipv4Addr>, ApiError> {
+/// 解析 v4 gateway；未設定為 `None`。
+fn parse_gateway_v4(value: Option<&str>) -> Result<Option<Ipv4Addr>, ApiError> {
     value.map(parse_stored_address).transpose()
+}
+
+/// 解析 v6 gateway；未設定為 `None`。
+fn parse_gateway_v6(value: Option<&str>) -> Result<Option<Ipv6Addr>, ApiError> {
+    value
+        .map(|text| {
+            text.parse()
+                .map_err(|error| ApiError::internal("gateway 格式錯誤", error))
+        })
+        .transpose()
 }
 
 /// 解析資料庫中已驗證過的 v4 位址文字。
@@ -703,5 +809,138 @@ mod tests {
             Some(IpStatusFilter::Reservation)
         );
         assert_eq!(IpStatusFilter::parse("unknown"), None);
+    }
+
+    #[test]
+    fn v6_list_returns_registered_addresses_in_numeric_order() {
+        let subnet = subnet("fd00::/64", Some("fd00::1"), &[]);
+        let assignments = [
+            listed("fd00::10", "static", "主機十", Some("eth0"), None),
+            listed("fd00::2", "static", "主機二", Some("eth1"), None),
+            listed("fd00::1", "static", "閘道", Some("eth2"), None),
+        ];
+
+        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 3, "僅列出已登錄位址");
+        assert_eq!(
+            addresses(&items),
+            ["fd00::1", "fd00::2", "fd00::10"],
+            "以數值（u128）升冪排序，非文字排序"
+        );
+
+        let first = &items[0];
+        assert_eq!(first.status, "static");
+        assert_eq!(first.purpose, Some("static"));
+        assert!(!first.in_pool, "v6 無 pool 概念");
+        assert!(first.is_gateway, "gateway 位址仍標記");
+        assert_eq!(
+            first
+                .assignment
+                .as_ref()
+                .expect("含指派對象")
+                .asset_description,
+            "閘道"
+        );
+        assert!(first.conflicts.is_empty(), "票 07 前無衝突");
+
+        // 無登錄：空清單（不枚舉空閒位址）
+        let (items, total) = list(&subnet, &filter(None, 1, 50), &[]).expect("推導成功");
+        assert_eq!(total, 0);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn v6_list_supports_search_status_and_pagination() {
+        let subnet = subnet("fd00::/64", None, &[]);
+        let assignments = [
+            listed("fd00::10", "static", "資料庫主機", Some("eth0"), None),
+            listed(
+                "fd00::2",
+                "static",
+                "印表機",
+                Some("wlan0"),
+                Some("AA:BB:CC:DD:EE:FF"),
+            ),
+        ];
+
+        // 伺服器端分頁（數值排序）
+        let (items, total) = list(&subnet, &filter(None, 2, 1), &assignments).expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["fd00::10"]);
+
+        // 完整位址：不同壓縮寫法仍精確比對
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("fd00:0:0:0:0:0:0:10"), 1, 50),
+            &assignments,
+        )
+        .expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["fd00::10"]);
+
+        // 關鍵字比對指派對象（資產描述／介面名稱／MAC）
+        for (query, address) in [
+            ("資料庫", "fd00::10"),
+            ("ETH0", "fd00::10"),
+            ("WLAN0", "fd00::2"),
+            ("bb:cc", "fd00::2"),
+        ] {
+            let (items, total) =
+                list(&subnet, &filter(Some(query), 1, 50), &assignments).expect("推導成功");
+            assert_eq!(total, 1, "q={query}");
+            assert_eq!(addresses(&items), [address], "q={query}");
+        }
+
+        // 狀態篩選：static 全數；available／in_pool／reservation 皆空
+        let (items, total) = list(
+            &subnet,
+            &status_filter(IpStatusFilter::Static),
+            &assignments,
+        )
+        .expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["fd00::2", "fd00::10"]);
+
+        for status in [
+            IpStatusFilter::Available,
+            IpStatusFilter::InPool,
+            IpStatusFilter::Reservation,
+        ] {
+            let (items, total) =
+                list(&subnet, &status_filter(status), &assignments).expect("推導成功");
+            assert_eq!(total, 0, "{status:?} 篩選應為空");
+            assert!(items.is_empty());
+        }
+    }
+
+    #[test]
+    fn v6_list_keeps_out_of_subnet_registered_addresses() {
+        // 網段縮小造成既有登錄位址出界：仍列出（衝突標記見票 07）
+        let subnet = subnet("fd00:0:0:1::/64", None, &[]);
+        let assignments = [
+            listed("fd00:0:0:1::5", "static", "主機", Some("eth0"), None),
+            listed("fd00::5", "static", "出界主機", Some("eth1"), None),
+        ];
+
+        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["fd00::5", "fd00:0:0:1::5"]);
+    }
+
+    #[test]
+    fn v6_list_rejects_non_static_purpose_as_internal_error() {
+        let subnet = subnet("fd00::/64", None, &[]);
+        let assignments = [listed(
+            "fd00::1",
+            "reservation",
+            "異常資料",
+            Some("eth0"),
+            Some("aa:bb:cc:dd:ee:ff"),
+        )];
+
+        assert!(
+            list(&subnet, &filter(None, 1, 50), &assignments).is_err(),
+            "v6 出現非 static 用途視為資料異常"
+        );
     }
 }

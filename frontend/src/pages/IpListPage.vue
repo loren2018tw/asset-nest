@@ -17,134 +17,147 @@
       </div>
     </div>
 
-    <q-banner v-if="isV6" rounded class="bg-grey-2 text-grey-8 q-mb-md">
-      IPv6 網段採登錄制（僅已指派位址存在），IP 清單尚未支援（見票 06）。
-    </q-banner>
-
-    <template v-else>
-      <div class="row q-col-gutter-sm q-mb-md">
-        <div class="col-12 col-md-6">
-          <q-input
-            v-model="filters.q"
-            outlined
-            dense
-            clearable
-            debounce="300"
-            placeholder="搜尋 IP／資產描述／MAC／介面名稱"
-            @update:model-value="reload"
-          >
-            <template #prepend>
-              <q-icon name="search" />
-            </template>
-          </q-input>
-        </div>
-        <div class="col-12 col-sm-6 col-md-3">
-          <q-select
-            v-model="filters.status"
-            :options="statusOptions"
-            outlined
-            dense
-            clearable
-            emit-value
-            map-options
-            label="狀態／用途"
-            @update:model-value="reload"
-          />
-        </div>
+    <div class="row q-col-gutter-sm q-mb-md">
+      <div class="col-12 col-md-6">
+        <q-input
+          v-model="filters.q"
+          outlined
+          dense
+          clearable
+          debounce="300"
+          placeholder="搜尋 IP／資產描述／MAC／介面名稱"
+          @update:model-value="reload"
+        >
+          <template #prepend>
+            <q-icon name="search" />
+          </template>
+        </q-input>
       </div>
+      <div class="col-12 col-sm-6 col-md-3">
+        <q-select
+          v-model="filters.status"
+          :options="statusOptions"
+          outlined
+          dense
+          clearable
+          emit-value
+          map-options
+          label="狀態／用途"
+          @update:model-value="reload"
+        />
+      </div>
+      <!-- v6 登錄制：僅已指派位址存在，由「新增位址」輸入並即指派（見票 06） -->
+      <div v-if="isV6" class="col-12 col-sm-6 col-md-3 text-right">
+        <q-btn
+          color="primary"
+          icon="add"
+          label="新增位址"
+          @click="openRegistryCreate"
+        />
+      </div>
+    </div>
 
-      <q-table
-        :rows="ips"
-        :columns="columns"
-        row-key="address"
-        :loading="loading"
-        :pagination="pagination"
-        :rows-per-page-options="[10, 25, 50, 100]"
-        @request="onRequest"
-      >
-        <template #body-cell-address="props">
-          <q-td :props="props" class="ip-address">{{ props.value }}</q-td>
-        </template>
-        <template #body-cell-is_gateway="props">
-          <q-td :props="props" class="text-center">
-            <q-badge v-if="props.row.is_gateway" color="primary">
-              Gateway
-            </q-badge>
-          </q-td>
-        </template>
-        <template #body-cell-status="props">
-          <q-td :props="props">
-            <q-badge :color="statusColor(props.row.status)">
-              {{ statusLabel(props.row.status) }}
-            </q-badge>
-          </q-td>
-        </template>
-        <template #body-cell-assignment="props">
-          <q-td :props="props">
-            <template v-if="props.row.assignment">
-              <div>
-                {{ props.row.assignment.asset_description }}（{{
-                  props.row.assignment.asset_location
-                }}）
-              </div>
-              <div class="text-caption text-grey-7">
-                {{
-                  interfaceLabel(
-                    props.row.assignment.interface_name,
-                    props.row.assignment.mac
-                  )
-                }}
-                <template v-if="props.row.assignment.hostname">
-                  ｜ {{ props.row.assignment.hostname }}
-                </template>
-              </div>
-            </template>
-            <span v-else class="text-grey-6">—</span>
-          </q-td>
-        </template>
-        <template #body-cell-actions="props">
-          <q-td :props="props" class="text-right">
-            <!-- 池內且未指派：不可指派（見 spec §7） -->
+    <q-table
+      :rows="ips"
+      :columns="columns"
+      row-key="address"
+      :loading="loading"
+      :pagination="pagination"
+      :rows-per-page-options="[10, 25, 50, 100]"
+      @request="onRequest"
+    >
+      <template #body-cell-address="props">
+        <q-td :props="props" class="ip-address">{{ props.value }}</q-td>
+      </template>
+      <template #body-cell-is_gateway="props">
+        <q-td :props="props" class="text-center">
+          <q-badge v-if="props.row.is_gateway" color="primary">
+            Gateway
+          </q-badge>
+        </q-td>
+      </template>
+      <template #body-cell-status="props">
+        <q-td :props="props">
+          <q-badge :color="statusColor(props.row.status)">
+            {{ statusLabel(props.row.status) }}
+          </q-badge>
+        </q-td>
+      </template>
+      <template #body-cell-assignment="props">
+        <q-td :props="props">
+          <template v-if="props.row.assignment">
+            <div>
+              {{ props.row.assignment.asset_description }}（{{
+                props.row.assignment.asset_location
+              }}）
+            </div>
+            <div class="text-caption text-grey-7">
+              {{
+                interfaceLabel(
+                  props.row.assignment.interface_name,
+                  props.row.assignment.mac
+                )
+              }}
+              <template v-if="props.row.assignment.hostname">
+                ｜ {{ props.row.assignment.hostname }}
+              </template>
+            </div>
+          </template>
+          <span v-else class="text-grey-6">—</span>
+        </q-td>
+      </template>
+      <template #body-cell-actions="props">
+        <q-td :props="props" class="text-right">
+          <!-- 池內且未指派：不可指派（見 spec §7） -->
+          <q-btn
+            v-if="props.row.in_pool && !props.row.assignment"
+            flat
+            dense
+            round
+            icon="edit"
+            disable
+            aria-label="指派"
+          >
+            <q-tooltip>池內位址不可指派</q-tooltip>
+          </q-btn>
+          <template v-else>
             <q-btn
-              v-if="props.row.in_pool && !props.row.assignment"
               flat
               dense
               round
               icon="edit"
-              disable
-              aria-label="指派"
-            >
-              <q-tooltip>池內位址不可指派</q-tooltip>
-            </q-btn>
-            <template v-else>
-              <q-btn
-                flat
-                dense
-                round
-                icon="edit"
-                :aria-label="props.row.assignment ? '編輯指派' : '指派'"
-                @click="openAssignment(props.row)"
-              />
-              <q-btn
-                v-if="props.row.assignment"
-                flat
-                dense
-                round
-                icon="link_off"
-                color="negative"
-                aria-label="取消指派"
-                @click="confirmCancel(props.row)"
-              />
-            </template>
-          </q-td>
-        </template>
-      </q-table>
-    </template>
+              :aria-label="props.row.assignment ? '編輯指派' : '指派'"
+              @click="openAssignment(props.row)"
+            />
+            <q-btn
+              v-if="props.row.assignment"
+              flat
+              dense
+              round
+              icon="link_off"
+              color="negative"
+              aria-label="取消指派"
+              @click="confirmCancel(props.row)"
+            />
+          </template>
+        </q-td>
+      </template>
+      <template #no-data>
+        <div class="full-width row flex-center text-grey-7 q-py-md">
+          {{
+            isV6
+              ? "尚未登錄任何位址；請點「新增位址」建立第一筆。"
+              : "沒有符合條件的位址。"
+          }}
+        </div>
+      </template>
+    </q-table>
 
     <assignment-dialog
       v-model="assignmentOpen"
       :subnet-id="subnetId"
       :subnet-cidr="subnet?.cidr ?? ''"
+      :family="family"
       :entry="assignmentEntry"
       @saved="onAssignmentSaved"
     />
@@ -163,7 +176,7 @@ import {
   type IpEntry,
   type IpStatus
 } from "@/api/ips";
-import { fetchSubnet, type Subnet } from "@/api/subnets";
+import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 
 const $q = useQuasar();
@@ -182,15 +195,22 @@ const pagination = ref({ page: 1, rowsPerPage: 50, rowsNumber: 0 });
 const assignmentOpen = ref(false);
 const assignmentEntry = ref<IpEntry | null>(null);
 
-/** v6 為登錄制、尚未支援瀏覽（見票 06），不呼叫 IP API。 */
+/** v6 為登錄制（見票 06）：僅列登錄位址、用途固定 static、無 pool。 */
 const isV6 = computed(() => subnet.value?.cidr.includes(":") ?? false);
 
-const statusOptions: { label: string; value: IpStatus }[] = [
-  { label: "可用", value: "available" },
-  { label: "池內", value: "in_pool" },
-  { label: "手動設定", value: "static" },
-  { label: "保留", value: "reservation" }
-];
+const family = computed<AddressFamily>(() => (isV6.value ? "ipv6" : "ipv4"));
+
+/** v6 狀態恆為手動設定；其餘狀態（可用／池內／保留）不存在。 */
+const statusOptions = computed<{ label: string; value: IpStatus }[]>(() =>
+  isV6.value
+    ? [{ label: "手動設定", value: "static" }]
+    : [
+        { label: "可用", value: "available" },
+        { label: "池內", value: "in_pool" },
+        { label: "手動設定", value: "static" },
+        { label: "保留", value: "reservation" }
+      ]
+);
 
 const columns: QTableProps["columns"] = [
   { name: "address", label: "IP", field: "address", align: "left" },
@@ -279,14 +299,23 @@ function openAssignment(entry: IpEntry) {
   assignmentOpen.value = true;
 }
 
+/** v6 新增位址：無既有列，由對話框輸入位址並即指派。 */
+function openRegistryCreate() {
+  assignmentEntry.value = null;
+  assignmentOpen.value = true;
+}
+
 function onAssignmentSaved() {
   void fetchIps();
 }
 
 function confirmCancel(entry: IpEntry) {
+  const message = isV6.value
+    ? `確定要取消 ${entry.address} 的指派？取消後該位址將自登錄清單移除。`
+    : `確定要取消 ${entry.address} 的指派？取消後該位址回到「可用」。`;
   $q.dialog({
     title: "取消指派",
-    message: `確定要取消 ${entry.address} 的指派？取消後該位址回到「可用」。`,
+    message,
     cancel: true,
     persistent: true
   }).onOk(() => {
@@ -312,9 +341,7 @@ onMounted(async () => {
     return;
   }
 
-  if (!isV6.value) {
-    void fetchIps();
-  }
+  void fetchIps();
 });
 </script>
 

@@ -5,9 +5,7 @@
     >
       <q-form @submit="submit">
         <q-card-section>
-          <div class="text-h6">
-            {{ isEdit ? "編輯指派" : "指派 IP" }}
-          </div>
+          <div class="text-h6">{{ dialogTitle }}</div>
           <div class="text-subtitle2 text-grey-7">{{ subnetCidr }}</div>
         </q-card-section>
 
@@ -21,7 +19,19 @@
             {{ errorMessage }}
           </q-banner>
 
+          <!-- v6 新增：輸入位址（基本格式驗證）；其餘情境位址唯讀不可修改 -->
           <q-input
+            v-if="addressEditable"
+            v-model="newAddress"
+            outlined
+            dense
+            label="IPv6 位址 *"
+            :hint="`須落在 ${subnetCidr} 內`"
+            :rules="[ipv6Rule]"
+            lazy-rules
+          />
+          <q-input
+            v-else
             :model-value="address"
             outlined
             dense
@@ -154,27 +164,39 @@
             </q-card>
           </template>
 
-          <q-option-group
-            v-model="purpose"
-            :options="purposeOptions"
-            inline
-            class="q-mt-sm"
-          />
-          <div
-            v-if="selectedMac === null && !isEdit"
-            class="text-caption text-grey-7"
-          >
-            所選介面無 MAC，不可設為保留（僅能手動設定）。
-          </div>
-
+          <!-- v6 恆為手動設定：無保留選項、無 hostname（見 spec §7） -->
           <q-input
-            v-if="purpose === 'reservation'"
-            v-model="hostname"
+            v-if="isV6"
+            model-value="手動設定（static）"
             outlined
             dense
-            label="hostname"
-            hint="選填；供 Kea 固定配發使用"
+            readonly
+            label="用途"
+            hint="IPv6 不經 Kea；無保留與 pool 概念"
           />
+          <template v-else>
+            <q-option-group
+              v-model="purpose"
+              :options="purposeOptions"
+              inline
+              class="q-mt-sm"
+            />
+            <div
+              v-if="selectedMac === null && !isEdit"
+              class="text-caption text-grey-7"
+            >
+              所選介面無 MAC，不可設為保留（僅能手動設定）。
+            </div>
+
+            <q-input
+              v-if="purpose === 'reservation'"
+              v-model="hostname"
+              outlined
+              dense
+              label="hostname"
+              hint="選填；供 Kea 固定配發使用"
+            />
+          </template>
         </q-card-section>
 
         <q-card-actions align="right">
@@ -188,10 +210,12 @@
           />
           <q-space />
           <q-btn v-close-popup flat label="關閉" />
+          <!-- v6 編輯無可變欄位（換介面＝取消＋重新指派，見 ADR-0005）：僅供檢視與取消 -->
           <q-btn
+            v-if="!isV6 || !isEdit"
             color="primary"
             type="submit"
-            :label="isEdit ? '儲存' : '指派'"
+            :label="submitLabel"
             :loading="saving"
           />
         </q-card-actions>
@@ -209,15 +233,19 @@ import { createInterface, type Interface } from "@/api/interfaces";
 import {
   assignIp,
   cancelAssignment,
+  registerIp,
   type IpEntry,
   type IpPurpose
 } from "@/api/ips";
+import type { AddressFamily } from "@/api/subnets";
 
 const props = defineProps<{
   modelValue: boolean;
   subnetId: number;
   subnetCidr: string;
-  /** 目標列；已指派時為編輯／改用途模式（介面不可更換）。 */
+  /** 網段地址族：v6 為登錄制（新增時輸入位址、用途固定手動）。 */
+  family: AddressFamily;
+  /** 目標列；已指派時為編輯模式（介面不可更換）；v6 新增為 null。 */
   entry: IpEntry | null;
 }>();
 
@@ -233,9 +261,29 @@ const open = computed({
   set: value => emit("update:modelValue", value)
 });
 
+const isV6 = computed(() => props.family === "ipv6");
+
 const address = computed(() => props.entry?.address ?? "");
 const existing = computed(() => props.entry?.assignment ?? null);
 const isEdit = computed(() => existing.value !== null);
+
+/** v6 新增：位址由使用者輸入（其餘情境位址唯讀）。 */
+const addressEditable = computed(() => isV6.value && props.entry === null);
+const newAddress = ref("");
+
+const dialogTitle = computed(() => {
+  if (isV6.value) {
+    return isEdit.value ? "編輯位址" : "新增位址";
+  }
+  return isEdit.value ? "編輯指派" : "指派 IP";
+});
+
+const submitLabel = computed(() => {
+  if (isV6.value) {
+    return "登錄並指派";
+  }
+  return isEdit.value ? "儲存" : "指派";
+});
 
 const selectedAsset = ref<Asset | null>(null);
 const assetOptions = ref<Asset[]>([]);
@@ -326,6 +374,7 @@ function prepare() {
   newInterface.value = { name: "", mac: "" };
   hostname.value = props.entry?.assignment?.hostname ?? "";
   purpose.value = props.entry?.purpose ?? "static";
+  newAddress.value = "";
 
   if (!isEdit.value) {
     void searchAssets("");
@@ -433,9 +482,12 @@ async function createNewInterface() {
 }
 
 function confirmCancel() {
+  const message = isV6.value
+    ? `確定要取消 ${address.value} 的指派？取消後該位址將自登錄清單移除。`
+    : `確定要取消 ${address.value} 的指派？取消後該位址回到「可用」。`;
   $q.dialog({
     title: "取消指派",
-    message: `確定要取消 ${address.value} 的指派？取消後該位址回到「可用」。`,
+    message,
     cancel: true,
     persistent: true
   }).onOk(() => {
@@ -460,6 +512,14 @@ async function cancel() {
 
 async function submit() {
   errorMessage.value = "";
+
+  if (isV6.value) {
+    // v6 編輯模式無可變欄位（僅供檢視與取消）；Enter 送出時不做事
+    if (!isEdit.value) {
+      await submitRegistry();
+    }
+    return;
+  }
 
   if (purpose.value === "reservation" && selectedMac.value === null) {
     errorMessage.value = "所選介面無 MAC，不可設為保留";
@@ -500,6 +560,55 @@ async function submit() {
     errorMessage.value = messageOf(cause);
   } finally {
     saving.value = false;
+  }
+}
+
+/** v6 新增登錄：輸入位址＋選介面，建立即指派（用途固定 static）。 */
+async function submitRegistry() {
+  const text = newAddress.value.trim();
+  if (!isIpv6(text)) {
+    errorMessage.value = "IPv6 位址格式錯誤（例：fd00::10）";
+    return;
+  }
+  if (selectedInterfaceId.value === null) {
+    errorMessage.value = "請選擇介面";
+    return;
+  }
+
+  saving.value = true;
+  try {
+    await registerIp(props.subnetId, {
+      address: text,
+      interface_id: selectedInterfaceId.value
+    });
+    $q.notify({ type: "positive", message: "已登錄並指派" });
+    emit("saved");
+    open.value = false;
+  } catch (cause) {
+    errorMessage.value = messageOf(cause);
+  } finally {
+    saving.value = false;
+  }
+}
+
+function ipv6Rule(value: string | null) {
+  const text = (value ?? "").trim();
+  if (text === "") {
+    return "位址為必填";
+  }
+  return isIpv6(text) || "IPv6 格式錯誤（例：fd00::10）";
+}
+
+/** 基本 IPv6 格式驗證（支援 :: 壓縮與 IPv4-mapped）；網段歸屬仍由後端驗證。 */
+function isIpv6(value: string): boolean {
+  const text = value.trim();
+  if (!text.includes(":")) {
+    return false;
+  }
+  try {
+    return new URL(`http://[${text}]/`).hostname.startsWith("[");
+  } catch {
+    return false;
   }
 }
 

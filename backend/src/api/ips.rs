@@ -1,9 +1,10 @@
 //! `/api/v1` IP 位址路由（見 spec §4.3、§5）。
 //!
-//! 票 04 提供 v4 唯讀清單；本票（05）加入指派／改用途與取消指派。
-//! v6（票 06）、衝突標記（票 07）後續擴充。
+//! v4 提供清單與指派／改用途、取消指派；v6（票 06）為登錄制：
+//! `POST /subnets/{id}/ips` 新增即指派，清單僅列登錄位址，指派端點限 static。
+//! 衝突標記（票 07）後續擴充。
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::ApiError;
-use crate::assignments::{self, Assignment, AssignmentInput};
+use crate::assignments::{self, Assignment, AssignmentInput, RegisterInput};
 use crate::ips::{self, IpEntry, IpFilter, IpStatusFilter};
 use crate::subnets;
 
@@ -24,7 +25,10 @@ const MAX_PER_PAGE: i64 = 200;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/subnets/{id}/ips", get(list_subnet_ips))
+        .route(
+            "/subnets/{id}/ips",
+            get(list_subnet_ips).post(post_subnet_ip),
+        )
         .route(
             "/subnets/{id}/ips/{address}/assignment",
             put(put_assignment).delete(delete_assignment),
@@ -91,7 +95,7 @@ async fn list_subnet_ips(
         .await
         .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
 
-    // v6 網段由 `ips::list` 回傳結構化的 `not_implemented`（見票 06）。
+    // v4 枚舉全部 host；v6 僅列出已登錄（有指派）位址（見票 06）。
     let (items, total) = ips::list(&subnet, &filter, &assignments)?;
 
     Ok(Json(IpPage {
@@ -100,6 +104,26 @@ async fn list_subnet_ips(
         page,
         per_page,
     }))
+}
+
+/// v6 登錄位址（新增即指派；用途固定 static）；v4 網段回 400。
+async fn post_subnet_ip(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+    payload: Result<Json<RegisterInput>, JsonRejection>,
+) -> Result<(StatusCode, Json<Assignment>), ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
+    let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
+
+    let subnet = subnets::get(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
+
+    let (address, interface_id) = input.validate()?;
+    let assignment = assignments::register(&state.db, &subnet, address, interface_id).await?;
+
+    Ok((StatusCode::CREATED, Json(assignment)))
 }
 
 /// 指派或改用途（含 hostname）；結構錯誤回 400＋明確 `details`。
@@ -152,12 +176,8 @@ async fn delete_assignment(
     }
 }
 
-/// 解析路徑中的位址；僅支援 IPv4（v6 見票 06）。
-fn parse_address(text: &str) -> Result<Ipv4Addr, ApiError> {
-    text.parse().map_err(|_| {
-        ApiError::validation(format!(
-            "位址格式錯誤：{text}（僅支援 IPv4 位址；IPv6 指派見票 06）"
-        ))
-        .field("address")
-    })
+/// 解析路徑中的位址（v4／v6 皆可）；與網段的地址族是否相符由領域層檢查。
+fn parse_address(text: &str) -> Result<IpAddr, ApiError> {
+    text.parse()
+        .map_err(|_| ApiError::validation(format!("位址格式錯誤：{text}")).field("address"))
 }

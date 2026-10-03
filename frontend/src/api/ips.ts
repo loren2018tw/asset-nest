@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPut } from "@/api/client";
+import { apiDelete, apiGet, apiPost, apiPut } from "@/api/client";
 
 /** IP 狀態：可用、池內、手動設定（static）或保留（reservation）。 */
 export type IpStatus = "available" | "in_pool" | "static" | "reservation";
@@ -17,15 +17,15 @@ export interface IpAssignmentTarget {
   hostname: string | null;
 }
 
-/** IP 列（見 spec §4.3；v4 位址由後端自網段範圍推導）。 */
+/** IP 列（見 spec §4.3；v4 由後端自網段範圍枚舉、v6 僅列登錄位址）。 */
 export interface IpEntry {
   address: string;
-  /** 落在 DHCP 位址池內；池內位址不可指派。 */
+  /** 落在 DHCP 位址池內；池內位址不可指派（v6 恆為 false）。 */
   in_pool: boolean;
   /** 是否為網段 gateway（僅標記，仍可被指派）。 */
   is_gateway: boolean;
   status: IpStatus;
-  /** 指派用途；未指派為 null。 */
+  /** 指派用途；未指派為 null（v6 登錄列恆為 static）。 */
   purpose: IpPurpose | null;
   /** 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 null。 */
   assignment: IpAssignmentTarget | null;
@@ -53,6 +53,12 @@ export interface AssignmentInput {
   hostname: string | null;
 }
 
+/** v6 登錄位址的輸入（新增即指派；用途固定 static、無 hostname）。 */
+export interface RegistryInput {
+  address: string;
+  interface_id: number;
+}
+
 /** IP 清單搜尋與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
   /** 完整位址精確比對；否則對位址文字、資產描述、介面名稱與 MAC 做子字串比對。 */
@@ -70,7 +76,7 @@ export interface IpPage {
   per_page: number;
 }
 
-/** 某網段的 IP 清單（v4 全枚舉；v6 尚未支援，見票 06）。 */
+/** 某網段的 IP 清單（v4 全枚舉；v6 僅登錄位址，見票 06）。 */
 export function listSubnetIps(
   subnetId: number,
   params: IpListParams = {}
@@ -86,6 +92,14 @@ export function listSubnetIps(
   return apiGet<IpPage>(
     `/api/v1/subnets/${subnetId}/ips${search === "" ? "" : `?${search}`}`
   );
+}
+
+/** v6 登錄位址：建立即指派（用途固定 static）；v4 網段由後端回 400。 */
+export function registerIp(
+  subnetId: number,
+  input: RegistryInput
+): Promise<Assignment> {
+  return apiPost<Assignment>(`/api/v1/subnets/${subnetId}/ips`, input);
 }
 
 /** 指派或改用途（含 hostname）；結構錯誤由後端回 400 與明確訊息。 */
