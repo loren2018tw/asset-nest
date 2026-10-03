@@ -1,0 +1,12 @@
+packages:
+  - frontend
+
+# 允許執行安裝指令的相依套件（自 frontend/pnpm-workspace.yaml 整併）
+allowBuilds:
+  "@parcel/watcher": true
+  core-js: true
+  electron-winstaller: true
+  esbuild: true
+  lightningcss: true
+  rolldown: true
+  unrs-resolver: true

@@ -1,0 +1,24 @@
+{
+  "name": "asset-nest",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IT 資產整合管理系統",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"pnpm dev:backend\" \"pnpm dev:frontend\"",
+    "dev:backend": "cargo run --manifest-path backend/Cargo.toml",
+    "dev:frontend": "pnpm --filter frontend dev",
+    "build": "pnpm build:frontend && pnpm build:backend",
+    "build:frontend": "pnpm --filter frontend build",
+    "build:backend": "cargo build --release --manifest-path backend/Cargo.toml",
+    "lint": "pnpm --filter frontend lint",
+    "lint:check": "pnpm --filter frontend lint:check",
+    "test": "cargo test --manifest-path backend/Cargo.toml"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

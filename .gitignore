@@ -1,0 +1,19 @@
+# Node / pnpm
+node_modules/
+
+# Quasar
+frontend/.quasar/
+frontend/dist/
+
+# Rust
+backend/target/
+
+# 環境與資料庫
+.env
+*.db
+*.db-shm
+*.db-wal
+
+# 其他
+.DS_Store
+*.log
