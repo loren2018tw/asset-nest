@@ -125,7 +125,13 @@ async fn create_read_update_delete_asset() {
 
     let (status, fetched) = send(&pool, Method::GET, &format!("/api/v1/assets/{id}"), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(fetched, created, "讀回內容與新增一致");
+    // 詳情在資產欄位之外另含 interfaces（票 02 擴充，見 spec §5）
+    assert_eq!(
+        fetched["description"], created["description"],
+        "讀回內容與新增一致"
+    );
+    assert_eq!(fetched["created_at"], created["created_at"]);
+    assert_eq!(fetched["interfaces"], json!([]), "新增資產尚無介面");
 
     let (status, updated) = send(
         &pool,

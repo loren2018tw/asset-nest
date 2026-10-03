@@ -9,6 +9,7 @@ use crate::AppState;
 
 mod assets;
 mod error;
+mod interfaces;
 
 pub use error::ApiError;
 
@@ -26,7 +27,9 @@ mod v1 {
     use crate::AppState;
 
     pub fn router() -> Router<AppState> {
-        Router::new().merge(super::assets::router())
+        Router::new()
+            .merge(super::assets::router())
+            .merge(super::interfaces::router())
     }
 }
 

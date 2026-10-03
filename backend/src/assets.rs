@@ -408,7 +408,7 @@ fn escape_like(input: &str) -> String {
 }
 
 /// 去除前後空白；空字串視為未填。
-fn optional_text(value: Option<String>) -> Option<String> {
+pub(crate) fn optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -472,7 +472,7 @@ fn add_years(date: NaiveDate, years: i64) -> Option<NaiveDate> {
 }
 
 /// 讓 `serde` 區分「欄位未提供」（`None`）與「顯式 null」（`Some(None)`）。
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

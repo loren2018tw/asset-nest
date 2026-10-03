@@ -5,6 +5,7 @@ pub mod assets;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod interfaces;
 pub mod kea;
 pub mod web;
 

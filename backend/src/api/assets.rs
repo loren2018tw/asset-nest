@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::api::ApiError;
 use crate::assets::{self, Asset, AssetFilter, AssetInput, AssetPatch};
+use crate::interfaces::{self, Interface};
 
 /// 清單預設每頁筆數（見 spec §6）。
 const DEFAULT_PER_PAGE: i64 = 50;
@@ -50,6 +51,14 @@ struct StringItems {
     items: Vec<String>,
 }
 
+/// 資產詳情：資產欄位攤平，加上介面清單（見 spec §5）。
+#[derive(Debug, Serialize)]
+struct AssetDetail {
+    #[serde(flatten)]
+    asset: Asset,
+    interfaces: Vec<Interface>,
+}
+
 async fn list_assets(
     State(state): State<AppState>,
     query: Result<Query<ListQuery>, QueryRejection>,
@@ -86,14 +95,19 @@ async fn list_assets(
 async fn get_asset(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
-) -> Result<Json<Asset>, ApiError> {
+) -> Result<Json<AssetDetail>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("資產 id 格式錯誤"))?;
 
-    assets::get(&state.db, id)
+    let asset = assets::get(&state.db, id)
         .await
         .map_err(|error| ApiError::internal("讀取資產失敗", error))?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("找不到資產"))
+        .ok_or_else(|| ApiError::not_found("找不到資產"))?;
+
+    let interfaces = interfaces::list_for_asset(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面清單失敗", error))?;
+
+    Ok(Json(AssetDetail { asset, interfaces }))
 }
 
 async fn create_asset(

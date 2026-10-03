@@ -1,6 +1,8 @@
 <template>
   <q-dialog v-model="open" persistent>
-    <q-card style="width: 640px; max-width: 95vw">
+    <q-card
+      style="width: 640px; max-width: 95vw; max-height: 90vh; overflow: auto"
+    >
       <q-form @submit="submit">
         <q-card-section>
           <div class="text-h6">
@@ -131,6 +133,92 @@
           />
         </q-card-section>
 
+        <q-card-section class="q-pt-none">
+          <q-separator class="q-mb-md" />
+
+          <div class="row items-center q-mb-sm">
+            <div class="text-subtitle2">網路介面</div>
+            <q-space />
+            <q-btn
+              dense
+              flat
+              color="primary"
+              icon="add"
+              label="新增介面"
+              :disable="loadingInterfaces"
+              @click="addInterface"
+            />
+          </div>
+
+          <q-banner
+            v-if="interfaceError !== ''"
+            dense
+            rounded
+            class="bg-negative text-white q-mb-sm"
+          >
+            {{ interfaceError }}
+          </q-banner>
+
+          <div v-if="loadingInterfaces" class="row justify-center q-pa-md">
+            <q-spinner color="primary" />
+          </div>
+
+          <div
+            v-else-if="interfaceDrafts.length === 0"
+            class="text-grey-6 q-mb-sm"
+          >
+            尚無介面。MAC 空白的介面代表手動設定，須填名稱。
+          </div>
+
+          <template v-else>
+            <q-card
+              v-for="row in interfaceDrafts"
+              :key="row.key"
+              flat
+              bordered
+              class="q-pa-sm q-mb-sm"
+            >
+              <div class="row q-col-gutter-sm items-start">
+                <div class="col-12 col-sm-4">
+                  <q-input
+                    v-model="row.name"
+                    outlined
+                    dense
+                    label="名稱"
+                    :rules="[interfaceNameRule(row)]"
+                    lazy-rules
+                  />
+                </div>
+                <div class="col-12 col-sm-4">
+                  <q-input
+                    v-model="row.mac"
+                    outlined
+                    dense
+                    label="MAC"
+                    :rules="[macRule]"
+                    lazy-rules
+                    hint="冒號／連字號／無分隔皆可"
+                  />
+                </div>
+                <div class="col-12 col-sm-3">
+                  <q-input v-model="row.note" outlined dense label="備註" />
+                </div>
+                <div class="col-12 col-sm-1 text-right">
+                  <q-btn
+                    flat
+                    dense
+                    round
+                    icon="delete"
+                    color="negative"
+                    aria-label="刪除介面"
+                    @click="confirmRemoveInterface(row)"
+                  />
+                </div>
+              </div>
+            </q-card>
+          </template>
+        </q-card-section>
+
         <q-card-actions align="right">
           <q-btn v-close-popup flat label="取消" />
           <q-btn color="primary" type="submit" label="儲存" :loading="saving" />
@@ -141,16 +229,25 @@
 </template>
 
 <script setup lang="ts">
+import { useQuasar } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import {
   createAsset,
+  fetchAsset,
   fetchLocations,
   findByDeviceSerial,
   updateAsset,
   type Asset,
   type AssetInput
 } from "@/api/assets";
+import {
+  createInterface,
+  deleteInterface,
+  updateInterface,
+  type Interface,
+  type InterfaceInput
+} from "@/api/interfaces";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -163,6 +260,8 @@ const emit = defineEmits<{
   saved: [];
 }>();
 
+const $q = useQuasar();
+
 interface FormState {
   property_no: string;
   description: string;
@@ -173,6 +272,21 @@ interface FormState {
   purchase_date: string;
   lifespan_years: string;
   note: string;
+}
+
+/** 對話框中的介面編輯列；`id === null`＝尚未儲存的新介面。 */
+interface InterfaceDraft {
+  key: number;
+  id: number | null;
+  name: string;
+  mac: string;
+  note: string;
+  /** 載入／上次儲存後的原始值；新介面為 `null`。供儲存時差異比對。 */
+  original: {
+    name: string | null;
+    mac: string | null;
+    note: string | null;
+  } | null;
 }
 
 function emptyForm(): FormState {
@@ -197,11 +311,23 @@ const locationMenuOpen = ref(false);
 const duplicateSerial = ref(false);
 const locationField = ref<HTMLElement | null>(null);
 
+const interfaceDrafts = ref<InterfaceDraft[]>([]);
+/** 對話框開啟時載入的既有介面，供儲存時找出已刪除者。 */
+const originalInterfaces = ref<Interface[]>([]);
+const loadingInterfaces = ref(false);
+const interfaceError = ref("");
+/** 新增模式已建立、但介面尚未同步完成時記下的資產 id。 */
+const savedAssetId = ref<number | null>(null);
+
 /** QMenu 的定位目標；template ref 於掛載後才有值。 */
 const locationTarget = computed(() => locationField.value ?? undefined);
 
 /** 供 serial 重複檢查丟棄過期回應。 */
 let serialCheckToken = 0;
+/** 供介面載入丟棄過期回應。 */
+let interfaceLoadToken = 0;
+/** 介面編輯列的穩定 key。 */
+let draftKey = 0;
 
 const open = computed({
   get: () => props.modelValue,
@@ -265,7 +391,9 @@ function prepare() {
   errorMessage.value = "";
   duplicateSerial.value = false;
   serialCheckToken += 1;
+  savedAssetId.value = null;
   void loadLocations();
+  void loadInterfaces();
 }
 
 async function loadLocations() {
@@ -274,6 +402,83 @@ async function loadLocations() {
   } catch {
     // 建議值載入失敗不影響輸入與儲存
   }
+}
+
+/** 編輯模式載入資產詳情中的介面；新增模式無既有介面。 */
+async function loadInterfaces() {
+  const token = ++interfaceLoadToken;
+  const asset = props.asset;
+
+  originalInterfaces.value = [];
+  interfaceDrafts.value = [];
+  interfaceError.value = "";
+  loadingInterfaces.value = false;
+
+  if (asset === null) {
+    return;
+  }
+
+  loadingInterfaces.value = true;
+  try {
+    const detail = await fetchAsset(asset.id);
+    if (token !== interfaceLoadToken) {
+      return;
+    }
+    originalInterfaces.value = detail.interfaces;
+    interfaceDrafts.value = detail.interfaces.map(toDraft);
+  } catch (cause) {
+    if (token === interfaceLoadToken) {
+      interfaceError.value = `讀取介面失敗：${messageOf(cause)}`;
+    }
+  } finally {
+    if (token === interfaceLoadToken) {
+      loadingInterfaces.value = false;
+    }
+  }
+}
+
+function toDraft(item: Interface): InterfaceDraft {
+  return {
+    key: ++draftKey,
+    id: item.id,
+    name: item.name ?? "",
+    mac: item.mac ?? "",
+    note: item.note ?? "",
+    original: { name: item.name, mac: item.mac, note: item.note }
+  };
+}
+
+function addInterface() {
+  interfaceDrafts.value.push({
+    key: ++draftKey,
+    id: null,
+    name: "",
+    mac: "",
+    note: "",
+    original: null
+  });
+}
+
+function confirmRemoveInterface(row: InterfaceDraft) {
+  const label =
+    row.name.trim() !== ""
+      ? row.name.trim()
+      : row.mac.trim() !== ""
+        ? row.mac.trim()
+        : "未命名介面";
+
+  $q.dialog({
+    title: "刪除介面",
+    message: `確定要刪除介面「${label}」？${
+      row.id === null ? "（尚未儲存）" : "儲存後才會生效。"
+    }`,
+    cancel: true,
+    persistent: true
+  }).onOk(() => {
+    interfaceDrafts.value = interfaceDrafts.value.filter(
+      item => item.key !== row.key
+    );
+  });
 }
 
 async function checkDuplicateSerial(value: string, token: number) {
@@ -309,9 +514,43 @@ function lifespanRule(value: string | null) {
   return (Number.isInteger(years) && years >= 0) || "年限須為非負整數";
 }
 
+/** MAC 空白時名稱必填（見 spec §3.1）；有 MAC 時名稱選填。 */
+function interfaceNameRule(row: InterfaceDraft) {
+  return (value: string | null) => {
+    if ((value ?? "").trim() !== "") {
+      return true;
+    }
+    return row.mac.trim() !== "" || "MAC 空白時名稱為必填";
+  };
+}
+
+function macRule(value: string | null) {
+  const text = (value ?? "").trim();
+  if (text === "") {
+    return true;
+  }
+  return (
+    normalizeMac(text) !== null ||
+    "MAC 格式錯誤：須為 12 位十六進位（可用冒號、連字號或無分隔）"
+  );
+}
+
+/** 將常見 MAC 輸入格式正規化為小寫冒號格式；無法解析回傳 `null`。 */
+function normalizeMac(text: string): string | null {
+  const hex = text.replace(/[:.-]/g, "").toLowerCase();
+  if (!/^[0-9a-f]{12}$/.test(hex)) {
+    return null;
+  }
+  return hex.match(/.{2}/g)?.join(":") ?? null;
+}
+
 function textOrNull(value: string): string | null {
   const text = value.trim();
   return text === "" ? null : text;
+}
+
+function messageOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function toInput(): AssetInput {
@@ -329,22 +568,105 @@ function toInput(): AssetInput {
   };
 }
 
+function toInterfaceInput(row: InterfaceDraft): InterfaceInput {
+  return {
+    name: textOrNull(row.name),
+    mac: textOrNull(row.mac),
+    note: textOrNull(row.note)
+  };
+}
+
+/** 與上次儲存值比較（MAC 以正規化後比對），避免無謂的 PATCH。 */
+function interfaceChanged(row: InterfaceDraft): boolean {
+  const original = row.original;
+  if (original === null) {
+    return true;
+  }
+  return (
+    row.name.trim() !== (original.name ?? "") ||
+    (normalizeMac(row.mac) ?? "") !== (original.mac ?? "") ||
+    row.note.trim() !== (original.note ?? "")
+  );
+}
+
+/**
+ * 儲存介面：新增／編輯後再刪除已移除者。
+ * 回傳不阻擋的警示訊息（例如全系統重複 MAC），供儲存後提示。
+ */
+async function syncInterfaces(assetId: number): Promise<string[]> {
+  const warnings: string[] = [];
+  const keptIds = new Set<number>();
+
+  for (const row of interfaceDrafts.value) {
+    const input = toInterfaceInput(row);
+
+    if (row.id === null) {
+      const saved = await createInterface(assetId, input);
+      row.id = saved.id;
+      row.name = saved.name ?? "";
+      row.mac = saved.mac ?? "";
+      row.note = saved.note ?? "";
+      row.original = { name: saved.name, mac: saved.mac, note: saved.note };
+      warnings.push(...saved.warnings.map(warning => warning.message));
+      continue;
+    }
+
+    keptIds.add(row.id);
+    if (!interfaceChanged(row)) {
+      continue;
+    }
+
+    const saved = await updateInterface(row.id, input);
+    row.name = saved.name ?? "";
+    row.mac = saved.mac ?? "";
+    row.note = saved.note ?? "";
+    row.original = { name: saved.name, mac: saved.mac, note: saved.note };
+    warnings.push(...saved.warnings.map(warning => warning.message));
+  }
+
+  // 已移除的既有介面：在新增／編輯成功後才刪除
+  const removed: number[] = [];
+  for (const item of originalInterfaces.value) {
+    if (keptIds.has(item.id)) {
+      continue;
+    }
+    await deleteInterface(item.id);
+    removed.push(item.id);
+  }
+  originalInterfaces.value = originalInterfaces.value.filter(
+    item => !removed.includes(item.id)
+  );
+
+  return warnings;
+}
+
 async function submit() {
   saving.value = true;
   errorMessage.value = "";
 
   try {
     const input = toInput();
-    if (props.asset === null) {
-      await createAsset(input);
+    let assetId = savedAssetId.value ?? props.asset?.id ?? null;
+
+    if (assetId === null) {
+      const created = await createAsset(input);
+      assetId = created.id;
+      savedAssetId.value = created.id;
     } else {
-      await updateAsset(props.asset.id, input);
+      await updateAsset(assetId, input);
     }
 
+    // 資產已寫入：立即通知外部刷新，即使後續介面同步失敗或使用者取消也不失真
     emit("saved");
+
+    const warnings = await syncInterfaces(assetId);
+    for (const message of warnings) {
+      $q.notify({ type: "warning", message, timeout: 6000 });
+    }
+
     open.value = false;
   } catch (cause) {
-    errorMessage.value = cause instanceof Error ? cause.message : String(cause);
+    errorMessage.value = messageOf(cause);
   } finally {
     saving.value = false;
   }

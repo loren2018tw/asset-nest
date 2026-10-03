@@ -1,4 +1,5 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/api/client";
+import type { Interface } from "@/api/interfaces";
 
 /** 資產（見 spec §2.1；`expired` 由後端計算）。 */
 export interface Asset {
@@ -48,6 +49,11 @@ export interface AssetPage {
   per_page: number;
 }
 
+/** 資產詳情：資產欄位＋介面清單（見 spec §5）。 */
+export interface AssetDetail extends Asset {
+  interfaces: Interface[];
+}
+
 interface StringItems {
   items: string[];
 }
@@ -68,6 +74,11 @@ export function listAssets(params: AssetListParams = {}): Promise<AssetPage> {
 
 export function createAsset(input: AssetInput): Promise<Asset> {
   return apiPost<Asset>("/api/v1/assets", input);
+}
+
+/** 讀取單一資產詳情（含介面清單），供編輯對話框的介面子編輯器使用。 */
+export function fetchAsset(id: number): Promise<AssetDetail> {
+  return apiGet<AssetDetail>(`/api/v1/assets/${id}`);
 }
 
 export function updateAsset(id: number, input: AssetInput): Promise<Asset> {
