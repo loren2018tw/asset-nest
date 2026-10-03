@@ -30,13 +30,26 @@
             dense
             clearable
             debounce="300"
-            placeholder="搜尋 IP（完整位址精確比對；否則子字串）"
+            placeholder="搜尋 IP／資產描述／MAC／介面名稱"
             @update:model-value="reload"
           >
             <template #prepend>
               <q-icon name="search" />
             </template>
           </q-input>
+        </div>
+        <div class="col-12 col-sm-6 col-md-3">
+          <q-select
+            v-model="filters.status"
+            :options="statusOptions"
+            outlined
+            dense
+            clearable
+            emit-value
+            map-options
+            label="狀態／用途"
+            @update:model-value="reload"
+          />
         </div>
       </div>
 
@@ -61,36 +74,80 @@
         </template>
         <template #body-cell-status="props">
           <q-td :props="props">
-            <q-badge :color="props.row.in_pool ? 'blue-grey' : 'positive'">
-              {{ props.row.in_pool ? "池內" : "可用" }}
+            <q-badge :color="statusColor(props.row.status)">
+              {{ statusLabel(props.row.status) }}
             </q-badge>
-            <span v-if="props.row.purpose" class="q-ml-sm">
-              {{ purposeLabel(props.row.purpose) }}
-            </span>
           </q-td>
         </template>
         <template #body-cell-assignment="props">
-          <!-- 指派對象（資產＋介面）為票 05；本票唯讀顯示預留欄位 -->
-          <q-td :props="props">—</q-td>
+          <q-td :props="props">
+            <template v-if="props.row.assignment">
+              <div>
+                {{ props.row.assignment.asset_description }}（{{
+                  props.row.assignment.asset_location
+                }}）
+              </div>
+              <div class="text-caption text-grey-7">
+                {{
+                  interfaceLabel(
+                    props.row.assignment.interface_name,
+                    props.row.assignment.mac
+                  )
+                }}
+                <template v-if="props.row.assignment.hostname">
+                  ｜ {{ props.row.assignment.hostname }}
+                </template>
+              </div>
+            </template>
+            <span v-else class="text-grey-6">—</span>
+          </q-td>
         </template>
         <template #body-cell-actions="props">
           <q-td :props="props" class="text-right">
-            <!-- 票 05 於此提供編輯／指派；池內列依 spec §7 無編輯入口 -->
+            <!-- 池內且未指派：不可指派（見 spec §7） -->
             <q-btn
-              v-if="!props.row.in_pool"
+              v-if="props.row.in_pool && !props.row.assignment"
               flat
               dense
               round
               icon="edit"
               disable
-              aria-label="指派（票 05）"
+              aria-label="指派"
             >
-              <q-tooltip>指派功能將於票 05 提供</q-tooltip>
+              <q-tooltip>池內位址不可指派</q-tooltip>
             </q-btn>
+            <template v-else>
+              <q-btn
+                flat
+                dense
+                round
+                icon="edit"
+                :aria-label="props.row.assignment ? '編輯指派' : '指派'"
+                @click="openAssignment(props.row)"
+              />
+              <q-btn
+                v-if="props.row.assignment"
+                flat
+                dense
+                round
+                icon="link_off"
+                color="negative"
+                aria-label="取消指派"
+                @click="confirmCancel(props.row)"
+              />
+            </template>
           </q-td>
         </template>
       </q-table>
     </template>
+
+    <assignment-dialog
+      v-model="assignmentOpen"
+      :subnet-id="subnetId"
+      :subnet-cidr="subnet?.cidr ?? ''"
+      :entry="assignmentEntry"
+      @saved="onAssignmentSaved"
+    />
   </q-page>
 </template>
 
@@ -100,8 +157,14 @@ import { useQuasar } from "quasar";
 import { computed, onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
-import { listSubnetIps, type IpEntry } from "@/api/ips";
+import {
+  cancelAssignment,
+  listSubnetIps,
+  type IpEntry,
+  type IpStatus
+} from "@/api/ips";
 import { fetchSubnet, type Subnet } from "@/api/subnets";
+import AssignmentDialog from "@/components/AssignmentDialog.vue";
 
 const $q = useQuasar();
 const route = useRoute();
@@ -110,11 +173,24 @@ const subnetId = Number(route.params.id);
 const subnet = ref<Subnet | null>(null);
 const ips = ref<IpEntry[]>([]);
 const loading = ref(false);
-const filters = ref<{ q: string }>({ q: "" });
+const filters = ref<{ q: string; status: IpStatus | null }>({
+  q: "",
+  status: null
+});
 const pagination = ref({ page: 1, rowsPerPage: 50, rowsNumber: 0 });
+
+const assignmentOpen = ref(false);
+const assignmentEntry = ref<IpEntry | null>(null);
 
 /** v6 為登錄制、尚未支援瀏覽（見票 06），不呼叫 IP API。 */
 const isV6 = computed(() => subnet.value?.cidr.includes(":") ?? false);
+
+const statusOptions: { label: string; value: IpStatus }[] = [
+  { label: "可用", value: "available" },
+  { label: "池內", value: "in_pool" },
+  { label: "手動設定", value: "static" },
+  { label: "保留", value: "reservation" }
+];
 
 const columns: QTableProps["columns"] = [
   { name: "address", label: "IP", field: "address", align: "left" },
@@ -133,15 +209,35 @@ function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** 指派用途標籤；本票尚無指派資料，僅為票 05 預留。 */
-function purposeLabel(purpose: string | null): string {
-  if (purpose === "static") {
-    return "手動設定";
+function statusLabel(status: IpStatus): string {
+  switch (status) {
+    case "available":
+      return "可用";
+    case "in_pool":
+      return "池內";
+    case "static":
+      return "手動設定";
+    case "reservation":
+      return "保留";
   }
-  if (purpose === "reservation") {
-    return "保留";
+}
+
+function statusColor(status: IpStatus): string {
+  switch (status) {
+    case "available":
+      return "positive";
+    case "in_pool":
+      return "blue-grey";
+    case "static":
+      return "primary";
+    case "reservation":
+      return "purple";
   }
-  return purpose ?? "—";
+}
+
+function interfaceLabel(name: string | null, mac: string | null): string {
+  const label = name ?? "未命名";
+  return mac === null ? `${label}（無 MAC）` : `${label} ｜ ${mac}`;
 }
 
 async function fetchIps() {
@@ -149,6 +245,7 @@ async function fetchIps() {
   try {
     const page = await listSubnetIps(subnetId, {
       q: filters.value.q.trim() || undefined,
+      status: filters.value.status ?? undefined,
       page: pagination.value.page,
       per_page: pagination.value.rowsPerPage
     });
@@ -175,6 +272,36 @@ function onRequest(request: TableRequest) {
   pagination.value.page = request.pagination.page;
   pagination.value.rowsPerPage = request.pagination.rowsPerPage;
   void fetchIps();
+}
+
+function openAssignment(entry: IpEntry) {
+  assignmentEntry.value = entry;
+  assignmentOpen.value = true;
+}
+
+function onAssignmentSaved() {
+  void fetchIps();
+}
+
+function confirmCancel(entry: IpEntry) {
+  $q.dialog({
+    title: "取消指派",
+    message: `確定要取消 ${entry.address} 的指派？取消後該位址回到「可用」。`,
+    cancel: true,
+    persistent: true
+  }).onOk(() => {
+    void cancel(entry);
+  });
+}
+
+async function cancel(entry: IpEntry) {
+  try {
+    await cancelAssignment(subnetId, entry.address);
+    $q.notify({ type: "positive", message: "已取消指派" });
+    await fetchIps();
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  }
 }
 
 onMounted(async () => {

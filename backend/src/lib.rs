@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod assignments;
 pub mod auth;
 pub mod config;
 pub mod db;

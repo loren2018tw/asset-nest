@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::api::ApiError;
 use crate::assets::{self, Asset, AssetFilter, AssetInput, AssetPatch};
+use crate::assignments::{self, AssetAssignment};
 use crate::interfaces::{self, Interface};
 
 /// 清單預設每頁筆數（見 spec §6）。
@@ -51,12 +52,13 @@ struct StringItems {
     items: Vec<String>,
 }
 
-/// 資產詳情：資產欄位攤平，加上介面清單（見 spec §5）。
+/// 資產詳情：資產欄位攤平，加上介面清單與已指派 IP（唯讀顯示；見 spec §5）。
 #[derive(Debug, Serialize)]
 struct AssetDetail {
     #[serde(flatten)]
     asset: Asset,
     interfaces: Vec<Interface>,
+    assignments: Vec<AssetAssignment>,
 }
 
 async fn list_assets(
@@ -107,7 +109,15 @@ async fn get_asset(
         .await
         .map_err(|error| ApiError::internal("讀取介面清單失敗", error))?;
 
-    Ok(Json(AssetDetail { asset, interfaces }))
+    let assignments = assignments::list_for_asset(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取已指派 IP 失敗", error))?;
+
+    Ok(Json(AssetDetail {
+        asset,
+        interfaces,
+        assignments,
+    }))
 }
 
 async fn create_asset(

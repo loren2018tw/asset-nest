@@ -1,5 +1,6 @@
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/api/client";
 import type { Interface } from "@/api/interfaces";
+import type { IpPurpose } from "@/api/ips";
 
 /** 資產（見 spec §2.1；`expired` 由後端計算）。 */
 export interface Asset {
@@ -49,9 +50,26 @@ export interface AssetPage {
   per_page: number;
 }
 
-/** 資產詳情：資產欄位＋介面清單（見 spec §5）。 */
+/** 資產詳情中的已指派 IP（唯讀顯示；含網段資訊，見 spec §4.1、§5）。 */
+export interface AssetAssignment {
+  id: number;
+  subnet_id: number;
+  subnet_cidr: string;
+  subnet_name: string | null;
+  address: string;
+  purpose: IpPurpose;
+  hostname: string | null;
+  interface_id: number;
+  interface_name: string | null;
+  mac: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 資產詳情：資產欄位＋介面清單＋已指派 IP（見 spec §5）。 */
 export interface AssetDetail extends Asset {
   interfaces: Interface[];
+  assignments: AssetAssignment[];
 }
 
 interface StringItems {

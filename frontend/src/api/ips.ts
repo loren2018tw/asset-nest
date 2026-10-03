@@ -1,10 +1,21 @@
-import { apiGet } from "@/api/client";
+import { apiDelete, apiGet, apiPut } from "@/api/client";
 
-/** IP 狀態：本票僅「可用」與「池內」；票 05 指派後為 static／reservation。 */
-export type IpStatus = "available" | "in_pool";
+/** IP 狀態：可用、池內、手動設定（static）或保留（reservation）。 */
+export type IpStatus = "available" | "in_pool" | "static" | "reservation";
 
-/** 指派用途：手動設定或 DHCPv4 保留（票 05 實作；未指派為 null）。 */
+/** 指派用途：手動設定或 DHCPv4 保留；未指派為 null。 */
 export type IpPurpose = "static" | "reservation";
+
+/** IP 清單中的指派對象（見 spec §4.3）。 */
+export interface IpAssignmentTarget {
+  asset_id: number;
+  asset_description: string;
+  asset_location: string;
+  interface_id: number;
+  interface_name: string | null;
+  mac: string | null;
+  hostname: string | null;
+}
 
 /** IP 列（見 spec §4.3；v4 位址由後端自網段範圍推導）。 */
 export interface IpEntry {
@@ -14,16 +25,40 @@ export interface IpEntry {
   /** 是否為網段 gateway（僅標記，仍可被指派）。 */
   is_gateway: boolean;
   status: IpStatus;
-  /** 指派用途；未指派為 null（預留欄位，票 05）。 */
+  /** 指派用途；未指派為 null。 */
   purpose: IpPurpose | null;
-  /** 衝突標記；本票恆為空（預留欄位，票 07）。 */
+  /** 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 null。 */
+  assignment: IpAssignmentTarget | null;
+  /** 衝突標記；票 07 實作，本票恆為空。 */
   conflicts: string[];
+}
+
+/** 指派結果（僅記目前狀態，無歷程）。 */
+export interface Assignment {
+  id: number;
+  subnet_id: number;
+  address: string;
+  interface_id: number;
+  purpose: IpPurpose;
+  hostname: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 指派／改用途的輸入。 */
+export interface AssignmentInput {
+  interface_id: number;
+  purpose: IpPurpose;
+  /** 僅保留用途可填（手動設定須為 null）。 */
+  hostname: string | null;
 }
 
 /** IP 清單搜尋與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
-  /** 完整位址精確比對；否則對位址文字做子字串比對。 */
+  /** 完整位址精確比對；否則對位址文字、資產描述、介面名稱與 MAC 做子字串比對。 */
   q?: string | undefined;
+  /** 狀態／用途篩選。 */
+  status?: IpStatus | undefined;
   page?: number | undefined;
   per_page?: number | undefined;
 }
@@ -50,5 +85,27 @@ export function listSubnetIps(
   const search = query.toString();
   return apiGet<IpPage>(
     `/api/v1/subnets/${subnetId}/ips${search === "" ? "" : `?${search}`}`
+  );
+}
+
+/** 指派或改用途（含 hostname）；結構錯誤由後端回 400 與明確訊息。 */
+export function assignIp(
+  subnetId: number,
+  address: string,
+  input: AssignmentInput
+): Promise<Assignment> {
+  return apiPut<Assignment>(
+    `/api/v1/subnets/${subnetId}/ips/${encodeURIComponent(address)}/assignment`,
+    input
+  );
+}
+
+/** 取消指派；位址回到「可用」。 */
+export function cancelAssignment(
+  subnetId: number,
+  address: string
+): Promise<void> {
+  return apiDelete(
+    `/api/v1/subnets/${subnetId}/ips/${encodeURIComponent(address)}/assignment`
   );
 }

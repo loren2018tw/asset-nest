@@ -219,6 +219,53 @@
           </template>
         </q-card-section>
 
+        <q-card-section v-if="asset !== null" class="q-pt-none">
+          <q-separator class="q-mb-md" />
+
+          <div class="text-subtitle2 q-mb-sm">已指派 IP（唯讀）</div>
+
+          <div v-if="loadingInterfaces" class="row justify-center q-pa-md">
+            <q-spinner color="primary" />
+          </div>
+
+          <div v-else-if="assignments.length === 0" class="text-grey-6">
+            尚無指派。
+          </div>
+
+          <q-list v-else dense separator>
+            <q-item v-for="item in assignments" :key="item.id">
+              <q-item-section>
+                <q-item-label class="text-mono">{{
+                  item.address
+                }}</q-item-label>
+                <q-item-label caption>
+                  {{ item.subnet_name ? `${item.subnet_name}｜` : ""
+                  }}{{ item.subnet_cidr }} ｜
+                  {{ assignmentPurposeLabel(item.purpose) }}
+                  <template v-if="item.hostname">
+                    ｜ {{ item.hostname }}
+                  </template>
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-btn
+                  flat
+                  dense
+                  size="sm"
+                  color="primary"
+                  :to="`/subnets/${item.subnet_id}/ips`"
+                  label="IP 管理"
+                  @click="open = false"
+                />
+              </q-item-section>
+            </q-item>
+          </q-list>
+
+          <div class="text-caption text-grey-7 q-mt-sm">
+            指派操作一律在 IP 管理頁進行；IP 值不可修改。
+          </div>
+        </q-card-section>
+
         <q-card-actions align="right">
           <q-btn v-close-popup flat label="取消" />
           <q-btn color="primary" type="submit" label="儲存" :loading="saving" />
@@ -239,6 +286,7 @@ import {
   findByDeviceSerial,
   updateAsset,
   type Asset,
+  type AssetAssignment,
   type AssetInput
 } from "@/api/assets";
 import {
@@ -248,6 +296,7 @@ import {
   type Interface,
   type InterfaceInput
 } from "@/api/interfaces";
+import type { IpPurpose } from "@/api/ips";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -314,6 +363,8 @@ const locationField = ref<HTMLElement | null>(null);
 const interfaceDrafts = ref<InterfaceDraft[]>([]);
 /** 對話框開啟時載入的既有介面，供儲存時找出已刪除者。 */
 const originalInterfaces = ref<Interface[]>([]);
+/** 該資產已指派的 IP（唯讀顯示；指派一律在 IP 管理頁操作）。 */
+const assignments = ref<AssetAssignment[]>([]);
 const loadingInterfaces = ref(false);
 const interfaceError = ref("");
 /** 新增模式已建立、但介面尚未同步完成時記下的資產 id。 */
@@ -411,6 +462,7 @@ async function loadInterfaces() {
 
   originalInterfaces.value = [];
   interfaceDrafts.value = [];
+  assignments.value = [];
   interfaceError.value = "";
   loadingInterfaces.value = false;
 
@@ -426,6 +478,7 @@ async function loadInterfaces() {
     }
     originalInterfaces.value = detail.interfaces;
     interfaceDrafts.value = detail.interfaces.map(toDraft);
+    assignments.value = detail.assignments;
   } catch (cause) {
     if (token === interfaceLoadToken) {
       interfaceError.value = `讀取介面失敗：${messageOf(cause)}`;
@@ -547,6 +600,11 @@ function normalizeMac(text: string): string | null {
 function textOrNull(value: string): string | null {
   const text = value.trim();
   return text === "" ? null : text;
+}
+
+/** 指派用途標籤（唯讀顯示）。 */
+function assignmentPurposeLabel(purpose: IpPurpose): string {
+  return purpose === "reservation" ? "保留" : "手動設定";
 }
 
 function messageOf(cause: unknown): string {
