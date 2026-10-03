@@ -1,6 +1,7 @@
 //! asset-nest 後端：API 與前端靜態檔的同源服務（見 `docs/adr/0004`）。
 
 pub mod api;
+pub mod assets;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -9,8 +10,8 @@ pub mod web;
 
 use std::path::PathBuf;
 
-use axum::middleware;
 use axum::Router;
+use axum::middleware;
 use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
 

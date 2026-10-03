@@ -1,12 +1,16 @@
 //! API 路由骨架：前綴 `/api`；未來的功能路由一律掛在 `/api/v1` 之下。
 
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::AppState;
+
+mod assets;
+mod error;
+
+pub use error::ApiError;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -22,7 +26,7 @@ mod v1 {
     use crate::AppState;
 
     pub fn router() -> Router<AppState> {
-        Router::new()
+        Router::new().merge(super::assets::router())
     }
 }
 
@@ -51,19 +55,7 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     })
 }
 
-#[derive(Serialize)]
-struct ErrorBody {
-    error: &'static str,
-    message: &'static str,
-}
-
 /// `/api` 底下未匹配的路徑：一律 JSON 404，不落入 SPA fallback。
-async fn not_found() -> (StatusCode, Json<ErrorBody>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorBody {
-            error: "not_found",
-            message: "找不到此 API 路徑",
-        }),
-    )
+async fn not_found() -> ApiError {
+    ApiError::not_found("找不到此 API 路徑")
 }

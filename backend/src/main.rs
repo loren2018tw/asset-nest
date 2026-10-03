@@ -1,12 +1,12 @@
 //! asset-nest 後端啟動點。
 
 use anyhow::Context;
-use asset_nest::{config::Config, db, AppState};
+use asset_nest::{AppState, config::Config, db};
 use axum::serve;
 use tokio::net::TcpListener;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

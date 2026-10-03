@@ -25,6 +25,18 @@
           </q-item-section>
           <q-item-section> 總覽 </q-item-section>
         </q-item>
+        <q-item clickable to="/assets" exact>
+          <q-item-section avatar>
+            <q-icon name="inventory_2" />
+          </q-item-section>
+          <q-item-section> 資產管理 </q-item-section>
+        </q-item>
+        <q-item clickable to="/ips" exact>
+          <q-item-section avatar>
+            <q-icon name="lan" />
+          </q-item-section>
+          <q-item-section> IP 管理 </q-item-section>
+        </q-item>
       </q-list>
     </q-drawer>
 

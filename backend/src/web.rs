@@ -6,10 +6,10 @@
 
 use std::path::Path;
 
+use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
 /// 依 dist 目錄狀態回傳對應的 fallback 服務。
@@ -17,8 +17,7 @@ pub fn service(dist_dir: &Path) -> Router {
     let index = dist_dir.join("index.html");
 
     if index.exists() {
-        Router::new()
-            .fallback_service(ServeDir::new(dist_dir).fallback(ServeFile::new(index)))
+        Router::new().fallback_service(ServeDir::new(dist_dir).fallback(ServeFile::new(index)))
     } else {
         Router::new().fallback(get(not_built))
     }

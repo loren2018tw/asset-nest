@@ -1,6 +1,6 @@
 //! 骨架驗收：`/api/health` 回應 200 與 JSON 狀態。
 
-use asset_nest::{app, AppState};
+use asset_nest::{AppState, app};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
