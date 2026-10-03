@@ -8,47 +8,62 @@
 被追蹤的 IT 設備（伺服器、網路設備、使用者電腦、印表機等）。資產可以尚無網路介面；純周邊（如螢幕）目前不算 Asset。
 
 **Interface（網路介面）**
-Asset 的網路介面，以 MAC 位址為識別核心。一台 Asset 可有 0 到多個 Interface；一個 Interface 屬於唯一一台 Asset。
+Asset 的網路介面，可有 MAC 位址（可空）。MAC 為空的 Interface 代表以手動方式設定 IP 的介面，不可有 Reservation。一台 Asset 可有 0 到多個 Interface；一個 Interface 屬於唯一一台 Asset。
 
 **Subnet（子網段）**
-IP 位址所屬的網段範圍。一個 Subnet 包含多個 IpAddress；一個 IpAddress 只屬於唯一 Subnet。
+一段連續的 IP 位址範圍（CIDR），位址族為 IPv4 或 IPv6。一個 Subnet 包含多個 IpAddress；一個 IpAddress 只屬於唯一 Subnet。單一 Subnet 為單一地址族，雙棧環境以兩筆 Subnet 表示。DHCP 位址池與 Reservation 本階段僅支援 IPv4。可設選填 gateway；gateway 僅為標記，該位址仍可被指派。
 
 **IpAddress（IP 位址）**
-Subnet 中的一個 IPv4 位址，是獨立實體（不是 Asset 的附屬欄位）。與 Interface 為多對多關係：一個 Interface 可隨時間被指派不同 IpAddress，一個 IpAddress 也可先後被不同 Interface 使用。
+Subnet 中的一個位址，是獨立實體（不是 Asset 的附屬欄位）。用途為下列之一：可用（available）、手動設定（static）、DHCPv4 保留（reservation）。是否落在 DHCP 位址池內由 Subnet 的池範圍推導；池內位址不可指派。IPv6 位址採登錄制（僅已指派者存在），不枚舉空閒位址。
+
+**Assignment（指派）**
+IpAddress 與 Interface 的對應關係（見 ADR-0005）。同一 Interface 在同一 Subnet 至多一個 IpAddress；跨 Subnet（含 v4、v6 並存）可各有一個。UI 由 Interface 推導所屬 Asset 顯示描述與位置。僅記目前指派，不留歷程；換介面或換 IP 即為取消後重新指派。
 
 **Reservation（保留位址）**
-「Subnet 內某個 IpAddress＋某個 Interface 的 MAC（＋可選 hostname）」的固定對應，供 Kea DHCP 據以固定配發。asset-nest 是其真實來源（見 ADR-0002）。
+「Subnet 內某個 IpAddress 指派給某個帶 MAC 的 Interface（＋可選 hostname）」的固定對應，供 Kea DHCPv4 據以固定配發。asset-nest 是其真實來源（見 ADR-0002）。
 
 **Lease（租約）**
 Kea 動態配發的結果記錄。真實來源是 Kea；asset-nest 僅唯讀檢視。
 
+**DHCP 位址池（pool）**
+Subnet 內保留給 Kea 動態配發的位址範圍，可多段；本階段僅 IPv4。池內位址不可指派給 Interface。
+
+## 欄位詞彙
+
+**位置（location）**
+Asset 的所在位置。自由文字欄位，輸入時提供既有值建議；不是獨立實體。
+
+**設備序號（device serial number）**
+設備原廠序號，選填。單稱「序號」通常指資料庫主鍵、不出現在介面，勿與本詞混用。
+_Avoid_: 序號
+
 ## 狀態詞彙
 
-**可用（available）**：未被保留、未被租用，且不在 Kea 動態配發池內的位址。
+**可用（available）**：未被指派、無 Reservation、未被租用，且不在 DHCP 位址池內的位址。
+**手動（static）**：已指派給 Interface、由人工在設備端設定的位址；不經 Kea。
 **保留（reserved）**：存在對應 Reservation 的位址。
 **動態（dynamic）**：目前由 Lease 佔用的位址。
-**衝突（conflict）**：資料互相矛盾的情形（見下方 Conflict 詞彙）。
+**池內（in-pool）**：落在 DHCP 位址池範圍內的位址；不可指派。
+**衝突（conflict）**：資料互相矛盾的情形（見下方衝突詞彙）。
 
-（狀態的判定細節屬功能階段，本階段僅定詞。）
+衝突是標記，不是狀態；以標記呈現，不阻擋儲存與編輯。結構性規則（如網段重疊、同網段重複指派）則直接阻擋，兩層分界見 ADR-0006。
 
 ## 衝突詞彙（沿用 Kealight 已定案者）
 
-以下判定詞彙沿用既有工具 Kealight 的定義，落地於本系統的時機留待功能階段：
-
 - **DuplicateHwAddress**：同一 MAC 在同一 Subnet 出現多筆保留。
 - **IpInUse**：指派的 IP 已被其他保留佔用。
-- **IpInPool**：指派的 IP 落在動態配發池內。
+- **IpInPool**：指派的 IP 落在動態配發池內（Kea 允許此用法，本系統仍沿用 Kealight 的檢出定義）。
 - **IpOutOfSubnet**：指派的 IP 不在該 Subnet 範圍內。
 
 ## 同步詞彙
 
 **真實來源（source of truth）**：該類資料以哪一方為準。
-**推送（push）**：asset-nest 將保留寫入 Kea 的單向動作。
-**對帳（reconcile）**：由 Kea 讀回保留與租約、比對差異的唯讀動作（第二階段）。
+**推送（push）**：asset-nest 將保留寫入 Kea 的單向動作（後續階段實作）。
+**對帳（reconcile）**：由 Kea 讀回保留與租約、比對差異的唯讀動作（後續階段）。
 
 明確非目標：**雙向同步**。
 
 ## 邊界詞彙
 
-**Kea**：ISC 的 DHCP 伺服器；本系統先以 DHCPv4 為對象。
+**Kea**：ISC 的 DHCP 伺服器；本系統的 DHCP 整合（位址池、保留、租約）以 DHCPv4 為對象，IPv6 暫不整合。
 **Kealight**：既有的獨立 Kea 設定工具；asset-nest 不依賴它，現階段亦不共用程式碼（見 ADR-0001）。
