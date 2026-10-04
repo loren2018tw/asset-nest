@@ -11,6 +11,13 @@
         :loading="exporting"
         @click="exportCsv"
       />
+      <q-btn
+        color="primary"
+        outline
+        icon="upload_file"
+        label="匯入"
+        @click="importOpen = true"
+      />
       <q-btn color="primary" icon="add" label="新增網段" @click="openCreate" />
     </div>
 
@@ -103,6 +110,8 @@
       :subnets="subnets"
       @saved="onSaved"
     />
+
+    <subnet-import-dialog v-model="importOpen" @saved="onSaved" />
   </q-page>
 </template>
 
@@ -119,6 +128,7 @@ import {
 } from "@/api/subnets";
 import { saveBlob } from "@/api/client";
 import SubnetFormDialog from "@/components/SubnetFormDialog.vue";
+import SubnetImportDialog from "@/components/SubnetImportDialog.vue";
 
 const $q = useQuasar();
 
@@ -126,6 +136,7 @@ const subnets = ref<SubnetSummary[]>([]);
 const loading = ref(false);
 const exporting = ref(false);
 const dialogOpen = ref(false);
+const importOpen = ref(false);
 const editing = ref<SubnetSummary | null>(null);
 
 const columns: QTableProps["columns"] = [

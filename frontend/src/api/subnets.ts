@@ -4,6 +4,7 @@ import {
   apiGet,
   apiPatch,
   apiPost,
+  apiUpload,
   type DownloadedFile
 } from "@/api/client";
 
@@ -61,6 +62,65 @@ export interface SubnetInput {
   pools: SubnetPoolInput[];
 }
 
+/** 匯入列問題（見 spec §5、ADR-0009）。 */
+export interface SubnetImportIssue {
+  severity: "warning" | "error";
+  code: string;
+  /** 對應的 CSV 欄位名；列級錯誤（如欄位數不一致）為 null。 */
+  field: string | null;
+  message: string;
+}
+
+/** 匯入列 6 欄正規化值；無法正規化者為 null。 */
+export interface SubnetImportRowData {
+  name: string | null;
+  cidr: string | null;
+  gateway: string | null;
+  kea_subnet_id: number | null;
+  /** 正規化位址池：每段 `起點-終點`。 */
+  pools: string[];
+  note: string | null;
+}
+
+/** 單列狀態：取該列最高嚴重度。 */
+export type SubnetImportRowStatus = "ok" | "warning" | "error";
+
+/** 單列報告。 */
+export interface SubnetImportRow {
+  /** 列號＝資料記錄序號＋1（標題為第 1 列）。 */
+  row_number: number;
+  status: SubnetImportRowStatus;
+  data: SubnetImportRowData;
+  issues: SubnetImportIssue[];
+}
+
+/** 匯入摘要。 */
+export interface SubnetImportSummary {
+  total: number;
+  ok: number;
+  warnings: number;
+  errors: number;
+}
+
+/** 正式匯入的建立統計。 */
+export interface SubnetImportCreated {
+  subnets: number;
+}
+
+/** 匯入回應（見 spec §5）。 */
+export interface SubnetImportReport {
+  dry_run: boolean;
+  /** 後端實際使用的編碼。 */
+  encoding: "utf-8" | "big5";
+  ignored_headers: string[];
+  summary: SubnetImportSummary;
+  rows: SubnetImportRow[];
+  /** 正式匯入且寫入成功時為 true。 */
+  committed: boolean;
+  /** 僅 `committed=true` 時有值。 */
+  created: SubnetImportCreated | null;
+}
+
 interface SubnetItems {
   items: SubnetSummary[];
 }
@@ -89,4 +149,18 @@ export function deleteSubnet(id: number): Promise<void> {
 /** 下載全部網段 CSV（UTF-8 BOM；格式與檔名見 ADR-0009）。 */
 export function downloadSubnetsCsv(): Promise<DownloadedFile> {
   return apiDownload("/api/v1/subnets/export");
+}
+
+/**
+ * 匯入網段 CSV（multipart，檔案欄位 `file`；見 spec §5）。
+ * `dryRun=true` 只做預覽與驗證，不寫入任何資料。
+ */
+export function importSubnets(
+  file: File,
+  dryRun: boolean
+): Promise<SubnetImportReport> {
+  return apiUpload<SubnetImportReport>(
+    `/api/v1/subnets/import?dry_run=${dryRun}`,
+    file
+  );
 }
