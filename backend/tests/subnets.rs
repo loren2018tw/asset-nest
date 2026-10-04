@@ -1,7 +1,7 @@
 //! 網段設定整合測試：CRUD、CIDR 正規化、重疊與結構驗證（見票 03）。
 
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -65,6 +65,39 @@ async fn send(
     };
 
     (status, json)
+}
+
+/// 以 `oneshot` 發送 GET；回傳狀態碼、標頭與原始內容（二進位／CSV 回應用）。
+async fn send_bytes(
+    pool: &SqlitePool,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("建立請求");
+
+    let response = app(AppState::new(
+        pool.clone(),
+        std::env::temp_dir().join("asset-nest-test-no-dist"),
+    ))
+    .oneshot(request)
+    .await
+    .expect("執行請求");
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("讀取回應內容")
+        .to_bytes()
+        .to_vec();
+
+    (status, headers, bytes)
 }
 
 /// 新增網段並斷言成功，回傳回應 JSON。
@@ -735,4 +768,114 @@ async fn kea_subnet_id_is_unique_among_v4() {
         .execute(&pool)
         .await;
     assert!(direct.is_err(), "資料庫 UNIQUE 應擋下重複 kea_subnet_id");
+}
+
+#[tokio::test]
+async fn export_subnets_returns_ordered_csv_with_bom() {
+    let pool = test_pool().await;
+
+    // 建立順序刻意打亂，驗證 v4 先、v6 後與同族依網路位址數值排序。
+    create_subnet(
+        &pool,
+        json!({ "cidr": "fd00::/64", "name": "v6 二", "gateway": "fd00::1" }),
+    )
+    .await;
+    create_subnet(&pool, json!({ "cidr": "192.168.0.0/24" })).await;
+    create_subnet(
+        &pool,
+        json!({ "cidr": "2001:db8::/64", "name": "v6 一", "gateway": "2001:db8::1" }),
+    )
+    .await;
+    create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/24",
+            "name": "辦公區",
+            "note": "三樓,近電梯",
+            "gateway": "10.0.0.1",
+            "kea_subnet_id": 10,
+            "pools": [
+                { "start_ip": "10.0.0.100", "end_ip": "10.0.0.150" },
+                { "start_ip": "10.0.0.200", "end_ip": "10.0.0.220" }
+            ]
+        }),
+    )
+    .await;
+
+    let (status, headers, bytes) = send_bytes(&pool, Method::GET, "/api/v1/subnets/export").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "靜態 export 路由優先於 /subnets/{{id}}"
+    );
+    assert_eq!(headers[header::CONTENT_TYPE], "text/csv; charset=utf-8");
+
+    let date = chrono::Local::now().format("%Y%m%d");
+    let disposition = headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .expect("Content-Disposition 為文字");
+    assert!(disposition.starts_with("attachment"), "{disposition}");
+    assert!(
+        disposition.contains(&format!(
+            "filename*=UTF-8''%E7%B6%B2%E6%AE%B5%E5%8C%AF%E5%87%BA_{date}.csv"
+        )),
+        "中文檔名以 filename* 編碼：{disposition}"
+    );
+
+    assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "回應須有 UTF-8 BOM");
+    let mut reader = csv::Reader::from_reader(&bytes[3..]);
+    let csv_headers: Vec<String> = reader
+        .headers()
+        .expect("標題列")
+        .iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        csv_headers,
+        ["名稱", "CIDR", "Gateway", "Kea subnet-id", "位址池", "備註"]
+    );
+
+    let rows: Vec<csv::StringRecord> = reader
+        .into_records()
+        .map(|record| record.expect("資料列"))
+        .collect();
+    let cidrs: Vec<&str> = rows
+        .iter()
+        .map(|row| row.get(1).expect("CIDR 欄"))
+        .collect();
+    assert_eq!(
+        cidrs,
+        [
+            "10.0.0.0/24",
+            "192.168.0.0/24",
+            "2001:db8::/64",
+            "fd00::/64"
+        ],
+        "v4 先、v6 後；同族依 CIDR 網路位址數值"
+    );
+
+    // v4：完整欄位、多段 pool 以 | 分隔、含逗號備註經引號往返
+    assert_eq!(rows[0].get(0), Some("辦公區"));
+    assert_eq!(rows[0].get(2), Some("10.0.0.1"));
+    assert_eq!(rows[0].get(3), Some("10"));
+    assert_eq!(
+        rows[0].get(4),
+        Some("10.0.0.100-10.0.0.150|10.0.0.200-10.0.0.220")
+    );
+    assert_eq!(rows[0].get(5), Some("三樓,近電梯"));
+
+    // v4：選填欄位缺值為空字串
+    for column in [0, 2, 3, 4, 5] {
+        assert_eq!(rows[1].get(column), Some(""), "選填欄位缺值留空");
+    }
+
+    // v6：Kea subnet-id 與位址池留空；名稱／gateway 照常輸出
+    assert_eq!(rows[2].get(0), Some("v6 一"));
+    assert_eq!(rows[2].get(2), Some("2001:db8::1"));
+    assert_eq!(rows[2].get(3), Some(""), "v6 的 Kea subnet-id 留空");
+    assert_eq!(rows[2].get(4), Some(""), "v6 的位址池留空");
+    assert_eq!(rows[3].get(0), Some("v6 二"));
+    assert_eq!(rows[3].get(2), Some("fd00::1"));
+    assert_eq!(rows[3].get(3), Some(""));
+    assert_eq!(rows[3].get(4), Some(""));
 }

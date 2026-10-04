@@ -3,6 +3,8 @@
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.3、§3.1。
 //! 單一網段為單一地址族，雙棧以兩筆表示；pool 與 kea_subnet_id 僅支援 IPv4。
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
@@ -35,6 +37,15 @@ struct SubnetRow {
 /// `subnet_pools` 資料表列。
 #[derive(Debug, FromRow)]
 struct PoolRow {
+    id: i64,
+    start_ip: String,
+    end_ip: String,
+}
+
+/// 一次讀取全部 pools 用的列；附所屬網段 id（匯出避免 N+1）。
+#[derive(Debug, FromRow)]
+struct PoolJoinRow {
+    subnet_id: i64,
     id: i64,
     start_ip: String,
     end_ip: String,
@@ -383,6 +394,121 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
     }
 
     Ok(summaries)
+}
+
+/// 讀取全部網段（含 pools）；供匯出使用。
+///
+/// 兩筆查詢完成（網段＋全部 pools 後依 subnet_id 分組），避免逐網段 N+1。
+pub async fn list_full(pool: &SqlitePool) -> sqlx::Result<Vec<Subnet>> {
+    let rows =
+        sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
+            .fetch_all(pool)
+            .await?;
+
+    let pool_rows = sqlx::query_as::<_, PoolJoinRow>(
+        "SELECT subnet_id, id, start_ip, end_ip FROM subnet_pools ORDER BY id ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut pools_by_subnet: HashMap<i64, Vec<Pool>> = HashMap::new();
+    for row in pool_rows {
+        pools_by_subnet
+            .entry(row.subnet_id)
+            .or_default()
+            .push(Pool {
+                id: row.id,
+                start_ip: row.start_ip,
+                end_ip: row.end_ip,
+            });
+    }
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let pools = pools_by_subnet.remove(&row.id).unwrap_or_default();
+            row.into_subnet(pools)
+        })
+        .collect())
+}
+
+/// 全部網段轉 CSV（UTF-8 BOM＋標題列；格式見 ADR-0009）。
+///
+/// 列排序：v4 先、v6 後；同族依 CIDR 網路位址數值升冪。v6 的
+/// Kea subnet-id 與位址池一律留空；選填欄位缺值為空字串。
+pub fn export_csv(subnets: &[Subnet]) -> Result<Vec<u8>, ApiError> {
+    let mut ordered: Vec<(&Subnet, IpNet)> = Vec::with_capacity(subnets.len());
+    for subnet in subnets {
+        let network = subnet
+            .cidr
+            .parse::<IpNet>()
+            .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))?;
+        ordered.push((subnet, network));
+    }
+    ordered.sort_by(|(_, a), (_, b)| compare_networks(a, b));
+
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer
+        .write_record(["名稱", "CIDR", "Gateway", "Kea subnet-id", "位址池", "備註"])
+        .map_err(write_error)?;
+
+    for (subnet, network) in ordered {
+        let is_v4 = matches!(network, IpNet::V4(_));
+
+        let kea_subnet_id = if is_v4 {
+            subnet
+                .kea_subnet_id
+                .map(|id| id.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let pools = if is_v4 {
+            subnet
+                .pools
+                .iter()
+                .map(|pool| format!("{}-{}", pool.start_ip, pool.end_ip))
+                .collect::<Vec<_>>()
+                .join("|")
+        } else {
+            String::new()
+        };
+
+        writer
+            .write_record([
+                subnet.name.as_deref().unwrap_or(""),
+                subnet.cidr.as_str(),
+                subnet.gateway.as_deref().unwrap_or(""),
+                kea_subnet_id.as_str(),
+                pools.as_str(),
+                subnet.note.as_deref().unwrap_or(""),
+            ])
+            .map_err(write_error)?;
+    }
+
+    let body = writer
+        .into_inner()
+        .map_err(|error| ApiError::internal("產生網段匯出 CSV 失敗", error))?;
+
+    let mut bytes = Vec::with_capacity(body.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
+}
+
+/// CSV 寫入錯誤一律視為內部錯誤（寫入目標為記憶體緩衝區）。
+fn write_error(error: csv::Error) -> ApiError {
+    ApiError::internal("產生網段匯出 CSV 失敗", error)
+}
+
+/// 匯出列排序：v4 先、v6 後；同族依網路位址數值升冪。
+fn compare_networks(a: &IpNet, b: &IpNet) -> Ordering {
+    match (a, b) {
+        (IpNet::V4(a), IpNet::V4(b)) => a.network().cmp(&b.network()),
+        (IpNet::V6(a), IpNet::V6(b)) => a.network().cmp(&b.network()),
+        (IpNet::V4(_), IpNet::V6(_)) => Ordering::Less,
+        (IpNet::V6(_), IpNet::V4(_)) => Ordering::Greater,
+    }
 }
 
 /// 讀取單一網段（含 pools）；不存在回傳 `None`。
@@ -760,5 +886,138 @@ mod tests {
     fn family_detection_uses_address_text() {
         assert_eq!(family_of("10.0.0.0/8"), "ipv4");
         assert_eq!(family_of("fd00::/64"), "ipv6");
+    }
+
+    /// 匯出測試用：以最小內容組出網段（id 與時間不影響匯出內容）。
+    fn export_subnet(
+        cidr: &str,
+        name: Option<&str>,
+        gateway: Option<&str>,
+        kea_subnet_id: Option<i64>,
+        pools: &[(&str, &str)],
+        note: Option<&str>,
+    ) -> Subnet {
+        Subnet {
+            id: 0,
+            cidr: cidr.to_string(),
+            name: name.map(str::to_string),
+            note: note.map(str::to_string),
+            gateway: gateway.map(str::to_string),
+            kea_subnet_id,
+            pools: pools
+                .iter()
+                .enumerate()
+                .map(|(index, (start, end))| Pool {
+                    id: index as i64 + 1,
+                    start_ip: start.to_string(),
+                    end_ip: end.to_string(),
+                })
+                .collect(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn export_csv_orders_v4_then_v6_and_formats_columns() {
+        let subnets = vec![
+            export_subnet(
+                "fd00::/64",
+                Some("v6 二"),
+                Some("fd00::1"),
+                None,
+                &[],
+                Some("v6 備註"),
+            ),
+            export_subnet("192.168.0.0/24", None, None, None, &[], None),
+            export_subnet(
+                "2001:db8::/64",
+                Some("v6 一"),
+                Some("2001:db8::1"),
+                None,
+                &[],
+                None,
+            ),
+            export_subnet(
+                "10.0.0.0/24",
+                Some("辦公區"),
+                Some("10.0.0.1"),
+                Some(10),
+                &[("10.0.0.100", "10.0.0.150"), ("10.0.0.200", "10.0.0.220")],
+                Some("三樓,近電梯"),
+            ),
+        ];
+
+        let bytes = export_csv(&subnets).expect("匯出成功");
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "須有 UTF-8 BOM");
+
+        let mut reader = csv::Reader::from_reader(&bytes[3..]);
+        let headers: Vec<String> = reader
+            .headers()
+            .expect("標題列")
+            .iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            headers,
+            ["名稱", "CIDR", "Gateway", "Kea subnet-id", "位址池", "備註"]
+        );
+
+        let rows: Vec<csv::StringRecord> = reader
+            .into_records()
+            .map(|record| record.expect("資料列"))
+            .collect();
+        assert_eq!(rows.len(), 4);
+
+        assert_eq!(rows[0].get(1), Some("10.0.0.0/24"), "v4 依網路位址升冪");
+        assert_eq!(rows[0].get(0), Some("辦公區"));
+        assert_eq!(rows[0].get(2), Some("10.0.0.1"));
+        assert_eq!(rows[0].get(3), Some("10"));
+        assert_eq!(
+            rows[0].get(4),
+            Some("10.0.0.100-10.0.0.150|10.0.0.200-10.0.0.220"),
+            "多段 pool 以 | 分隔、每段 起點-終點"
+        );
+        assert_eq!(rows[0].get(5), Some("三樓,近電梯"), "含逗號欄位經引號往返");
+
+        assert_eq!(rows[1].get(1), Some("192.168.0.0/24"));
+        for column in [0, 2, 3, 4, 5] {
+            assert_eq!(rows[1].get(column), Some(""), "選填欄位缺值為空字串");
+        }
+
+        assert_eq!(
+            rows[2].get(1),
+            Some("2001:db8::/64"),
+            "v6 排在 v4 後；同族依網路位址數值升冪"
+        );
+        assert_eq!(rows[2].get(0), Some("v6 一"));
+        assert_eq!(rows[2].get(2), Some("2001:db8::1"));
+        assert_eq!(rows[2].get(3), Some(""));
+        assert_eq!(rows[2].get(4), Some(""));
+        assert_eq!(rows[3].get(1), Some("fd00::/64"));
+        assert_eq!(rows[3].get(0), Some("v6 二"));
+        assert_eq!(rows[3].get(2), Some("fd00::1"));
+        assert_eq!(rows[3].get(3), Some(""));
+        assert_eq!(rows[3].get(4), Some(""));
+        assert_eq!(rows[3].get(5), Some("v6 備註"));
+    }
+
+    #[test]
+    fn export_csv_leaves_v6_kea_and_pools_empty() {
+        // 防禦性：v6 資料即使異常帶值，輸出仍依 ADR-0009 留空。
+        let subnet = export_subnet(
+            "fd00::/64",
+            None,
+            None,
+            Some(9),
+            &[("fd00::10", "fd00::20")],
+            None,
+        );
+        let bytes = export_csv(&[subnet]).expect("匯出成功");
+
+        let mut reader = csv::Reader::from_reader(&bytes[3..]);
+        let row = reader.records().next().expect("資料列").expect("資料列");
+        assert_eq!(row.get(3), Some(""), "v6 的 Kea subnet-id 留空");
+        assert_eq!(row.get(4), Some(""), "v6 的位址池留空");
     }
 }

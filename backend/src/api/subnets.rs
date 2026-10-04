@@ -1,10 +1,13 @@
 //! `/api/v1` 網段設定路由（見 spec §4.2、§5）。
 
+use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
+use chrono::Local;
 use serde::Serialize;
 
 use crate::AppState;
@@ -14,6 +17,9 @@ use crate::subnets::{self, Subnet, SubnetInput, SubnetPatch, SubnetSummary};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/subnets", get(list_subnets).post(create_subnet))
+        // 靜態路徑與既有 `/subnets/{id}` 動態路由並存，axum 以靜態優先
+        // （同 `/assets/import` 前例）。
+        .route("/subnets/export", get(export_subnets))
         .route(
             "/subnets/{id}",
             get(get_subnet).patch(update_subnet).delete(delete_subnet),
@@ -30,6 +36,41 @@ async fn list_subnets(State(state): State<AppState>) -> Result<Json<SubnetItems>
     let items = subnets::list(&state.db).await?;
 
     Ok(Json(SubnetItems { items }))
+}
+
+/// 匯出全部網段 CSV（見 ADR-0009、spec §5）：attachment、UTF-8 BOM、
+/// 檔名 `網段匯出_YYYYMMDD.csv`（RFC 5987 `filename*`）。
+async fn export_subnets(State(state): State<AppState>) -> Result<Response<Body>, ApiError> {
+    let subnets = subnets::list_full(&state.db)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段清單失敗", error))?;
+    let body = subnets::export_csv(&subnets)?;
+
+    let date = Local::now().format("%Y%m%d");
+    let filename = format!("網段匯出_{date}.csv");
+    let content_disposition = format!(
+        "attachment; filename=\"subnets_export_{date}.csv\"; filename*=UTF-8''{}",
+        encode_filename(&filename)
+    );
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(header::CONTENT_DISPOSITION, content_disposition)
+        .body(Body::from(body))
+        .map_err(|error| ApiError::internal("建立網段匯出回應失敗", error))
+}
+
+/// RFC 5987 `filename*` 值：attr-char 原樣保留，其餘 UTF-8 位元組以 `%XX` 表示。
+fn encode_filename(name: &str) -> String {
+    name.bytes()
+        .map(|byte| match byte {
+            b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~' => {
+                (byte as char).to_string()
+            }
+            byte if byte.is_ascii_alphanumeric() => (byte as char).to_string(),
+            byte => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 async fn get_subnet(
@@ -107,5 +148,22 @@ async fn delete_subnet(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("找不到網段"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_filename_keeps_attr_chars_and_encodes_non_ascii() {
+        assert_eq!(
+            encode_filename("subnets_export_20261004.csv"),
+            "subnets_export_20261004.csv"
+        );
+        assert_eq!(
+            encode_filename("網段匯出_20261004.csv"),
+            "%E7%B6%B2%E6%AE%B5%E5%8C%AF%E5%87%BA_20261004.csv"
+        );
     }
 }

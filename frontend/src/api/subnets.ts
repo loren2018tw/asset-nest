@@ -1,4 +1,11 @@
-import { apiDelete, apiGet, apiPatch, apiPost } from "@/api/client";
+import {
+  apiDelete,
+  apiDownload,
+  apiGet,
+  apiPatch,
+  apiPost,
+  type DownloadedFile
+} from "@/api/client";
 
 /** 位址族：單一網段為單一地址族，雙棧以兩筆表示（見 CONTEXT.md）。 */
 export type AddressFamily = "ipv4" | "ipv6";
@@ -77,4 +84,9 @@ export function updateSubnet(id: number, input: SubnetInput): Promise<Subnet> {
 /** 刪除網段（有指派時的防護見票 08）。 */
 export function deleteSubnet(id: number): Promise<void> {
   return apiDelete(`/api/v1/subnets/${id}`);
+}
+
+/** 下載全部網段 CSV（UTF-8 BOM；格式與檔名見 ADR-0009）。 */
+export function downloadSubnetsCsv(): Promise<DownloadedFile> {
+  return apiDownload("/api/v1/subnets/export");
 }

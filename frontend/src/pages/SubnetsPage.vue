@@ -3,6 +3,14 @@
     <div class="row items-center q-mb-md">
       <div class="text-h6">網段設定</div>
       <q-space />
+      <q-btn
+        color="primary"
+        outline
+        icon="download"
+        label="匯出"
+        :loading="exporting"
+        @click="exportCsv"
+      />
       <q-btn color="primary" icon="add" label="新增網段" @click="openCreate" />
     </div>
 
@@ -103,13 +111,20 @@ import type { QTableProps } from "quasar";
 import { useQuasar } from "quasar";
 import { onMounted, ref } from "vue";
 
-import { deleteSubnet, listSubnets, type SubnetSummary } from "@/api/subnets";
+import {
+  deleteSubnet,
+  downloadSubnetsCsv,
+  listSubnets,
+  type SubnetSummary
+} from "@/api/subnets";
+import { saveBlob } from "@/api/client";
 import SubnetFormDialog from "@/components/SubnetFormDialog.vue";
 
 const $q = useQuasar();
 
 const subnets = ref<SubnetSummary[]>([]);
 const loading = ref(false);
+const exporting = ref(false);
 const dialogOpen = ref(false);
 const editing = ref<SubnetSummary | null>(null);
 
@@ -149,6 +164,27 @@ function openEdit(subnet: SubnetSummary) {
 
 function onSaved() {
   void fetchSubnets();
+}
+
+/** 後端未帶檔名時的預設匯出檔名（本機日期，格式 `網段匯出_YYYYMMDD.csv`）。 */
+function exportFilename(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `網段匯出_${year}${month}${day}.csv`;
+}
+
+async function exportCsv() {
+  exporting.value = true;
+  try {
+    const { blob, filename } = await downloadSubnetsCsv();
+    saveBlob(blob, filename ?? exportFilename());
+    $q.notify({ type: "positive", message: "已下載網段匯出檔" });
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    exporting.value = false;
+  }
 }
 
 function confirmDelete(subnet: SubnetSummary) {

@@ -105,6 +105,64 @@ export function apiDelete(path: string): Promise<void> {
   return request<void>("DELETE", path);
 }
 
+/** 下載端點回傳的內容與後端建議檔名。 */
+export interface DownloadedFile {
+  blob: Blob;
+  /** `Content-Disposition` 的建議檔名（RFC 5987 `filename*` 優先）；解析失敗為 `null`。 */
+  filename: string | null;
+}
+
+/** 解析 `Content-Disposition`：優先 `filename*=UTF-8''…`，其次 `filename="…"`。 */
+function filenameFromDisposition(disposition: string | null): string | null {
+  if (!disposition) {
+    return null;
+  }
+
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1].trim());
+    } catch {
+      return null;
+    }
+  }
+
+  const plain = /filename="?([^";]+)"?/i.exec(disposition);
+  return plain?.[1]?.trim() ?? null;
+}
+
+/**
+ * 取回二進位下載內容（如 CSV 匯出）；錯誤解析沿用 `{error,message,details}`。
+ * 檔名由 `Content-Disposition` 提供，未提供時由呼叫端決定。
+ */
+export async function apiDownload(path: string): Promise<DownloadedFile> {
+  const response = await fetch(`${BASE_URL}${path}`, {
+    headers: { Accept: "text/csv" }
+  });
+
+  if (!response.ok) {
+    const error = await parseError(response, "GET", path);
+    throw new ApiError(response.status, error.message, error.details);
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: filenameFromDisposition(
+      response.headers.get("Content-Disposition")
+    )
+  };
+}
+
+/** 以 `<a download>` 觸發瀏覽器儲存；物件 URL 用完即釋放。 */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 /**
  * multipart/form-data 上傳；檔案欄位固定為 `file`。
  * 不手動設定 `Content-Type`，由瀏覽器帶上 multipart boundary；
