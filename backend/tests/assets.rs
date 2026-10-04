@@ -1,4 +1,5 @@
-//! 資產管理整合測試：CRUD、必填驗證、搜尋與篩選、屆齡計算（見票 01）。
+//! 資產管理整合測試：CRUD、必填驗證、搜尋與篩選、屆齡計算（見票 01）、
+//! 標籤、標籤篩選、伺服器端排序與 `GET /tags`（見票 11）。
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -115,6 +116,7 @@ async fn create_read_update_delete_asset() {
     assert_eq!(created["description"], "測試伺服器");
     assert_eq!(created["location"], "機房 A");
     assert_eq!(created["brand"], "Dell");
+    assert_eq!(created["tags"], json!([]), "未提供標籤時為空陣列");
     assert_eq!(created["expired"], true, "2000 年購置＋5 年已屆齡");
     assert!(
         created["created_at"]
@@ -538,4 +540,362 @@ async fn expired_flag_is_computed_by_server() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "屆齡仍可刪除");
+}
+
+#[tokio::test]
+async fn tags_are_normalized_on_create_and_patch() {
+    let pool = test_pool().await;
+
+    // 建立：trim、忽略空字串、不分大小寫去重（保留首次出現原樣）
+    let created = create_asset(
+        &pool,
+        json!({
+            "description": "有標籤的資產",
+            "location": "機房",
+            "tags": [" 核心 ", "Core", "core", "", "   ", "備援"]
+        }),
+    )
+    .await;
+    assert_eq!(created["tags"], json!(["核心", "Core", "備援"]));
+
+    let id = created["id"].as_i64().expect("回應含 id");
+
+    // 詳情含 tags
+    let (status, fetched) = send(&pool, Method::GET, &format!("/api/v1/assets/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["tags"], json!(["核心", "Core", "備援"]));
+
+    // 未提供 tags＝維持原值
+    let (status, updated) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/assets/{id}"),
+        Some(json!({ "note": "只改備註" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["tags"], json!(["核心", "Core", "備援"]));
+
+    // 提供陣列＝設定新值（同樣正規化）
+    let (status, updated) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/assets/{id}"),
+        Some(json!({ "tags": [" A ", "a", "B", "b", "B"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["tags"], json!(["A", "B"]));
+
+    // 顯式 null＝清空
+    let (status, cleared) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/assets/{id}"),
+        Some(json!({ "tags": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["tags"], json!([]));
+
+    // 建立時未提供 tags＝空陣列
+    let bare = create_asset(
+        &pool,
+        json!({ "description": "無標籤", "location": "機房" }),
+    )
+    .await;
+    assert_eq!(bare["tags"], json!([]));
+}
+
+#[tokio::test]
+async fn tag_filter_matches_exactly_and_case_insensitively() {
+    let pool = test_pool().await;
+
+    create_asset(
+        &pool,
+        json!({
+            "description": "資料庫主機",
+            "location": "機房",
+            "tags": ["Prod", "DB"]
+        }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({
+            "description": "測試主機",
+            "location": "機房",
+            "tags": ["staging"]
+        }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "備份主機", "location": "機房" }),
+    )
+    .await;
+
+    // 不分大小寫完全符合；子字串不命中
+    for (tag, expected) in [
+        ("prod", 1),
+        ("PROD", 1),
+        ("db", 1),
+        ("Staging", 1),
+        ("pro", 0),
+        ("missing", 0),
+    ] {
+        let (status, page) = send(
+            &pool,
+            Method::GET,
+            &format!("/api/v1/assets?tag={tag}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["total"], expected, "tag={tag}");
+    }
+
+    let (_, page) = send(&pool, Method::GET, "/api/v1/assets?tag=prod", None).await;
+    assert_eq!(page["items"][0]["description"], "資料庫主機");
+
+    // 與其他篩選可組合
+    let (_, page) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/assets?tag=prod&location={}", encode("機房")),
+        None,
+    )
+    .await;
+    assert_eq!(page["total"], 1);
+}
+
+/// 依查詢字串讀取清單並回傳描述順序。
+async fn descriptions(pool: &SqlitePool, query: &str) -> Vec<String> {
+    let (status, page) = send(pool, Method::GET, &format!("/api/v1/assets?{query}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{query}");
+    page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .map(|item| {
+            item["description"]
+                .as_str()
+                .expect("描述為字串")
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn list_sorts_by_whitelisted_columns_with_direction() {
+    let pool = test_pool().await;
+
+    // A：屆齡、標籤 ["b"]；B：未屆齡、標籤 ["a"]；C：無選填值、無標籤
+    create_asset(
+        &pool,
+        json!({
+            "property_no": "PC-2",
+            "description": "Bravo",
+            "location": "機房 B",
+            "brand": "Zeta",
+            "model": "M2",
+            "note": "n2",
+            "purchase_date": "2000-01-01",
+            "lifespan_years": 1,
+            "tags": ["b"]
+        }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({
+            "description": "alpha",
+            "location": "機房 A",
+            "brand": "Alpha",
+            "model": "M1",
+            "note": "n1",
+            "tags": ["a"]
+        }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "property_no": "PC-1", "description": "Charlie", "location": "機房 A" }),
+    )
+    .await;
+
+    // 預設：描述升冪（不分大小寫）
+    assert_eq!(
+        descriptions(&pool, "per_page=10").await,
+        vec!["alpha", "Bravo", "Charlie"]
+    );
+
+    // 文字欄位升／降冪；NULL 依 SQLite 預設（升冪在前、降冪在後）
+    let cases = [
+        (
+            "sort=property_no&dir=asc",
+            vec!["alpha", "Charlie", "Bravo"],
+        ),
+        (
+            "sort=property_no&dir=desc",
+            vec!["Bravo", "Charlie", "alpha"],
+        ),
+        (
+            "sort=description&dir=asc",
+            vec!["alpha", "Bravo", "Charlie"],
+        ),
+        (
+            "sort=description&dir=desc",
+            vec!["Charlie", "Bravo", "alpha"],
+        ),
+        ("sort=location&dir=asc", vec!["alpha", "Charlie", "Bravo"]),
+        ("sort=brand&dir=asc", vec!["Charlie", "alpha", "Bravo"]),
+        ("sort=brand&dir=desc", vec!["Bravo", "alpha", "Charlie"]),
+        ("sort=model&dir=asc", vec!["Charlie", "alpha", "Bravo"]),
+        ("sort=note&dir=desc", vec!["Bravo", "alpha", "Charlie"]),
+        // tags 以 JSON 字串排序：["a"] < ["b"] < []
+        ("sort=tags&dir=asc", vec!["alpha", "Bravo", "Charlie"]),
+        ("sort=tags&dir=desc", vec!["Charlie", "Bravo", "alpha"]),
+        // expired：升冪未屆齡在前（同值以 id 決勝）
+        ("sort=expired&dir=asc", vec!["alpha", "Charlie", "Bravo"]),
+        ("sort=expired&dir=desc", vec!["Bravo", "alpha", "Charlie"]),
+    ];
+    for (query, expected) in cases {
+        assert_eq!(descriptions(&pool, query).await, expected, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn expired_sort_is_consistent_with_rust_flag() {
+    use chrono::{Duration, Local};
+
+    let pool = test_pool().await;
+    let today = Local::now().date_naive();
+    let format_date = |date: chrono::NaiveDate| date.format("%Y-%m-%d").to_string();
+
+    // 含時區邊界（今天、昨天＋年限 0）與閏日（2/29＋1 年）
+    let cases = [
+        ("今天到期", Some(today), Some(0)),
+        ("昨天到期", Some(today - Duration::days(1)), Some(0)),
+        (
+            "閏日加一年",
+            chrono::NaiveDate::from_ymd_opt(2020, 2, 29),
+            Some(1),
+        ),
+        ("無年限", Some(today - Duration::days(4000)), None),
+        ("無購置日期", None, Some(5)),
+    ];
+    for (index, (description, purchase_date, lifespan_years)) in cases.into_iter().enumerate() {
+        create_asset(
+            &pool,
+            json!({
+                "description": format!("{description} {index}"),
+                "location": "機房",
+                "purchase_date": purchase_date.map(format_date),
+                "lifespan_years": lifespan_years,
+            }),
+        )
+        .await;
+    }
+
+    for dir in ["asc", "desc"] {
+        let (status, page) = send(
+            &pool,
+            Method::GET,
+            &format!("/api/v1/assets?sort=expired&dir={dir}&per_page=10"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let flags: Vec<bool> = page["items"]
+            .as_array()
+            .expect("items 為陣列")
+            .iter()
+            .map(|item| item["expired"].as_bool().expect("expired 為布林"))
+            .collect();
+
+        // 排序與 Rust 計算的旗標一致：升冪時 false 全在 true 之前
+        let expected: Vec<bool> = if dir == "asc" {
+            let mut sorted = flags.clone();
+            sorted.sort_unstable();
+            sorted
+        } else {
+            let mut sorted = flags.clone();
+            sorted.sort_unstable_by(|a, b| b.cmp(a));
+            sorted
+        };
+        assert_eq!(flags, expected, "dir={dir} 的屆齡排序與旗標不一致");
+    }
+}
+
+#[tokio::test]
+async fn invalid_sort_and_dir_return_400() {
+    let pool = test_pool().await;
+
+    let (status, body) = send(&pool, Method::GET, "/api/v1/assets?sort=id", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "sort");
+    assert!(
+        body["message"].as_str().expect("訊息為字串").contains("id"),
+        "錯誤訊息應指出無效值"
+    );
+
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        "/api/v1/assets?sort=description&dir=sideways",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "dir");
+
+    // 有效值不受影響
+    let (status, _) = send(
+        &pool,
+        Method::GET,
+        "/api/v1/assets?sort=expired&dir=desc",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn tags_endpoint_deduplicates_case_insensitively_and_sorts() {
+    let pool = test_pool().await;
+
+    create_asset(
+        &pool,
+        json!({ "description": "一", "location": "機房", "tags": ["Zeta"] }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "二", "location": "機房", "tags": ["alpha", "Zeta"] }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "三", "location": "機房", "tags": ["ALPHA", "beta", "  "] }),
+    )
+    .await;
+    create_asset(&pool, json!({ "description": "四", "location": "機房" })).await;
+
+    let (status, body) = send(&pool, Method::GET, "/api/v1/tags", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let tags: Vec<&str> = body["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .map(|value| value.as_str().expect("標籤為字串"))
+        .collect();
+    assert_eq!(
+        tags,
+        vec!["alpha", "beta", "Zeta"],
+        "不分大小寫去重（保留最早原文）且依 NOCASE 排序"
+    );
 }

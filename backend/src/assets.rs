@@ -2,6 +2,8 @@
 //!
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.1、§3。
 
+use std::collections::HashSet;
+
 use chrono::{Datelike, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
@@ -10,9 +12,9 @@ use crate::api::ApiError;
 
 /// `assets` 資料表完整欄位清單。
 const COLUMNS: &str = "id, property_no, description, location, device_serial, brand, model, \
-                       purchase_date, lifespan_years, note, created_at, updated_at";
+                       purchase_date, lifespan_years, note, tags, created_at, updated_at";
 
-/// `assets` 資料表列。
+/// `assets` 資料表列；`tags` 為 JSON 陣列字串（DB 格式）。
 #[derive(Debug, FromRow)]
 struct AssetRow {
     id: i64,
@@ -25,6 +27,7 @@ struct AssetRow {
     purchase_date: Option<String>,
     lifespan_years: Option<i64>,
     note: Option<String>,
+    tags: String,
     created_at: String,
     updated_at: String,
 }
@@ -42,6 +45,8 @@ pub struct Asset {
     pub purchase_date: Option<String>,
     pub lifespan_years: Option<i64>,
     pub note: Option<String>,
+    /// 標籤：多值自由文字（正規化後、不分大小寫去重）。
+    pub tags: Vec<String>,
     /// 屆齡：`purchase_date + lifespan_years < 今天`（僅提示，不影響操作）。
     pub expired: bool,
     pub created_at: String,
@@ -60,6 +65,7 @@ pub struct AssetInput {
     pub purchase_date: Option<String>,
     pub lifespan_years: Option<i64>,
     pub note: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 /// 已驗證的新增內容。
@@ -74,6 +80,7 @@ pub struct ValidAsset {
     purchase_date: Option<String>,
     lifespan_years: Option<i64>,
     note: Option<String>,
+    tags: Vec<String>,
 }
 
 /// 編輯資產的輸入。
@@ -98,6 +105,8 @@ pub struct AssetPatch {
     pub lifespan_years: Option<Option<i64>>,
     #[serde(default, deserialize_with = "double_option")]
     pub note: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub tags: Option<Option<Vec<String>>>,
 }
 
 /// 已驗證的編輯內容；語意同 [`AssetPatch`]，但選填欄位已正規化。
@@ -112,6 +121,7 @@ pub struct ValidPatch {
     purchase_date: Option<Option<String>>,
     lifespan_years: Option<Option<i64>>,
     note: Option<Option<String>>,
+    tags: Option<Option<Vec<String>>>,
 }
 
 impl AssetInput {
@@ -127,6 +137,7 @@ impl AssetInput {
             purchase_date: validate_purchase_date(self.purchase_date)?,
             lifespan_years: validate_lifespan(self.lifespan_years)?,
             note: optional_text(self.note),
+            tags: normalize_tags(self.tags.unwrap_or_default()),
         })
     }
 }
@@ -156,11 +167,86 @@ impl AssetPatch {
                 None => None,
             },
             note: self.note.map(optional_text),
+            // 顯式 null（`Some(None)`）＝清空為空陣列。
+            tags: self
+                .tags
+                .map(|tags| Some(normalize_tags(tags.unwrap_or_default()))),
         })
     }
 }
 
-/// 清單的搜尋、篩選與分頁條件（皆為伺服器端，見 spec §2.1）。
+/// 清單可排序欄位白名單（見票 11）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortField {
+    PropertyNo,
+    #[default]
+    Description,
+    Location,
+    Brand,
+    Model,
+    Note,
+    Tags,
+    Expired,
+}
+
+impl SortField {
+    /// 由查詢參數字串解析；不在白名單回傳 `None`（由 API 層回 400）。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "property_no" => Some(Self::PropertyNo),
+            "description" => Some(Self::Description),
+            "location" => Some(Self::Location),
+            "brand" => Some(Self::Brand),
+            "model" => Some(Self::Model),
+            "note" => Some(Self::Note),
+            "tags" => Some(Self::Tags),
+            "expired" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+
+    /// `ORDER BY` 用的運算式；文字欄位以 `COLLATE NOCASE` 排序。
+    fn order_expression(self) -> &'static str {
+        match self {
+            Self::PropertyNo => "property_no COLLATE NOCASE",
+            Self::Description => "description COLLATE NOCASE",
+            Self::Location => "location COLLATE NOCASE",
+            Self::Brand => "brand COLLATE NOCASE",
+            Self::Model => "model COLLATE NOCASE",
+            Self::Note => "note COLLATE NOCASE",
+            Self::Tags => "tags COLLATE NOCASE",
+            Self::Expired => EXPIRED_EXPR,
+        }
+    }
+}
+
+/// 排序方向（見票 11）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDir {
+    #[default]
+    Asc,
+    Desc,
+}
+
+impl SortDir {
+    /// 由查詢參數字串解析；`asc`／`desc` 以外回傳 `None`（由 API 層回 400）。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "asc" => Some(Self::Asc),
+            "desc" => Some(Self::Desc),
+            _ => None,
+        }
+    }
+
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Asc => "ASC",
+            Self::Desc => "DESC",
+        }
+    }
+}
+
+/// 清單的搜尋、篩選、排序與分頁條件（皆為伺服器端，見 spec §2.1）。
 #[derive(Debug, Default)]
 pub struct AssetFilter {
     /// 關鍵字：財產編號／描述／設備序號／廠牌／型號／備註（子字串、不分大小寫）。
@@ -171,6 +257,12 @@ pub struct AssetFilter {
     pub brand: Option<String>,
     /// 設備序號：不分大小寫完全符合（供重複提示與精確查找）。
     pub device_serial: Option<String>,
+    /// 標籤：JSON 陣列任一元素不分大小寫完全符合（見票 11）。
+    pub tag: Option<String>,
+    /// 排序欄位；預設描述。
+    pub sort: SortField,
+    /// 排序方向；預設升冪。
+    pub dir: SortDir,
     pub page: i64,
     pub per_page: i64,
 }
@@ -183,8 +275,13 @@ pub async fn list(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<(Vec<
 
     let mut query = QueryBuilder::new(format!("SELECT {COLUMNS} FROM assets WHERE 1 = 1"));
     push_filters(&mut query, filter);
-    // 預設排序：描述（升冪）；以 id 作為穩定排序的決勝鍵（見 spec §6）。
-    query.push(" ORDER BY description COLLATE NOCASE ASC, id ASC");
+    // 排序欄位與方向經白名單驗證；以 id 作為穩定排序的決勝鍵（見 spec §6、票 11）。
+    query
+        .push(" ORDER BY ")
+        .push(filter.sort.order_expression())
+        .push(" ")
+        .push(filter.dir.keyword())
+        .push(", id ASC");
     query.push(" LIMIT ").push_bind(filter.per_page);
     query
         .push(" OFFSET ")
@@ -206,8 +303,8 @@ pub async fn create(pool: &SqlitePool, asset: ValidAsset) -> sqlx::Result<Asset>
     let result = sqlx::query(
         "INSERT INTO assets
              (property_no, description, location, device_serial, brand, model,
-              purchase_date, lifespan_years, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              purchase_date, lifespan_years, note, tags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(asset.property_no)
     .bind(asset.description)
@@ -218,6 +315,7 @@ pub async fn create(pool: &SqlitePool, asset: ValidAsset) -> sqlx::Result<Asset>
     .bind(asset.purchase_date)
     .bind(asset.lifespan_years)
     .bind(asset.note)
+    .bind(tags_json(&asset.tags))
     .execute(pool)
     .await?;
 
@@ -270,6 +368,9 @@ pub async fn update(pool: &SqlitePool, id: i64, patch: ValidPatch) -> sqlx::Resu
     if let Some(value) = patch.note {
         set!("note", value);
     }
+    if let Some(value) = patch.tags {
+        set!("tags", tags_json(&value.unwrap_or_default()));
+    }
     if !first {
         query.push(", ");
     }
@@ -303,6 +404,24 @@ pub async fn locations(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
 /// 廠牌建議值：規則同位置，供篩選選單使用。
 pub async fn brands(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
     suggestions(pool, "brand").await
+}
+
+/// 標籤建議值：所有已使用標籤去重（不分大小寫），同值不同大小寫保留最早寫入的原文（見票 11）。
+pub async fn tags(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT je.value
+         FROM assets a, json_each(a.tags) AS je
+         WHERE trim(je.value) <> ''
+           AND a.id = (
+               SELECT MIN(a2.id)
+               FROM assets a2, json_each(a2.tags) AS je2
+               WHERE je2.value = je.value COLLATE NOCASE
+           )
+         GROUP BY je.value COLLATE NOCASE
+         ORDER BY je.value COLLATE NOCASE ASC",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// 某文字欄位的既有值去重清單；同值不同大小寫保留最早寫入的原文。
@@ -350,6 +469,8 @@ impl AssetRow {
             purchase_date: self.purchase_date,
             lifespan_years: self.lifespan_years,
             note: self.note,
+            // 正常寫入一律為合法 JSON；手動改庫等異常值退化為空陣列。
+            tags: serde_json::from_str(&self.tags).unwrap_or_default(),
             expired,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -397,7 +518,49 @@ fn push_filters<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a AssetFilte
             .push(" AND device_serial COLLATE NOCASE = ")
             .push_bind(serial);
     }
+    if let Some(tag) = filter.tag.as_deref().and_then(trimmed) {
+        query
+            .push(" AND EXISTS (SELECT 1 FROM json_each(assets.tags) WHERE value = ")
+            .push_bind(tag)
+            .push(" COLLATE NOCASE)");
+    }
 }
+
+/// 正規化標籤：逐項 trim、忽略空字串、不分大小寫去重（保留首次出現原樣）。
+///
+/// 大小寫折疊比照 SQLite `COLLATE NOCASE`（僅 ASCII），與篩選／建議值一致。
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() || !seen.insert(tag.to_ascii_lowercase()) {
+            continue;
+        }
+        normalized.push(tag.to_string());
+    }
+    normalized
+}
+
+/// 標籤以 JSON 陣列字串入庫；`Vec<String>` 序列化不會失敗。
+fn tags_json(tags: &[String]) -> String {
+    serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 屆齡的 SQL 運算式（1＝屆齡）；語意與 [`is_expired`] 一致，供排序使用（見票 11）。
+///
+/// - 以 `date('now', 'localtime')` 對齊 Rust 的 `Local::now().date_naive()`。
+/// - SQLite 的 `+N years` 對 2/29 會進位到 3/1，Rust 會退至 2/28，故特別修正。
+/// - 無效日期／超界年份的 `date()` 為 NULL，比較結果為 NULL，落入 `ELSE 0`。
+const EXPIRED_EXPR: &str = "CASE \
+     WHEN purchase_date IS NULL OR lifespan_years IS NULL OR lifespan_years < 0 THEN 0 \
+     ELSE CASE WHEN (CASE \
+         WHEN strftime('%m-%d', purchase_date) = '02-29' \
+              AND strftime('%m-%d', date(purchase_date, '+' || lifespan_years || ' years')) = '03-01' \
+         THEN date(purchase_date, '+' || lifespan_years || ' years', '-1 day') \
+         ELSE date(purchase_date, '+' || lifespan_years || ' years') \
+     END) < date('now', 'localtime') THEN 1 ELSE 0 END \
+ END";
 
 /// 轉義 `LIKE` 的萬用字元，讓使用者輸入的 `%`、`_` 被視為字面字元。
 fn escape_like(input: &str) -> String {

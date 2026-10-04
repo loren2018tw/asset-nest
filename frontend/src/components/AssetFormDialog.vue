@@ -131,6 +131,20 @@
             autogrow
             label="備註"
           />
+
+          <q-select
+            v-model="form.tags"
+            :options="tagOptions"
+            multiple
+            use-input
+            use-chips
+            new-value-mode="add-unique"
+            outlined
+            dense
+            label="標籤"
+            hint="自由文字、可多個；輸入後按 Enter 新增"
+            @filter="filterTags"
+          />
         </q-card-section>
 
         <q-card-section class="q-pt-none">
@@ -305,6 +319,7 @@ import {
   createAsset,
   fetchAsset,
   fetchLocations,
+  fetchTags,
   findByDeviceSerial,
   updateAsset,
   type Asset,
@@ -345,6 +360,7 @@ interface FormState {
   purchase_date: string;
   lifespan_years: string;
   note: string;
+  tags: string[];
 }
 
 /** 對話框中的介面編輯列；`id === null`＝尚未儲存的新介面。 */
@@ -372,7 +388,8 @@ function emptyForm(): FormState {
     model: "",
     purchase_date: "",
     lifespan_years: "",
-    note: ""
+    note: "",
+    tags: []
   };
 }
 
@@ -380,6 +397,9 @@ const form = ref<FormState>(emptyForm());
 const saving = ref(false);
 const errorMessage = ref("");
 const allLocations = ref<string[]>([]);
+/** 既有標籤建議（後端去重）；篩選後供 q-select 顯示。 */
+const allTags = ref<string[]>([]);
+const tagOptions = ref<string[]>([]);
 const locationMenuOpen = ref(false);
 const duplicateSerial = ref(false);
 const locationField = ref<HTMLElement | null>(null);
@@ -464,7 +484,8 @@ function prepare() {
           purchase_date: asset.purchase_date ?? "",
           lifespan_years:
             asset.lifespan_years === null ? "" : String(asset.lifespan_years),
-          note: asset.note ?? ""
+          note: asset.note ?? "",
+          tags: [...asset.tags]
         };
 
   errorMessage.value = "";
@@ -472,6 +493,7 @@ function prepare() {
   serialCheckToken += 1;
   savedAssetId.value = null;
   void loadLocations();
+  void loadTags();
   void loadInterfaces();
 }
 
@@ -481,6 +503,25 @@ async function loadLocations() {
   } catch {
     // 建議值載入失敗不影響輸入與儲存
   }
+}
+
+async function loadTags() {
+  try {
+    allTags.value = await fetchTags();
+    tagOptions.value = allTags.value;
+  } catch {
+    // 建議值載入失敗不影響輸入與儲存
+  }
+}
+
+/** 依輸入過濾既有標籤，並排除已選者（新標籤仍可直接輸入新增）。 */
+function filterTags(input: string) {
+  const needle = input.toLowerCase();
+  const selected = new Set(form.value.tags.map(tag => tag.toLowerCase()));
+  tagOptions.value = allTags.value.filter(
+    tag =>
+      !selected.has(tag.toLowerCase()) && tag.toLowerCase().includes(needle)
+  );
 }
 
 /** 編輯模式載入資產詳情中的介面；新增模式無既有介面。 */
@@ -699,7 +740,8 @@ function toInput(): AssetInput {
     model: textOrNull(form.value.model),
     purchase_date: textOrNull(form.value.purchase_date),
     lifespan_years: lifespan === "" ? null : Number(lifespan),
-    note: textOrNull(form.value.note)
+    note: textOrNull(form.value.note),
+    tags: form.value.tags
   };
 }
 

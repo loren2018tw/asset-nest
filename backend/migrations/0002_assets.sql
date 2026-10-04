@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS assets (
     purchase_date  TEXT,
     lifespan_years INTEGER CHECK (lifespan_years IS NULL OR lifespan_years >= 0),
     note           TEXT,
+    tags           TEXT NOT NULL DEFAULT '[]',
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

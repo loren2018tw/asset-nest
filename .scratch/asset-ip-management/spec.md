@@ -37,11 +37,12 @@
 | purchase_date 購置日期 | 否 | 日期 |
 | lifespan_years 年限 | 否 | 整數年 |
 | note 備註 | 否 | |
+| tags 標籤 | 否 | 多值自由文字（JSON 陣列、預設 `[]`）；輸入時以既有值建議（`GET /tags`）；正規化為 trim、忽略空字串、不分大小寫去重 |
 | created_at / updated_at | — | |
 
 - **屆齡徽章**：`purchase_date + lifespan_years < 今天` 時顯示（僅提示）。
-- **列表預設欄位**：財產編號、描述、位置、廠牌、型號、備註、屆齡徽章。
-- **搜尋**：單一關鍵字跨 財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派 IP（大小寫無關、子字串）。**篩選**：位置、廠牌。皆為伺服器端。
+- **列表預設欄位**：財產編號、描述、位置、廠牌、型號、備註、標籤、屆齡徽章。
+- **搜尋**：單一關鍵字跨 財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派 IP（大小寫無關、子字串）。**篩選**：位置、廠牌、標籤（不分大小寫完全符合）。皆為伺服器端。列表標題列可點擊快速排序（伺服器端；預設描述升冪，欄位白名單見 §5）。
 - **刪除**：連動刪除其 Interface、指派與 Reservation；確認對話框顯示「將刪除 N 個介面、M 筆指派（含 K 筆保留）」。
 
 ### 2.2 Interface（網路介面）
@@ -86,7 +87,7 @@
 ```sql
 assets(id, property_no, description NOT NULL, location NOT NULL,
        device_serial, brand, model, purchase_date, lifespan_years, note,
-       created_at, updated_at)
+       tags NOT NULL DEFAULT '[]', created_at, updated_at)
 
 interfaces(id, asset_id NOT NULL REFERENCES assets ON DELETE CASCADE,
            name, mac, note, created_at, updated_at,
@@ -159,7 +160,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 
 | Method | Path | 說明 |
 |---|---|---|
-| GET | `/assets` | 搜尋/篩選/分頁 |
+| GET | `/assets` | 搜尋/篩選（q／location／brand／device_serial／tag）/排序（sort、dir）/分頁 |
 | POST | `/assets` | 新增 |
 | GET | `/assets/{id}` | 含 interfaces 與已指派 IP |
 | PATCH | `/assets/{id}` | 編輯 |
@@ -169,6 +170,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 | PATCH | `/interfaces/{id}` | 編輯介面 |
 | DELETE | `/interfaces/{id}` | 刪除介面（連動） |
 | GET | `/locations` | 位置建議值（既有值去重） |
+| GET | `/tags` | 標籤建議值（既有標籤去重、不分大小寫） |
 | GET / POST | `/subnets` | 清單／新增 |
 | PATCH / DELETE | `/subnets/{id}` | 編輯／刪除 |
 | GET | `/subnets/{id}/ips` | v4 枚舉／v6 登錄；搜尋/篩選/分頁 |
@@ -177,6 +179,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 | DELETE | `/subnets/{id}/ips/{address}/assignment` | 取消指派 |
 
 - 沿用既有 JSON 錯誤格式 `{error, message}`；結構錯誤可附 `details`（如衝突網段、受影響筆數）。
+- `GET /assets` 排序：`sort` 欄位白名單 `property_no`／`description`／`location`／`brand`／`model`／`note`／`tags`／`expired`；`dir`＝`asc`／`desc`；預設 `description` 升冪；無效值回 400。
 
 ## 6. 實作預設（未逐題確認，可直接修改）
 

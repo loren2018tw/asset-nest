@@ -22,7 +22,7 @@
           </template>
         </q-input>
       </div>
-      <div class="col-12 col-sm-6 col-md-3">
+      <div class="col-12 col-sm-4 col-md-2">
         <q-select
           v-model="filters.location"
           :options="locationOptions"
@@ -33,7 +33,7 @@
           @update:model-value="reload"
         />
       </div>
-      <div class="col-12 col-sm-6 col-md-3">
+      <div class="col-12 col-sm-4 col-md-2">
         <q-select
           v-model="filters.brand"
           :options="brandOptions"
@@ -41,6 +41,17 @@
           dense
           clearable
           label="廠牌"
+          @update:model-value="reload"
+        />
+      </div>
+      <div class="col-12 col-sm-4 col-md-2">
+        <q-select
+          v-model="filters.tag"
+          :options="tagOptions"
+          outlined
+          dense
+          clearable
+          label="標籤"
           @update:model-value="reload"
         />
       </div>
@@ -66,6 +77,21 @@
       </template>
       <template #body-cell-note="props">
         <q-td :props="props">{{ props.value || "—" }}</q-td>
+      </template>
+      <template #body-cell-tags="props">
+        <q-td :props="props">
+          <q-chip
+            v-for="tag in props.row.tags"
+            :key="tag"
+            dense
+            size="sm"
+            color="primary"
+            text-color="white"
+          >
+            {{ tag }}
+          </q-chip>
+          <span v-if="props.row.tags.length === 0">—</span>
+        </q-td>
       </template>
       <template #body-cell-expired="props">
         <q-td :props="props" class="text-center">
@@ -126,6 +152,7 @@ import {
   fetchAsset,
   fetchBrands,
   fetchLocations,
+  fetchTags,
   listAssets,
   type Asset,
   type AssetDetail
@@ -139,32 +166,80 @@ const assets = ref<Asset[]>([]);
 const loading = ref(false);
 const locationOptions = ref<string[]>([]);
 const brandOptions = ref<string[]>([]);
+const tagOptions = ref<string[]>([]);
 
 const filters = ref<{
   q: string | null;
   location: string | null;
   brand: string | null;
+  tag: string | null;
 }>({
   q: "",
   location: null,
-  brand: null
+  brand: null,
+  tag: null
 });
 
-const pagination = ref({ page: 1, rowsPerPage: 50, rowsNumber: 0 });
+/** 伺服器端分頁與排序；預設描述升冪（見 spec §6）。 */
+const pagination = ref<{
+  page: number;
+  rowsPerPage: number;
+  rowsNumber: number;
+  sortBy: string | null;
+  descending: boolean;
+}>({
+  page: 1,
+  rowsPerPage: 50,
+  rowsNumber: 0,
+  sortBy: "description",
+  descending: false
+});
 
 const columns: QTableProps["columns"] = [
   {
     name: "property_no",
     label: "財產編號",
     field: "property_no",
-    align: "left"
+    align: "left",
+    sortable: true
   },
-  { name: "description", label: "描述", field: "description", align: "left" },
-  { name: "location", label: "位置", field: "location", align: "left" },
-  { name: "brand", label: "廠牌", field: "brand", align: "left" },
-  { name: "model", label: "型號", field: "model", align: "left" },
-  { name: "note", label: "備註", field: "note", align: "left" },
-  { name: "expired", label: "屆齡", field: "expired", align: "center" },
+  {
+    name: "description",
+    label: "描述",
+    field: "description",
+    align: "left",
+    sortable: true
+  },
+  {
+    name: "location",
+    label: "位置",
+    field: "location",
+    align: "left",
+    sortable: true
+  },
+  {
+    name: "brand",
+    label: "廠牌",
+    field: "brand",
+    align: "left",
+    sortable: true
+  },
+  {
+    name: "model",
+    label: "型號",
+    field: "model",
+    align: "left",
+    sortable: true
+  },
+  { name: "note", label: "備註", field: "note", align: "left", sortable: true },
+  { name: "tags", label: "標籤", field: "tags", align: "left", sortable: true },
+  {
+    name: "expired",
+    label: "屆齡",
+    field: "expired",
+    align: "center",
+    sortable: true
+  },
   { name: "actions", label: "操作", field: "id", align: "right" }
 ];
 
@@ -175,7 +250,12 @@ const assignOpen = ref(false);
 const assignAsset = ref<Asset | null>(null);
 
 interface TableRequest {
-  pagination: { page: number; rowsPerPage: number };
+  pagination: {
+    page: number;
+    rowsPerPage: number;
+    sortBy: string | null;
+    descending: boolean;
+  };
 }
 
 function messageOf(cause: unknown): string {
@@ -189,6 +269,9 @@ async function fetchAssets() {
       q: filters.value.q?.trim() || undefined,
       location: filters.value.location ?? undefined,
       brand: filters.value.brand ?? undefined,
+      tag: filters.value.tag ?? undefined,
+      sort: pagination.value.sortBy ?? undefined,
+      dir: pagination.value.descending ? "desc" : "asc",
       page: pagination.value.page,
       per_page: pagination.value.rowsPerPage
     });
@@ -204,12 +287,14 @@ async function fetchAssets() {
 
 async function loadFilterOptions() {
   try {
-    const [locations, brands] = await Promise.all([
+    const [locations, brands, tags] = await Promise.all([
       fetchLocations(),
-      fetchBrands()
+      fetchBrands(),
+      fetchTags()
     ]);
     locationOptions.value = locations;
     brandOptions.value = brands;
+    tagOptions.value = tags;
   } catch (cause) {
     $q.notify({ type: "negative", message: messageOf(cause) });
   }
@@ -221,8 +306,16 @@ function reload() {
 }
 
 function onRequest(request: TableRequest) {
-  pagination.value.page = request.pagination.page;
-  pagination.value.rowsPerPage = request.pagination.rowsPerPage;
+  const { page, rowsPerPage, sortBy, descending } = request.pagination;
+  const sortChanged =
+    sortBy !== pagination.value.sortBy ||
+    descending !== pagination.value.descending;
+
+  pagination.value.sortBy = sortBy;
+  pagination.value.descending = descending;
+  // 切換排序時回到第 1 頁（見票 11）
+  pagination.value.page = sortChanged ? 1 : page;
+  pagination.value.rowsPerPage = rowsPerPage;
   void fetchAssets();
 }
 

@@ -14,6 +14,8 @@ export interface Asset {
   purchase_date: string | null;
   lifespan_years: number | null;
   note: string | null;
+  /** 標籤：多值自由文字（後端正規化、不分大小寫去重）。 */
+  tags: string[];
   /** 屆齡：購置日期＋年限早於今天（僅提示）。 */
   expired: boolean;
   created_at: string;
@@ -31,14 +33,20 @@ export interface AssetInput {
   purchase_date: string | null;
   lifespan_years: number | null;
   note: string | null;
+  tags: string[];
 }
 
-/** 清單搜尋、篩選與分頁參數（皆為伺服器端）。 */
+/** 清單搜尋、篩選、排序與分頁參數（皆為伺服器端）。 */
 export interface AssetListParams {
   q?: string | undefined;
   location?: string | undefined;
   brand?: string | undefined;
   device_serial?: string | undefined;
+  /** 標籤：不分大小寫完全符合。 */
+  tag?: string | undefined;
+  /** 排序欄位（後端白名單；無效值回 400）。 */
+  sort?: string | undefined;
+  dir?: "asc" | "desc" | undefined;
   page?: number | undefined;
   per_page?: number | undefined;
 }
@@ -115,6 +123,11 @@ export function fetchLocations(): Promise<string[]> {
 /** 廠牌建議值：供篩選選單使用。 */
 export function fetchBrands(): Promise<string[]> {
   return apiGet<StringItems>("/api/v1/brands").then(result => result.items);
+}
+
+/** 標籤建議值：所有已使用標籤去重（不分大小寫），供篩選與輸入建議。 */
+export function fetchTags(): Promise<string[]> {
+  return apiGet<StringItems>("/api/v1/tags").then(result => result.items);
 }
 
 /** 以設備序號精確查找，供重複提示（僅提示、不阻擋）。 */

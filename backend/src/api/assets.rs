@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::ApiError;
-use crate::assets::{self, Asset, AssetFilter, AssetInput, AssetPatch};
+use crate::assets::{
+    self, Asset, AssetFilter, AssetInput, AssetPatch, SortDir, SortField, optional_text,
+};
 use crate::assignments::{self, AssetAssignment};
 use crate::interfaces::{self, Interface};
 
@@ -27,6 +29,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/locations", get(list_locations))
         .route("/brands", get(list_brands))
+        .route("/tags", get(list_tags))
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +38,12 @@ struct ListQuery {
     location: Option<String>,
     brand: Option<String>,
     device_serial: Option<String>,
+    /// 標籤：不分大小寫完全符合（見票 11）。
+    tag: Option<String>,
+    /// 排序欄位白名單；無效值回 400。
+    sort: Option<String>,
+    /// 排序方向 `asc`／`desc`；無效值回 400。
+    dir: Option<String>,
     page: Option<i64>,
     per_page: Option<i64>,
 }
@@ -73,11 +82,28 @@ async fn list_assets(
         .unwrap_or(DEFAULT_PER_PAGE)
         .clamp(1, MAX_PER_PAGE);
 
+    let sort = match optional_text(query.sort) {
+        Some(value) => SortField::parse(&value).ok_or_else(|| {
+            ApiError::validation(format!("無效的排序欄位：{value}")).field("sort")
+        })?,
+        None => SortField::default(),
+    };
+    let dir = match optional_text(query.dir) {
+        Some(value) => SortDir::parse(&value).ok_or_else(|| {
+            ApiError::validation(format!("無效的排序方向：{value}（僅接受 asc／desc）"))
+                .field("dir")
+        })?,
+        None => SortDir::default(),
+    };
+
     let filter = AssetFilter {
         q: query.q,
         location: query.location,
         brand: query.brand,
         device_serial: query.device_serial,
+        tag: query.tag,
+        sort,
+        dir,
         page,
         per_page,
     };
@@ -178,5 +204,13 @@ async fn list_brands(State(state): State<AppState>) -> Result<Json<StringItems>,
     let items = assets::brands(&state.db)
         .await
         .map_err(|error| ApiError::internal("讀取廠牌清單失敗", error))?;
+    Ok(Json(StringItems { items }))
+}
+
+/// 標籤建議值：所有已使用標籤去重（不分大小寫；見票 11）。
+async fn list_tags(State(state): State<AppState>) -> Result<Json<StringItems>, ApiError> {
+    let items = assets::tags(&state.db)
+        .await
+        .map_err(|error| ApiError::internal("讀取標籤清單失敗", error))?;
     Ok(Json(StringItems { items }))
 }
