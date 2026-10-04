@@ -3,6 +3,13 @@
     <div class="row items-center q-mb-md">
       <div class="text-h6">資產管理</div>
       <q-space />
+      <q-btn
+        color="primary"
+        outline
+        icon="upload_file"
+        label="匯入"
+        @click="importOpen = true"
+      />
       <q-btn color="primary" icon="add" label="新增資產" @click="openCreate" />
     </div>
 
@@ -133,6 +140,8 @@
 
     <asset-form-dialog v-model="dialogOpen" :asset="editing" @saved="onSaved" />
 
+    <asset-import-dialog v-model="importOpen" @saved="onSaved" />
+
     <assign-ip-dialog
       v-if="assignAsset !== null"
       v-model="assignOpen"
@@ -159,6 +168,7 @@ import {
 } from "@/api/assets";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
+import AssetImportDialog from "@/components/AssetImportDialog.vue";
 
 const $q = useQuasar();
 
@@ -245,6 +255,8 @@ const columns: QTableProps["columns"] = [
 
 const dialogOpen = ref(false);
 const editing = ref<Asset | null>(null);
+
+const importOpen = ref(false);
 
 const assignOpen = ref(false);
 const assignAsset = ref<Asset | null>(null);

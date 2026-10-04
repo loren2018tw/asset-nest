@@ -22,16 +22,20 @@ interface ErrorBody {
   details?: Record<string, unknown>;
 }
 
-async function request<T>(
+/** 實際送出請求：統一 `Accept`、錯誤解析與 204／JSON 處理。 */
+async function send<T>(
   method: string,
   path: string,
-  body?: unknown
+  body?: BodyInit,
+  contentType?: string
 ): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
+  if (contentType !== undefined) {
+    headers["Content-Type"] = contentType;
+  }
   const init: RequestInit = { method, headers };
   if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    init.body = JSON.stringify(body);
+    init.body = body;
   }
 
   const response = await fetch(`${BASE_URL}${path}`, init);
@@ -46,6 +50,19 @@ async function request<T>(
   }
 
   return (await response.json()) as T;
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<T> {
+  return send<T>(
+    method,
+    path,
+    body === undefined ? undefined : JSON.stringify(body),
+    body === undefined ? undefined : "application/json"
+  );
 }
 
 /** 優先採用後端 `{error, message}` 的訊息（見 spec §5），並保留 `details`。 */
@@ -86,4 +103,15 @@ export function apiPut<T>(path: string, body: unknown): Promise<T> {
 
 export function apiDelete(path: string): Promise<void> {
   return request<void>("DELETE", path);
+}
+
+/**
+ * multipart/form-data 上傳；檔案欄位固定為 `file`。
+ * 不手動設定 `Content-Type`，由瀏覽器帶上 multipart boundary；
+ * 錯誤解析沿用 `{error,message,details}` 與 `ApiError`。
+ */
+export function apiUpload<T>(path: string, file: File): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  return send<T>("POST", path, form);
 }

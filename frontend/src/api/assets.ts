@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPatch, apiPost } from "@/api/client";
+import { apiDelete, apiGet, apiPatch, apiPost, apiUpload } from "@/api/client";
 import type { Interface } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
 
@@ -78,6 +78,88 @@ export interface AssetAssignment {
 export interface AssetDetail extends Asset {
   interfaces: Interface[];
   assignments: AssetAssignment[];
+}
+
+/** 匯入列問題（見 spec §5.2、ADR-0008）。 */
+export interface ImportIssue {
+  severity: "warning" | "error";
+  code: string;
+  /** 對應的 CSV 欄位名；列級錯誤（如欄位數不一致）為 null。 */
+  field: string | null;
+  message: string;
+}
+
+/** 匯入列 14 欄正規化值；無法正規化者為 null。 */
+export interface ImportRowData {
+  property_no: string | null;
+  description: string | null;
+  location: string | null;
+  device_serial: string | null;
+  brand: string | null;
+  model: string | null;
+  purchase_date: string | null;
+  lifespan_years: number | null;
+  note: string | null;
+  tags: string[];
+  mac: string | null;
+  ipv4: string | null;
+  ipv6: string | null;
+  hostname: string | null;
+}
+
+/** 單列狀態：取該列最高嚴重度（見 spec §5.2）。 */
+export type ImportRowStatus = "ok" | "warning" | "error";
+
+/** 單列報告。 */
+export interface ImportRow {
+  /** 列號＝資料記錄序號＋1（標題為第 1 列）。 */
+  row_number: number;
+  status: ImportRowStatus;
+  data: ImportRowData;
+  issues: ImportIssue[];
+}
+
+/** 匯入摘要。 */
+export interface ImportSummary {
+  total: number;
+  ok: number;
+  warnings: number;
+  errors: number;
+}
+
+/** 正式匯入的建立統計。 */
+export interface ImportCreated {
+  assets: number;
+  interfaces: number;
+  assignments: number;
+}
+
+/** 匯入回應（見 spec §5.2）。 */
+export interface ImportReport {
+  dry_run: boolean;
+  /** 後端實際使用的編碼。 */
+  encoding: "utf-8" | "big5";
+  ignored_headers: string[];
+  summary: ImportSummary;
+  rows: ImportRow[];
+  /** 正式匯入且寫入成功時為 true。 */
+  committed: boolean;
+  /** 僅 `committed=true` 時有值。 */
+  created: ImportCreated | null;
+}
+
+/**
+ * 匯入資產 CSV（multipart，檔案欄位 `file`；見 spec §5.1）。
+ * `dryRun=true` 只做預覽與驗證，不寫入任何資料。
+ */
+export function importAssets(
+  file: File,
+  dryRun: boolean
+): Promise<ImportReport> {
+  return apiUpload<ImportReport>(
+    `/api/v1/assets/import?dry_run=${dryRun}`,
+    file
+  );
 }
 
 interface StringItems {
