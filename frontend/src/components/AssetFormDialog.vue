@@ -150,6 +150,8 @@
             />
           </div>
 
+          <PeerMacHint class="q-mb-sm" @fill="fillInterfaceMac" />
+
           <q-banner
             v-if="interfaceError !== ''"
             dense
@@ -297,6 +299,7 @@ import {
   type InterfaceInput
 } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
+import PeerMacHint from "@/components/PeerMacHint.vue";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -510,6 +513,18 @@ function addInterface() {
     note: "",
     original: null
   });
+}
+
+/** 將連線主機 MAC 填入最後一筆 MAC 空白的介面草稿；無空白草稿時提示先新增。 */
+function fillInterfaceMac(mac: string) {
+  const blank = [...interfaceDrafts.value]
+    .reverse()
+    .find(row => row.mac.trim() === "");
+  if (blank === undefined) {
+    $q.notify({ type: "info", message: "請先新增介面" });
+    return;
+  }
+  blank.mac = mac;
 }
 
 function confirmRemoveInterface(row: InterfaceDraft) {

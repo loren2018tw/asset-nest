@@ -77,7 +77,9 @@ export default defineConfig((/* ctx */) => {
       proxy: {
         "/api": {
           target: "http://127.0.0.1:8080",
-          changeOrigin: true
+          changeOrigin: true,
+          // 轉送 X-Forwarded-For，讓後端由原始客戶端 IP 反查 MAC（見票 09）
+          xfwd: true
         }
       }
     },

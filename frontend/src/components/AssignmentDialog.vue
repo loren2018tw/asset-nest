@@ -162,6 +162,7 @@
                   />
                 </div>
               </div>
+              <PeerMacHint class="q-mt-xs" @fill="fillNewInterfaceMac" />
             </q-card>
           </template>
 
@@ -239,6 +240,7 @@ import {
   type IpPurpose
 } from "@/api/ips";
 import type { AddressFamily } from "@/api/subnets";
+import PeerMacHint from "@/components/PeerMacHint.vue";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -438,6 +440,11 @@ async function onAssetSelected(value: Asset | null) {
   } finally {
     loadingInterfaces.value = false;
   }
+}
+
+/** 將連線主機 MAC 填入當場新增介面的 MAC 欄位。 */
+function fillNewInterfaceMac(mac: string) {
+  newInterface.value.mac = mac;
 }
 
 /** 當場新增介面（名稱／MAC），成功後自動選取。 */

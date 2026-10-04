@@ -1,5 +1,7 @@
 //! asset-nest 後端啟動點。
 
+use std::net::SocketAddr;
+
 use anyhow::Context;
 use asset_nest::{AppState, config::Config, db};
 use axum::serve;
@@ -39,9 +41,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("asset-nest 後端：http://{}", listener.local_addr()?);
 
     let state = AppState::new(pool, config.web_dist_dir.clone());
-    serve(listener, asset_nest::app(state))
-        .await
-        .context("伺服器執行失敗")?;
+    // 帶入連線來源資訊，供 `/api/v1/peer-mac` 反查 ARP（見票 09）
+    serve(
+        listener,
+        asset_nest::app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("伺服器執行失敗")?;
 
     Ok(())
 }

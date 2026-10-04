@@ -10,6 +10,7 @@ pub mod db;
 pub mod interfaces;
 pub mod ips;
 pub mod kea;
+pub mod peer;
 pub mod subnets;
 pub mod web;
 

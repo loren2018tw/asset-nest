@@ -11,6 +11,7 @@ mod assets;
 mod error;
 mod interfaces;
 mod ips;
+mod peer;
 mod subnets;
 
 pub use error::ApiError;
@@ -34,6 +35,7 @@ mod v1 {
             .merge(super::interfaces::router())
             .merge(super::subnets::router())
             .merge(super::ips::router())
+            .merge(super::peer::router())
     }
 }
 
