@@ -520,7 +520,9 @@ pub async fn cancel(pool: &SqlitePool, subnet_id: i64, address: IpAddr) -> sqlx:
 ///
 /// `existing`＝同介面同位址的更新：出界／落池為語意衝突（網段編輯造成），
 /// 不重驗、由標記呈現（見 ADR-0006、票 07）；地址族與 v6 用途仍為結構規則。
-fn validate_address(
+///
+/// 供匯入以「新指派」情境（`existing = false`）重用（見票 01）。
+pub(crate) fn validate_address(
     subnet: &Subnet,
     address: IpAddr,
     purpose: &str,

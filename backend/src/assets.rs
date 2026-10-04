@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use chrono::{Datelike, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::api::ApiError;
 
@@ -298,8 +298,13 @@ pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Asset>> {
         .map(|row| row.into_asset(today())))
 }
 
-/// 新增資產並回傳入庫後的內容。
-pub async fn create(pool: &SqlitePool, asset: ValidAsset) -> sqlx::Result<Asset> {
+/// 於既有連線（可為交易）內新增資產，回傳新列 id；不讀回完整資料。
+///
+/// 供匯入在同一交易內建立資產（見票 01）；一般建立路徑走 [`create`]。
+pub(crate) async fn insert_asset(
+    connection: &mut SqliteConnection,
+    asset: ValidAsset,
+) -> sqlx::Result<i64> {
     let result = sqlx::query(
         "INSERT INTO assets
              (property_no, description, location, device_serial, brand, model,
@@ -316,10 +321,19 @@ pub async fn create(pool: &SqlitePool, asset: ValidAsset) -> sqlx::Result<Asset>
     .bind(asset.lifespan_years)
     .bind(asset.note)
     .bind(tags_json(&asset.tags))
-    .execute(pool)
+    .execute(connection)
     .await?;
 
-    let id = result.last_insert_rowid();
+    Ok(result.last_insert_rowid())
+}
+
+/// 新增資產並回傳入庫後的內容；由連線池取連線呼叫 [`insert_asset`]。
+pub async fn create(pool: &SqlitePool, asset: ValidAsset) -> sqlx::Result<Asset> {
+    let id = {
+        let mut connection = pool.acquire().await?;
+        insert_asset(&mut connection, asset).await?
+    };
+
     fetch_row(pool, id)
         .await?
         .map(|row| row.into_asset(today()))
@@ -675,5 +689,72 @@ mod tests {
     fn escape_like_treats_wildcards_literally() {
         assert_eq!(escape_like("50%_x"), "50\\%\\_x");
         assert_eq!(escape_like("a\\b"), "a\\\\b");
+    }
+
+    /// 建立測試資料庫並套用 migrations（比照 `backend/tests/` 整合測試）。
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("建立記憶體資料庫");
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("套用 migrations");
+
+        pool
+    }
+
+    /// 測試用已驗證資產。
+    fn valid_asset(description: &str) -> ValidAsset {
+        ValidAsset {
+            property_no: None,
+            description: description.to_string(),
+            location: "機房 A".to_string(),
+            device_serial: None,
+            brand: None,
+            model: None,
+            purchase_date: None,
+            lifespan_years: None,
+            note: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_asset_is_visible_in_same_transaction() {
+        let pool = test_pool().await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+
+        let id = insert_asset(&mut transaction, valid_asset("交易內資產"))
+            .await
+            .expect("新增資產");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("同交易讀取資產");
+
+        assert_eq!(count, 1, "原語建立後同交易可見");
+    }
+
+    #[tokio::test]
+    async fn insert_asset_rollback_leaves_nothing() {
+        let pool = test_pool().await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+
+        insert_asset(&mut transaction, valid_asset("回滾資產"))
+            .await
+            .expect("新增資產");
+        transaction.rollback().await.expect("回滾交易");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assets")
+            .fetch_one(&pool)
+            .await
+            .expect("回滾後讀取資產");
+
+        assert_eq!(count, 0, "回滾後不留下資料");
     }
 }

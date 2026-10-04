@@ -3,7 +3,7 @@
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.2、§3.1。
 
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 use crate::api::ApiError;
 use crate::assets::{double_option, optional_text};
@@ -137,22 +137,37 @@ pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Interface>> 
     Ok(fetch_row(pool, id).await?.map(InterfaceRow::into_interface))
 }
 
-/// 新增介面；`asset_id` 須存在（外鍵）。
-pub async fn create(
-    pool: &SqlitePool,
+/// 於既有連線（可為交易）內新增介面，回傳新列 id；不讀回完整資料。
+///
+/// 供匯入在同一交易內建立介面（見票 01）；一般建立路徑走 [`create`]。
+pub(crate) async fn insert_interface(
+    connection: &mut SqliteConnection,
     asset_id: i64,
     valid: ValidInterface,
-) -> sqlx::Result<Interface> {
+) -> sqlx::Result<i64> {
     let result =
         sqlx::query("INSERT INTO interfaces (asset_id, name, mac, note) VALUES (?, ?, ?, ?)")
             .bind(asset_id)
             .bind(valid.name)
             .bind(valid.mac)
             .bind(valid.note)
-            .execute(pool)
+            .execute(connection)
             .await?;
 
-    let id = result.last_insert_rowid();
+    Ok(result.last_insert_rowid())
+}
+
+/// 新增介面；`asset_id` 須存在（外鍵）。由連線池取連線呼叫 [`insert_interface`]。
+pub async fn create(
+    pool: &SqlitePool,
+    asset_id: i64,
+    valid: ValidInterface,
+) -> sqlx::Result<Interface> {
+    let id = {
+        let mut connection = pool.acquire().await?;
+        insert_interface(&mut connection, asset_id, valid).await?
+    };
+
     fetch_row(pool, id)
         .await?
         .map(InterfaceRow::into_interface)
@@ -247,7 +262,9 @@ impl InterfaceRow {
 
 /// 正規化 MAC：接受冒號、連字號、點號或無分隔的 12 位十六進位，
 /// 儲存為小寫冒號格式；空白視為未填，其餘格式視為結構錯誤。
-fn normalize_mac(value: Option<String>) -> Result<Option<String>, ApiError> {
+///
+/// 供匯入共用（見票 01）：規則與錯誤文案與介面建立一致。
+pub(crate) fn normalize_mac(value: Option<String>) -> Result<Option<String>, ApiError> {
     let Some(text) = optional_text(value) else {
         return Ok(None);
     };
@@ -330,5 +347,82 @@ mod tests {
         );
         assert!(validate_fields(Some("eth0".to_string()), None, None).is_ok());
         assert!(validate_fields(None, Some("aabbccddeeff".to_string()), None).is_ok());
+    }
+
+    /// 建立測試資料庫並套用 migrations（比照 `backend/tests/` 整合測試）。
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("建立記憶體資料庫");
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("套用 migrations");
+
+        pool
+    }
+
+    /// 於同一交易內建立測試資產（介面外鍵）並回傳 id。
+    async fn insert_test_asset(connection: &mut SqliteConnection) -> i64 {
+        let asset = crate::assets::AssetInput {
+            description: Some("測試資產".to_string()),
+            location: Some("機房 A".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .expect("有效資產");
+
+        crate::assets::insert_asset(connection, asset)
+            .await
+            .expect("新增資產")
+    }
+
+    /// 測試用已驗證介面。
+    fn valid_interface() -> ValidInterface {
+        ValidInterface {
+            name: Some("eth0".to_string()),
+            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            note: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_interface_is_visible_in_same_transaction() {
+        let pool = test_pool().await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+        let asset_id = insert_test_asset(&mut transaction).await;
+
+        let id = insert_interface(&mut transaction, asset_id, valid_interface())
+            .await
+            .expect("新增介面");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM interfaces WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("同交易讀取介面");
+
+        assert_eq!(count, 1, "原語建立後同交易可見");
+    }
+
+    #[tokio::test]
+    async fn insert_interface_rollback_leaves_nothing() {
+        let pool = test_pool().await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+        let asset_id = insert_test_asset(&mut transaction).await;
+
+        insert_interface(&mut transaction, asset_id, valid_interface())
+            .await
+            .expect("新增介面");
+        transaction.rollback().await.expect("回滾交易");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM interfaces")
+            .fetch_one(&pool)
+            .await
+            .expect("回滾後讀取介面");
+
+        assert_eq!(count, 0, "回滾後不留下資料");
     }
 }
