@@ -10,6 +10,7 @@ use crate::AppState;
 mod asset_assignments;
 mod assets;
 mod error;
+mod import;
 mod interfaces;
 mod ips;
 mod peer;
@@ -34,6 +35,7 @@ mod v1 {
         Router::new()
             .merge(super::asset_assignments::router())
             .merge(super::assets::router())
+            .merge(super::import::router())
             .merge(super::interfaces::router())
             .merge(super::subnets::router())
             .merge(super::ips::router())

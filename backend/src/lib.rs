@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod conflicts;
 pub mod db;
+pub mod import;
 pub mod interfaces;
 pub mod ips;
 pub mod kea;

@@ -543,7 +543,8 @@ fn push_filters<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a AssetFilte
 /// 正規化標籤：逐項 trim、忽略空字串、不分大小寫去重（保留首次出現原樣）。
 ///
 /// 大小寫折疊比照 SQLite `COLLATE NOCASE`（僅 ASCII），與篩選／建議值一致。
-fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+/// 供匯入重用（見票 02）。
+pub(crate) fn normalize_tags(tags: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut normalized = Vec::new();
     for tag in tags {

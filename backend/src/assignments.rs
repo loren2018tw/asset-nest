@@ -629,6 +629,35 @@ pub async fn list_for_asset(
     .await
 }
 
+/// 目前指派對象摘要（供匯入報告「已被指派／已登錄」訊息；見票 02）。
+#[derive(Debug)]
+pub(crate) struct AssignmentTarget {
+    pub(crate) asset_description: String,
+    pub(crate) asset_location: String,
+    pub(crate) interface_name: Option<String>,
+    pub(crate) mac: Option<String>,
+}
+
+/// 查詢某網段某位址目前的指派對象；未指派回傳 `None`。
+///
+/// 供匯入逐列驗證附上「位址已被指派」的目前指派對象（比照 ADR-0007 提示資訊樣式）。
+pub(crate) async fn target_for_address(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+) -> sqlx::Result<Option<AssignmentTarget>> {
+    let Some(row) = fetch_by_address(pool, subnet_id, address).await? else {
+        return Ok(None);
+    };
+    let target = fetch_target(pool, row.interface_id).await?;
+    Ok(target.map(|target| AssignmentTarget {
+        asset_description: target.asset_description,
+        asset_location: target.asset_location,
+        interface_name: target.interface_name,
+        mac: target.mac,
+    }))
+}
+
 /// 新增或更新指派列；呼叫端已完成結構驗證。
 async fn write(
     pool: &SqlitePool,
@@ -696,7 +725,8 @@ fn parse_network(cidr: &str) -> Result<IpNet, ApiError> {
 }
 
 /// 位址是否落在網段任一 pool 內（端點皆含）；池內位址不可指派（見 spec §7）。
-fn is_in_pool(subnet: &Subnet, address: Ipv4Addr) -> Result<bool, ApiError> {
+/// 供匯入標示錯誤原因（見票 02）。
+pub(crate) fn is_in_pool(subnet: &Subnet, address: Ipv4Addr) -> Result<bool, ApiError> {
     for pool in &subnet.pools {
         let start: Ipv4Addr = pool
             .start_ip

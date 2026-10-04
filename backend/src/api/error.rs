@@ -67,6 +67,16 @@ impl ApiError {
         tracing::error!(error = %source, "{context}");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", context)
     }
+
+    /// 讀取訊息內容（供匯入逐列報告重用領域驗證錯誤；見票 02）。
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// 讀取 `details.field`；未標示欄位時回傳 `None`（供匯入對應 CSV 欄位）。
+    pub(crate) fn field_name(&self) -> Option<&str> {
+        self.details.as_ref()?.get("field")?.as_str()
+    }
 }
 
 impl IntoResponse for ApiError {
