@@ -22,6 +22,12 @@ export interface Asset {
   updated_at: string;
 }
 
+/** 資產清單列：資產欄位＋全部已指派 IP（見 spec §2.1、票 12）。 */
+export interface AssetListRow extends Asset {
+  /** 全部已指派位址（跨介面、跨網段；v4 先、v6 後，同地址族依數值）。 */
+  assigned_ips: string[];
+}
+
 /** 新增／編輯表單內容；`null` 或空字串代表清除選填欄位。 */
 export interface AssetInput {
   property_no: string | null;
@@ -52,7 +58,8 @@ export interface AssetListParams {
 }
 
 export interface AssetPage {
-  items: Asset[];
+  /** 清單列含已指派 IP；POST／PATCH 回應的 `Asset` 不含此欄位。 */
+  items: AssetListRow[];
   total: number;
   page: number;
   per_page: number;

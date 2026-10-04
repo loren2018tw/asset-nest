@@ -48,9 +48,18 @@ struct ListQuery {
     per_page: Option<i64>,
 }
 
+/// 資產清單列：資產欄位攤平，加上全部已指派位址（「已指派 IP」欄；見票 12）。
+#[derive(Debug, Serialize)]
+struct AssetListRow {
+    #[serde(flatten)]
+    asset: Asset,
+    /// 已指派位址：跨介面、跨網段；v4 先、v6 後，同地址族依位址數值（見 spec §2.1）。
+    assigned_ips: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct AssetPage {
-    items: Vec<Asset>,
+    items: Vec<AssetListRow>,
     total: i64,
     page: i64,
     per_page: i64,
@@ -111,6 +120,19 @@ async fn list_assets(
     let (items, total) = assets::list(&state.db, &filter)
         .await
         .map_err(|error| ApiError::internal("讀取資產清單失敗", error))?;
+
+    // 以單一查詢取當頁資產的已指派位址，附入每列供「已指派 IP」欄（見票 12）。
+    let ids: Vec<i64> = items.iter().map(|asset| asset.id).collect();
+    let mut assigned = assignments::list_for_assets(&state.db, &ids)
+        .await
+        .map_err(|error| ApiError::internal("讀取已指派 IP 失敗", error))?;
+    let items = items
+        .into_iter()
+        .map(|asset| AssetListRow {
+            assigned_ips: assigned.remove(&asset.id).unwrap_or_default(),
+            asset,
+        })
+        .collect();
 
     Ok(Json(AssetPage {
         items,

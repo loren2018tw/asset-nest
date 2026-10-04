@@ -249,7 +249,8 @@ impl SortDir {
 /// 清單的搜尋、篩選、排序與分頁條件（皆為伺服器端，見 spec §2.1）。
 #[derive(Debug, Default)]
 pub struct AssetFilter {
-    /// 關鍵字：財產編號／描述／設備序號／廠牌／型號／備註（子字串、不分大小寫）。
+    /// 關鍵字：財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派位址
+    /// （子字串、不分大小寫；見 spec §2.1）。
     pub q: Option<String>,
     /// 位置：不分大小寫完全符合。
     pub location: Option<String>,
@@ -517,6 +518,19 @@ fn push_filters<'a>(query: &mut QueryBuilder<'a, Sqlite>, filter: &'a AssetFilte
                 .push_bind(pattern.clone())
                 .push(" ESCAPE '\\'");
         }
+        // MAC 與已指派位址（經由介面）以 EXISTS 子查詢比對，避免 JOIN 造成列重複（見票 12）。
+        query
+            .push(" OR EXISTS (SELECT 1 FROM interfaces qi WHERE qi.asset_id = assets.id AND qi.mac LIKE ")
+            .push_bind(pattern.clone())
+            .push(" ESCAPE '\\')");
+        query
+            .push(
+                " OR EXISTS (SELECT 1 FROM ip_assignments qa
+                          JOIN interfaces qi ON qi.id = qa.interface_id
+                         WHERE qi.asset_id = assets.id AND qa.address LIKE ",
+            )
+            .push_bind(pattern.clone())
+            .push(" ESCAPE '\\')");
         query.push(")");
     }
     if let Some(location) = filter.location.as_deref().and_then(trimmed) {

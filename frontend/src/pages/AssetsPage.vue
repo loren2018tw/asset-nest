@@ -21,7 +21,7 @@
           dense
           clearable
           debounce="300"
-          placeholder="搜尋財產編號／描述／設備序號／廠牌／型號／備註"
+          placeholder="搜尋財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派 IP"
           @update:model-value="reload"
         >
           <template #prepend>
@@ -84,6 +84,19 @@
       </template>
       <template #body-cell-note="props">
         <q-td :props="props">{{ props.value || "—" }}</q-td>
+      </template>
+      <template #body-cell-assigned_ips="props">
+        <q-td :props="props">
+          <q-chip
+            v-for="address in props.row.assigned_ips"
+            :key="address"
+            dense
+            size="sm"
+          >
+            {{ address }}
+          </q-chip>
+          <span v-if="props.row.assigned_ips.length === 0">—</span>
+        </q-td>
       </template>
       <template #body-cell-tags="props">
         <q-td :props="props">
@@ -164,7 +177,8 @@ import {
   fetchTags,
   listAssets,
   type Asset,
-  type AssetDetail
+  type AssetDetail,
+  type AssetListRow
 } from "@/api/assets";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
@@ -172,7 +186,7 @@ import AssetImportDialog from "@/components/AssetImportDialog.vue";
 
 const $q = useQuasar();
 
-const assets = ref<Asset[]>([]);
+const assets = ref<AssetListRow[]>([]);
 const loading = ref(false);
 const locationOptions = ref<string[]>([]);
 const brandOptions = ref<string[]>([]);
@@ -226,6 +240,14 @@ const columns: QTableProps["columns"] = [
     field: "location",
     align: "left",
     sortable: true
+  },
+  {
+    // 純顯示：列出全部已指派位址（v4 先、v6 後），不列入排序白名單（見票 12）
+    name: "assigned_ips",
+    label: "已指派 IP",
+    field: "assigned_ips",
+    align: "left",
+    sortable: false
   },
   {
     name: "brand",

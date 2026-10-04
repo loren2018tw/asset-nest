@@ -1,5 +1,6 @@
 //! 資產管理整合測試：CRUD、必填驗證、搜尋與篩選、屆齡計算（見票 01）、
-//! 標籤、標籤篩選、伺服器端排序與 `GET /tags`（見票 11）。
+//! 標籤、標籤篩選、伺服器端排序與 `GET /tags`（見票 11）、清單已指派 IP
+//! 欄與 MAC／IP 搜尋（見票 12）。
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -73,6 +74,72 @@ async fn create_asset(pool: &SqlitePool, body: Value) -> Value {
     let (status, json) = send(pool, Method::POST, "/api/v1/assets", Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "新增資產應成功：{json}");
     json
+}
+
+/// 對資產新增介面並斷言成功，回傳 id。
+async fn create_interface(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/assets/{asset_id}/interfaces"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新增介面應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
+/// 新增網段並斷言成功，回傳 id。
+async fn create_subnet(pool: &SqlitePool, body: Value) -> i64 {
+    let (status, json) = send(pool, Method::POST, "/api/v1/subnets", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "新增網段應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
+/// 將位址以手動設定（static）指派給介面並斷言成功。
+async fn assign_static(pool: &SqlitePool, subnet_id: i64, address: &str, interface_id: i64) {
+    let (status, json) = send(
+        pool,
+        Method::PUT,
+        &format!("/api/v1/subnets/{subnet_id}/ips/{address}/assignment"),
+        Some(json!({ "interface_id": interface_id, "purpose": "static" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "指派 {address} 應成功：{json}");
+}
+
+/// 以 `q` 搜尋並回傳命中的資產 id（依預設排序）。
+async fn search_ids(pool: &SqlitePool, q: &str) -> Vec<i64> {
+    let (status, page) = send(
+        pool,
+        Method::GET,
+        &format!("/api/v1/assets?q={}", encode(q)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "q={q}");
+    page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .map(|item| item["id"].as_i64().expect("回應含 id"))
+        .collect()
+}
+
+/// 讀取清單中某資產的「已指派 IP」欄。
+async fn assigned_ips_of(pool: &SqlitePool, asset_id: i64) -> Vec<String> {
+    let (status, page) = send(pool, Method::GET, "/api/v1/assets?per_page=200", None).await;
+    assert_eq!(status, StatusCode::OK);
+    page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .find(|item| item["id"].as_i64() == Some(asset_id))
+        .and_then(|item| item["assigned_ips"].as_array())
+        .expect("清單列含 assigned_ips 陣列")
+        .iter()
+        .map(|value| value.as_str().expect("位址為字串").to_string())
+        .collect()
 }
 
 /// 將查詢值編碼為 URI 可接受的百分比格式（僅處理測試用到的字元）。
@@ -898,4 +965,194 @@ async fn tags_endpoint_deduplicates_case_insensitively_and_sorts() {
         vec!["alpha", "beta", "Zeta"],
         "不分大小寫去重（保留最早原文）且依 NOCASE 排序"
     );
+}
+
+#[tokio::test]
+async fn list_rows_include_all_assigned_ips() {
+    let pool = test_pool().await;
+
+    // 無指派：空陣列（前端顯示「—」）
+    let bare = create_asset(
+        &pool,
+        json!({ "description": "無網路資產", "location": "機房" }),
+    )
+    .await;
+    let bare_id = bare["id"].as_i64().expect("回應含 id");
+    assert_eq!(
+        assigned_ips_of(&pool, bare_id).await,
+        Vec::<String>::new(),
+        "無指派資產的 assigned_ips 為空陣列"
+    );
+
+    // 單筆指派
+    let single = create_asset(
+        &pool,
+        json!({ "description": "單網段主機", "location": "機房" }),
+    )
+    .await;
+    let single_id = single["id"].as_i64().expect("回應含 id");
+    let single_interface = create_interface(&pool, single_id, json!({ "name": "eth0" })).await;
+    let v4_a = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    assign_static(&pool, v4_a, "10.0.0.6", single_interface).await;
+    assert_eq!(
+        assigned_ips_of(&pool, single_id).await,
+        vec!["10.0.0.6"],
+        "單筆指派"
+    );
+
+    // 多介面、多網段、雙棧並存：v4 先、v6 後，同地址族依位址數值
+    let multi = create_asset(
+        &pool,
+        json!({ "description": "多功能主機", "location": "機房" }),
+    )
+    .await;
+    let multi_id = multi["id"].as_i64().expect("回應含 id");
+    let first = create_interface(
+        &pool,
+        multi_id,
+        json!({ "name": "eth0", "mac": "AA:BB:CC:DD:EE:00" }),
+    )
+    .await;
+    let second = create_interface(
+        &pool,
+        multi_id,
+        json!({ "name": "eth1", "mac": "AA:BB:CC:DD:EE:01" }),
+    )
+    .await;
+
+    let v4_b = create_subnet(&pool, json!({ "cidr": "10.9.0.0/29" })).await;
+    let v6_a = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_b = create_subnet(&pool, json!({ "cidr": "fd00:1::/64" })).await;
+
+    // 刻意與顯示順序不同的指派順序
+    assign_static(&pool, v6_b, "fd00:1::5", first).await;
+    assign_static(&pool, v4_a, "10.0.0.2", second).await;
+    assign_static(&pool, v6_a, "fd00::a", second).await;
+    assign_static(&pool, v4_b, "10.9.0.2", first).await;
+
+    assert_eq!(
+        assigned_ips_of(&pool, multi_id).await,
+        vec!["10.0.0.2", "10.9.0.2", "fd00::a", "fd00:1::5"],
+        "跨介面跨網段聚合；v4 先、v6 後，同族依位址數值"
+    );
+
+    // 指派後清單列仍維持原有資產欄位形狀；新增欄位僅存在於清單
+    let (status, page) = send(&pool, Method::GET, "/api/v1/assets?per_page=200", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .find(|item| item["id"].as_i64() == Some(multi_id))
+        .expect("清單含該資產");
+    assert_eq!(row["description"], "多功能主機");
+    assert_eq!(row["location"], "機房");
+    assert!(row["assigned_ips"].is_array(), "清單列含 assigned_ips");
+
+    assert!(
+        multi.get("assigned_ips").is_none(),
+        "POST 回應不含 assigned_ips"
+    );
+    let (status, updated) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/assets/{multi_id}"),
+        Some(json!({ "note": "更新" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        updated.get("assigned_ips").is_none(),
+        "PATCH 回應不含 assigned_ips"
+    );
+}
+
+#[tokio::test]
+async fn q_matches_mac_and_assigned_ips() {
+    let pool = test_pool().await;
+
+    let target = create_asset(
+        &pool,
+        json!({ "description": "有網路的伺服器", "location": "機房 A" }),
+    )
+    .await;
+    let target_id = target["id"].as_i64().expect("回應含 id");
+    let target_interface = create_interface(
+        &pool,
+        target_id,
+        json!({ "name": "eth0", "mac": "AA:BB:CC:00:11:22" }),
+    )
+    .await;
+
+    let other = create_asset(
+        &pool,
+        json!({ "description": "其他設備", "location": "機房 B" }),
+    )
+    .await;
+    let other_id = other["id"].as_i64().expect("回應含 id");
+    create_interface(
+        &pool,
+        other_id,
+        json!({ "name": "eth0", "mac": "DE:AD:BE:EF:00:01" }),
+    )
+    .await;
+
+    create_asset(
+        &pool,
+        json!({ "description": "純周邊", "location": "機房 A" }),
+    )
+    .await;
+
+    let v4 = create_subnet(&pool, json!({ "cidr": "10.20.30.0/29" })).await;
+    let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    assign_static(&pool, v4, "10.20.30.4", target_interface).await;
+    assign_static(&pool, v6, "fd00::abcd", target_interface).await;
+
+    // MAC：子字串、大小寫無關
+    for q in ["AA:BB:CC:00:11:22", "aa:bb", "00:11:22"] {
+        assert_eq!(search_ids(&pool, q).await, vec![target_id], "q={q}");
+    }
+    assert_eq!(
+        search_ids(&pool, "be:ef").await,
+        vec![other_id],
+        "另一介面的 MAC 片段"
+    );
+
+    // 已指派位址：IPv4／IPv6 子字串、大小寫無關、不因多介面重複列出
+    for q in ["10.20.30.4", "20.30", "FD00::ABCD", "::abcd"] {
+        assert_eq!(search_ids(&pool, q).await, vec![target_id], "q={q}");
+    }
+
+    // 與既有篩選可組合
+    let (status, page) = send(
+        &pool,
+        Method::GET,
+        &format!(
+            "/api/v1/assets?q={}&location={}",
+            encode("aa:bb"),
+            encode("機房 A")
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["id"], target_id);
+
+    let (_, page) = send(
+        &pool,
+        Method::GET,
+        &format!(
+            "/api/v1/assets?q={}&location={}",
+            encode("aa:bb"),
+            encode("機房 B")
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(page["total"], 0, "篩選仍為 AND 組合");
+
+    // 無結果
+    assert!(search_ids(&pool, "no-such-value").await.is_empty());
+    assert!(search_ids(&pool, "10.20.30.99").await.is_empty());
 }

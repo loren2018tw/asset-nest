@@ -5,12 +5,13 @@
 //! v6 採登錄制：新增即指派、用途固定 static；語意衝突偵測見 [`crate::conflicts`]
 //! （票 07）——更新既有指派時，出界／落池不再重驗、改以標記呈現。
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, SqlitePool};
 
 use crate::api::ApiError;
 use crate::assets::{self, optional_text};
@@ -629,6 +630,53 @@ pub async fn list_for_asset(
     .await
 }
 
+/// 讀取多個資產（經由介面）的全部已指派位址，供資產清單「已指派 IP」欄
+/// （見票 12）。
+///
+/// 以單一查詢取當頁資產的指派，回傳每資產一組已排序位址：v4 先、v6 後，
+/// 同地址族依位址數值（見 spec §2.1）。無指派的資產不出現在回傳 map。
+pub async fn list_for_assets(
+    pool: &SqlitePool,
+    asset_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, Vec<String>>> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query = QueryBuilder::new(
+        "SELECT i.asset_id, a.address
+           FROM ip_assignments a
+           JOIN interfaces i ON i.id = a.interface_id
+          WHERE i.asset_id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for asset_id in asset_ids {
+        separated.push_bind(*asset_id);
+    }
+    separated.push_unseparated(")");
+
+    let rows: Vec<(i64, String)> = query.build_query_as().fetch_all(pool).await?;
+
+    let mut grouped: HashMap<i64, Vec<String>> = HashMap::new();
+    for (asset_id, address) in rows {
+        grouped.entry(asset_id).or_default().push(address);
+    }
+    for addresses in grouped.values_mut() {
+        addresses.sort_by_key(|address| address_sort_key(address));
+    }
+
+    Ok(grouped)
+}
+
+/// 已指派位址的顯示排序鍵：v4 先、v6 後，同地址族依位址數值；無法解析者排最後。
+fn address_sort_key(address: &str) -> (u8, u128) {
+    match address.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => (0, u128::from(u32::from(address))),
+        Ok(IpAddr::V6(address)) => (1, u128::from(address)),
+        Err(_) => (2, 0),
+    }
+}
+
 /// 目前指派對象摘要（供匯入報告「已被指派／已登錄」訊息；見票 02）。
 #[derive(Debug)]
 pub(crate) struct AssignmentTarget {
@@ -992,5 +1040,22 @@ mod tests {
         .expect("合法輸入");
         assert_eq!(address.to_string(), "fd00::1", "解析後為壓縮正規形式");
         assert_eq!(interface_id, 7);
+    }
+
+    #[test]
+    fn address_sort_key_orders_v4_before_v6_and_numerically() {
+        let mut addresses = vec![
+            "fd00:1::5".to_string(),
+            "10.9.0.2".to_string(),
+            "fd00::a".to_string(),
+            "10.0.0.10".to_string(),
+            "10.0.0.2".to_string(),
+        ];
+        addresses.sort_by_key(|address| address_sort_key(address));
+        assert_eq!(
+            addresses,
+            vec!["10.0.0.2", "10.0.0.10", "10.9.0.2", "fd00::a", "fd00:1::5"],
+            "v4 先、v6 後；同族依數值"
+        );
     }
 }
