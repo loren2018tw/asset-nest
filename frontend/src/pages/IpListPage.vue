@@ -203,7 +203,7 @@ const subnetId = Number(route.params.id);
 const subnet = ref<Subnet | null>(null);
 const ips = ref<IpEntry[]>([]);
 const loading = ref(false);
-const filters = ref<{ q: string; status: IpStatus | null }>({
+const filters = ref<{ q: string | null; status: IpStatus | null }>({
   q: "",
   status: null
 });
@@ -306,7 +306,7 @@ async function fetchIps() {
   loading.value = true;
   try {
     const page = await listSubnetIps(subnetId, {
-      q: filters.value.q.trim() || undefined,
+      q: filters.value.q?.trim() || undefined,
       status: filters.value.status ?? undefined,
       page: pagination.value.page,
       per_page: pagination.value.rowsPerPage

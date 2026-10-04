@@ -141,7 +141,7 @@ const locationOptions = ref<string[]>([]);
 const brandOptions = ref<string[]>([]);
 
 const filters = ref<{
-  q: string;
+  q: string | null;
   location: string | null;
   brand: string | null;
 }>({
@@ -186,7 +186,7 @@ async function fetchAssets() {
   loading.value = true;
   try {
     const page = await listAssets({
-      q: filters.value.q.trim() || undefined,
+      q: filters.value.q?.trim() || undefined,
       location: filters.value.location ?? undefined,
       brand: filters.value.brand ?? undefined,
       page: pagination.value.page,
