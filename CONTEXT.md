@@ -18,6 +18,7 @@ Subnet 中的一個位址，是獨立實體（不是 Asset 的附屬欄位）。
 
 **Assignment（指派）**
 IpAddress 與 Interface 的對應關係（見 ADR-0005）。同一 Interface 在同一 Subnet 至多一個 IpAddress；跨 Subnet（含 v4、v6 並存）可各有一個。UI 由 Interface 推導所屬 Asset 顯示描述與位置。僅記目前指派，不留歷程；換介面或換 IP 即為取消後重新指派。
+_Avoid_: 綁定
 
 **Reservation（保留位址）**
 「Subnet 內某個 IpAddress 指派給某個帶 MAC 的 Interface（＋可選 hostname）」的固定對應，供 Kea DHCPv4 據以固定配發。asset-nest 是其真實來源（見 ADR-0002）。

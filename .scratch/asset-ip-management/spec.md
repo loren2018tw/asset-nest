@@ -1,6 +1,7 @@
 # 規格：資產與 IP 管理（功能階段一）
 
 - 狀態：已定案（2026-10-04，四輪逐題確認），待實作。
+- 追加定案（2026-10-04）：資產清單「已指派 IP」欄與搜尋補強、IP 清單「位置」欄與標頭排序、指派對話框資產顯示格式（見票 12–15）。
 - 詞彙依 `CONTEXT.md`；關鍵取捨見 `docs/adr/0005`（指派以 Interface 為對象）與 `docs/adr/0006`（兩層驗證）。
 
 ## 1. 範圍
@@ -41,7 +42,8 @@
 | created_at / updated_at | — | |
 
 - **屆齡徽章**：`purchase_date + lifespan_years < 今天` 時顯示（僅提示）。
-- **列表預設欄位**：財產編號、描述、位置、廠牌、型號、備註、標籤、屆齡徽章。
+- **列表預設欄位**：財產編號、描述、位置、已指派 IP、廠牌、型號、備註、標籤、屆齡徽章。
+- **已指派 IP 欄**：列出該資產全部已指派位址（跨介面、跨網段；v4 先、v6 後，同地址族依位址數值）；多筆同列並排（chips）、過多換行；未指派顯示「—」；純顯示，不可排序。
 - **搜尋**：單一關鍵字跨 財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派 IP（大小寫無關、子字串）。**篩選**：位置、廠牌、標籤（不分大小寫完全符合）。皆為伺服器端。列表標題列可點擊快速排序（伺服器端；預設描述升冪，欄位白名單見 §5）。
 - **刪除**：連動刪除其 Interface、指派與 Reservation；確認對話框顯示「將刪除 N 個介面、M 筆指派（含 K 筆保留）」。
 
@@ -146,11 +148,13 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 ### 4.3 IP 管理
 
 - 入口：自網段列表進入（分網段清單）。
-- 列：IP、gateway 徽章、狀態/用途、指派對象（資產描述＋位置＋介面名稱/MAC）、衝突徽章、編輯。
+- 列：IP、gateway 徽章、狀態/用途、位置、指派對象（資產描述＋介面名稱/MAC）、衝突徽章、編輯；未指派列的「位置」顯示「—」。
+- **標頭排序（伺服器端）**：IP、Gateway、狀態/用途、位置、指派對象可排序；衝突、操作不可。狀態固定序「可用→池內→手動設定→保留」；指派對象依資產描述（不分大小寫）；同鍵以 IP 數值升冪決勝；預設 IP 數值升冪；切換排序回第 1 頁；未指派（空白）固定排最後；v4／v6 一致。
 - v4：列出全部 host 位址；pool 列編輯停用。v6：僅登錄位址＋「新增位址」。
-- 編輯對話框：搜尋選資產 → 選介面（可當場新增：名稱/MAC）→ 用途（手動/保留；無 MAC 時保留停用；保留可填 hostname）→「取消指派」。
+- 編輯對話框：搜尋選資產 → 選介面（可當場新增：名稱/MAC）→ 用途（手動/保留；無 MAC 時保留停用；保留可填 hostname）→「取消指派」。已指派列開啟時資產／介面唯讀；換目標＝先「取消指派」再重新指派。
+- 對話框的資產顯示一律為「財產編號(描述)」（財產編號為空時僅顯示描述）；適用搜尋選項、選取值、唯讀資產欄、移轉確認訊息與資產端指派對話框副標題。
 - IP 值不可改；無刪除按鈕。
-- 搜尋/篩選：關鍵字（IP／資產描述／MAC／介面名稱）＋狀態/用途；伺服器端分頁（預設 50 筆）；IP 數值排序。
+- 搜尋/篩選：關鍵字（IP／資產描述／位置／MAC／介面名稱）＋狀態/用途；伺服器端分頁（預設 50 筆）；預設排序 IP 數值升冪（排序見上）。
 
 ### 4.4 導覽
 
@@ -160,7 +164,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 
 | Method | Path | 說明 |
 |---|---|---|
-| GET | `/assets` | 搜尋/篩選（q／location／brand／device_serial／tag）/排序（sort、dir）/分頁 |
+| GET | `/assets` | 搜尋/篩選（q／location／brand／device_serial／tag）/排序（sort、dir）/分頁；列含已指派位址（供「已指派 IP」欄；v4 先、v6 後） |
 | POST | `/assets` | 新增 |
 | GET | `/assets/{id}` | 含 interfaces 與已指派 IP |
 | PATCH | `/assets/{id}` | 編輯 |
@@ -173,13 +177,14 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 | GET | `/tags` | 標籤建議值（既有標籤去重、不分大小寫） |
 | GET / POST | `/subnets` | 清單／新增 |
 | PATCH / DELETE | `/subnets/{id}` | 編輯／刪除 |
-| GET | `/subnets/{id}/ips` | v4 枚舉／v6 登錄；搜尋/篩選/分頁 |
+| GET | `/subnets/{id}/ips` | v4 枚舉／v6 登錄；搜尋/篩選/排序/分頁（q 含位置） |
 | POST | `/subnets/{id}/ips` | v6 新增登錄位址（含指派） |
 | PUT | `/subnets/{id}/ips/{address}/assignment` | 指派／改用途 |
 | DELETE | `/subnets/{id}/ips/{address}/assignment` | 取消指派 |
 
 - 沿用既有 JSON 錯誤格式 `{error, message}`；結構錯誤可附 `details`（如衝突網段、受影響筆數）。
 - `GET /assets` 排序：`sort` 欄位白名單 `property_no`／`description`／`location`／`brand`／`model`／`note`／`tags`／`expired`；`dir`＝`asc`／`desc`；預設 `description` 升冪；無效值回 400。
+- `GET /subnets/{id}/ips` 排序：`sort` 欄位白名單 `address`／`gateway`／`status`／`location`／`assignment`；`dir`＝`asc`／`desc`；預設 `address` 升冪；無效值回 400。
 
 ## 6. 實作預設（未逐題確認，可直接修改）
 
@@ -199,6 +204,10 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 - 網段名稱可重複。
 - 屆齡僅提示、不影響操作。
 - IP 頁無刪除按鈕；池內列的編輯停用。
+- IP 清單依「位置」或「指派對象」排序時，未指派（空白）固定排最後。
+- 編輯既有指派不開放直接更換資產／介面；換目標＝先取消指派再重新指派。
+- v4 非 IP 欄排序採掃描後排序，成本與關鍵字搜尋同級；不設位址數上限。
+- 指派對話框的資產顯示格式為「財產編號(描述)」，無財產編號時僅顯示描述。
 
 ## 8. 決策出處
 
