@@ -13,6 +13,9 @@ export interface IpAssignmentTarget {
   /** 資產財產編號；未填為 null（對話框顯示「財產編號(描述)」，見票 15）。 */
   asset_property_no: string | null;
   asset_description: string;
+  /** 資產廠牌／型號；未填為 null（IP 清單第一行顯示「描述(廠牌 型號)」，見票 16）。 */
+  asset_brand: string | null;
+  asset_model: string | null;
   asset_location: string;
   interface_id: number;
   interface_name: string | null;

@@ -36,12 +36,14 @@ struct AssignmentRow {
     updated_at: String,
 }
 
-/// 目前指派對象（資產＋介面）；供資產端移轉提示（見票 10）。
+/// 目前指派對象（資產＋介面）；供資產端移轉提示（見票 10、票 16）。
 #[derive(Debug, FromRow)]
 struct AssignmentTargetRow {
     asset_id: i64,
     asset_property_no: Option<String>,
     asset_description: String,
+    asset_brand: Option<String>,
+    asset_model: Option<String>,
     asset_location: String,
     interface_id: i64,
     interface_name: Option<String>,
@@ -179,6 +181,11 @@ pub struct IpAssignment {
     /// 資產財產編號；未填為 `None`（對話框顯示「財產編號(描述)」，見 spec §4.3）。
     pub asset_property_no: Option<String>,
     pub asset_description: String,
+    /// 資產廠牌；未填為 `None`。IP 清單指派對象第一行顯示「描述(廠牌 型號)」，
+    /// 缺者省略（見 spec §4.3、票 16）。
+    pub asset_brand: Option<String>,
+    /// 資產型號；未填為 `None`（同 `asset_brand`）。
+    pub asset_model: Option<String>,
     pub asset_location: String,
     pub interface_id: i64,
     pub interface_name: Option<String>,
@@ -198,6 +205,8 @@ pub struct ListedAssignment {
     pub asset_id: i64,
     pub asset_property_no: Option<String>,
     pub asset_description: String,
+    pub asset_brand: Option<String>,
+    pub asset_model: Option<String>,
     pub asset_location: String,
 }
 
@@ -208,6 +217,8 @@ impl ListedAssignment {
             asset_id: self.asset_id,
             asset_property_no: self.asset_property_no.clone(),
             asset_description: self.asset_description.clone(),
+            asset_brand: self.asset_brand.clone(),
+            asset_model: self.asset_model.clone(),
             asset_location: self.asset_location.clone(),
             interface_id: self.interface_id,
             interface_name: self.interface_name.clone(),
@@ -427,6 +438,8 @@ async fn assigned_elsewhere_error(
     .detail("asset_id", json!(target.asset_id))
     .detail("asset_property_no", json!(target.asset_property_no))
     .detail("asset_description", json!(target.asset_description))
+    .detail("asset_brand", json!(target.asset_brand))
+    .detail("asset_model", json!(target.asset_model))
     .detail("asset_location", json!(target.asset_location))
     .detail("interface_id", json!(target.interface_id))
     .detail("interface_name", json!(target.interface_name))
@@ -604,7 +617,9 @@ pub async fn list_for_subnet(
         "SELECT a.address, a.purpose, a.hostname, a.interface_id,
                 i.name AS interface_name, i.mac,
                 s.id AS asset_id, s.property_no AS asset_property_no,
-                s.description AS asset_description, s.location AS asset_location
+                s.description AS asset_description,
+                s.brand AS asset_brand, s.model AS asset_model,
+                s.location AS asset_location
            FROM ip_assignments a
            JOIN interfaces i ON i.id = a.interface_id
            JOIN assets s ON s.id = i.asset_id
@@ -845,6 +860,7 @@ async fn fetch_target(
     sqlx::query_as::<_, AssignmentTargetRow>(
         "SELECT s.id AS asset_id, s.property_no AS asset_property_no,
                 s.description AS asset_description, s.location AS asset_location,
+                s.brand AS asset_brand, s.model AS asset_model,
                 i.id AS interface_id, i.name AS interface_name, i.mac
            FROM interfaces i
            JOIN assets s ON s.id = i.asset_id

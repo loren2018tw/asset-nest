@@ -87,6 +87,30 @@ async fn create_asset(pool: &SqlitePool, description: &str, location: &str) -> i
     json["id"].as_i64().expect("回應含 id")
 }
 
+/// 新增含廠牌／型號的資產並斷言成功，回傳 id（供票 16 指派對象顯示斷言）。
+async fn create_asset_with_brand_model(
+    pool: &SqlitePool,
+    description: &str,
+    location: &str,
+    brand: Option<&str>,
+    model: Option<&str>,
+) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        "/api/v1/assets",
+        Some(json!({
+            "description": description,
+            "location": location,
+            "brand": brand,
+            "model": model
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新增資產應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
 /// 對資產新增介面並斷言成功，回傳 id。
 async fn create_interface(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 {
     let (status, json) = send(
@@ -398,6 +422,10 @@ async fn rows_report_assignment_location() {
         "未指派列不含位置"
     );
 
+    // 未填廠牌／型號為 null（後端指派對象欄位見票 16）
+    assert!(row(&page, "10.0.0.1")["assignment"]["asset_brand"].is_null());
+    assert!(row(&page, "10.0.0.1")["assignment"]["asset_model"].is_null());
+
     // v6：登錄列同樣含位置（v4／v6 回應形狀一致）
     let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
     let v6_id = v6["id"].as_i64().expect("回應含 id");
@@ -413,6 +441,91 @@ async fn rows_report_assignment_location() {
         row(&page, "fd00::20")["assignment"]["asset_location"],
         "Server Room B"
     );
+    assert!(row(&page, "fd00::10")["assignment"]["asset_brand"].is_null());
+    assert!(row(&page, "fd00::10")["assignment"]["asset_model"].is_null());
+}
+
+#[tokio::test]
+async fn rows_report_assignment_asset_brand_and_model() {
+    let pool = test_pool().await;
+
+    // 四種缺值組合：廠牌型號皆有、只有廠牌、只有型號、皆無（見票 16）
+    let both =
+        create_asset_with_brand_model(&pool, "伺服器", "機房 A", Some("Dell"), Some("R740")).await;
+    let brand_only =
+        create_asset_with_brand_model(&pool, "交換器", "機房 B", Some("Cisco"), None).await;
+    let model_only =
+        create_asset_with_brand_model(&pool, "印表機", "機房 C", None, Some("LaserJet")).await;
+    let neither = create_asset(&pool, "測試機", "機房 D").await;
+
+    let both_interface = create_interface(&pool, both, json!({ "name": "eth0" })).await;
+    let brand_interface = create_interface(&pool, brand_only, json!({ "name": "eth1" })).await;
+    let model_interface = create_interface(&pool, model_only, json!({ "name": "eth2" })).await;
+    let neither_interface = create_interface(&pool, neither, json!({ "name": "eth3" })).await;
+
+    // v4：指派列的 `assignment` 帶出廠牌／型號（IP 清單第一行組「描述(廠牌 型號)」用）
+    let v4 = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let v4_id = v4["id"].as_i64().expect("回應含 id");
+    for (address, interface_id) in [
+        ("10.0.0.1", both_interface),
+        ("10.0.0.2", brand_interface),
+        ("10.0.0.3", model_interface),
+        ("10.0.0.4", neither_interface),
+    ] {
+        assign_ip(
+            &pool,
+            v4_id,
+            address,
+            json!({ "interface_id": interface_id, "purpose": "static" }),
+        )
+        .await;
+    }
+
+    let page = list_ips(&pool, v4_id, "").await;
+    assert_eq!(row(&page, "10.0.0.1")["assignment"]["asset_brand"], "Dell");
+    assert_eq!(row(&page, "10.0.0.1")["assignment"]["asset_model"], "R740");
+    assert_eq!(row(&page, "10.0.0.2")["assignment"]["asset_brand"], "Cisco");
+    assert!(
+        row(&page, "10.0.0.2")["assignment"]["asset_model"].is_null(),
+        "只有廠牌：型號為 null"
+    );
+    assert!(
+        row(&page, "10.0.0.3")["assignment"]["asset_brand"].is_null(),
+        "只有型號：廠牌為 null"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.3")["assignment"]["asset_model"],
+        "LaserJet"
+    );
+    assert!(
+        row(&page, "10.0.0.4")["assignment"]["asset_brand"].is_null(),
+        "皆無：廠牌為 null"
+    );
+    assert!(
+        row(&page, "10.0.0.4")["assignment"]["asset_model"].is_null(),
+        "皆無：型號為 null"
+    );
+
+    // v6：登錄列回應形狀與 v4 一致（前端 v4／v6 共用同一 cell）
+    let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_id = v6["id"].as_i64().expect("回應含 id");
+    register_ip(&pool, v6_id, "fd00::1", both_interface).await;
+    register_ip(&pool, v6_id, "fd00::2", brand_interface).await;
+    register_ip(&pool, v6_id, "fd00::3", model_interface).await;
+    register_ip(&pool, v6_id, "fd00::4", neither_interface).await;
+
+    let page = list_ips(&pool, v6_id, "").await;
+    assert_eq!(row(&page, "fd00::1")["assignment"]["asset_brand"], "Dell");
+    assert_eq!(row(&page, "fd00::1")["assignment"]["asset_model"], "R740");
+    assert_eq!(row(&page, "fd00::2")["assignment"]["asset_brand"], "Cisco");
+    assert!(row(&page, "fd00::2")["assignment"]["asset_model"].is_null());
+    assert!(row(&page, "fd00::3")["assignment"]["asset_brand"].is_null());
+    assert_eq!(
+        row(&page, "fd00::3")["assignment"]["asset_model"],
+        "LaserJet"
+    );
+    assert!(row(&page, "fd00::4")["assignment"]["asset_brand"].is_null());
+    assert!(row(&page, "fd00::4")["assignment"]["asset_model"].is_null());
 }
 
 #[tokio::test]

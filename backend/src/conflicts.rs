@@ -206,6 +206,8 @@ mod tests {
             asset_id: 1,
             asset_property_no: None,
             asset_description: "測試主機".to_string(),
+            asset_brand: None,
+            asset_model: None,
             asset_location: "機房 A".to_string(),
         }
     }

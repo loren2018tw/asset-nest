@@ -94,7 +94,7 @@
       <template #body-cell-assignment="props">
         <q-td :props="props">
           <template v-if="props.row.assignment">
-            <div>{{ props.row.assignment.asset_description }}</div>
+            <div>{{ assignmentTargetLabel(props.row.assignment) }}</div>
             <div class="text-caption text-grey-7">
               {{
                 interfaceLabel(
@@ -194,6 +194,7 @@ import { useRoute } from "vue-router";
 import {
   cancelAssignment,
   listSubnetIps,
+  type IpAssignmentTarget,
   type IpEntry,
   type IpSortField,
   type IpStatus
@@ -347,6 +348,17 @@ function statusColor(status: IpStatus): string {
 function interfaceLabel(name: string | null, mac: string | null): string {
   const label = name ?? "未命名";
   return mac === null ? `${label}（無 MAC）` : `${label} ｜ ${mac}`;
+}
+
+/** 指派對象第一行：「描述(廠牌 型號)」；缺者省略、皆缺僅描述（見 spec §4.3、票 16）。 */
+function assignmentTargetLabel(target: IpAssignmentTarget): string {
+  const spec = [target.asset_brand, target.asset_model]
+    .map(value => value?.trim() ?? "")
+    .filter(value => value !== "")
+    .join(" ");
+  return spec === ""
+    ? target.asset_description
+    : `${target.asset_description}(${spec})`;
 }
 
 async function fetchIps() {

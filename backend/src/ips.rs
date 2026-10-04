@@ -878,6 +878,8 @@ mod tests {
             asset_id: 1,
             asset_property_no: None,
             asset_description: description.to_string(),
+            asset_brand: None,
+            asset_model: None,
             asset_location: location.to_string(),
         }
     }
@@ -1040,6 +1042,8 @@ mod tests {
         let target = static_row.assignment.as_ref().expect("含指派對象");
         assert_eq!(target.asset_description, "資料庫主機");
         assert_eq!(target.asset_property_no, None, "未填財產編號為 null");
+        assert_eq!(target.asset_brand, None, "未填廠牌為 null");
+        assert_eq!(target.asset_model, None, "未填型號為 null");
         assert_eq!(target.asset_location, "機房 A");
         assert_eq!(target.interface_name.as_deref(), Some("eth0"));
         assert_eq!(target.mac, None);
@@ -1083,6 +1087,30 @@ mod tests {
         let (items, _) = list(&subnet, &filter(None, 1, 50), &[assignment]).expect("推導成功");
         let target = items[0].assignment.as_ref().expect("含指派對象");
         assert_eq!(target.asset_property_no.as_deref(), Some("P-001"));
+    }
+
+    #[test]
+    fn assignment_target_carries_asset_brand_and_model() {
+        // IP 清單第一行顯示「描述(廠牌 型號)」用；缺值以 null 呈現（見票 16）。
+        let subnet = subnet("10.0.0.0/29", None, &[]);
+        let mut both = listed("10.0.0.1", "static", "伺服器", Some("eth0"), None);
+        both.asset_brand = Some("Dell".to_string());
+        both.asset_model = Some("R740".to_string());
+        let mut brand_only = listed("10.0.0.2", "static", "交換器", Some("eth1"), None);
+        brand_only.asset_brand = Some("Cisco".to_string());
+        let mut model_only = listed("10.0.0.3", "static", "印表機", Some("eth2"), None);
+        model_only.asset_model = Some("LaserJet".to_string());
+
+        let assignments = [both, brand_only, model_only];
+        let (items, _) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+
+        let target = |index: usize| items[index].assignment.as_ref().expect("含指派對象");
+        assert_eq!(target(0).asset_brand.as_deref(), Some("Dell"));
+        assert_eq!(target(0).asset_model.as_deref(), Some("R740"));
+        assert_eq!(target(1).asset_brand.as_deref(), Some("Cisco"));
+        assert_eq!(target(1).asset_model, None, "只有廠牌：型號為 null");
+        assert_eq!(target(2).asset_brand, None, "只有型號：廠牌為 null");
+        assert_eq!(target(2).asset_model.as_deref(), Some("LaserJet"));
     }
 
     #[test]
