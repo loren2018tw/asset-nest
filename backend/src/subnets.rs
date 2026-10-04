@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 use crate::api::ApiError;
 use crate::assets::{double_option, optional_text};
@@ -274,7 +274,9 @@ impl ValidPool {
 }
 
 /// CIDR：必填、須為合法 CIDR；host bits 收斂為網路地址後儲存。
-fn normalize_cidr(value: Option<String>) -> Result<IpNet, ApiError> {
+///
+/// 供匯入列級驗證重用（正規化與地址族判斷；見票 02）。
+pub(crate) fn normalize_cidr(value: Option<String>) -> Result<IpNet, ApiError> {
     let text =
         optional_text(value).ok_or_else(|| ApiError::validation("CIDR 為必填").field("cidr"))?;
     let network: IpNet = text.parse().map_err(|_| {
@@ -550,9 +552,13 @@ pub async fn find_by_address(
     Ok(None)
 }
 
-/// 新增網段與其 pools（同一交易）。
-pub async fn create(pool: &SqlitePool, valid: ValidSubnet) -> sqlx::Result<Subnet> {
-    let mut transaction = pool.begin().await?;
+/// 於既有連線（可為交易）內新增網段與其 pools，回傳新列 id；不讀回完整資料。
+///
+/// 供匯入在同一交易內建立網段（見票 02）；一般建立路徑走 [`create`]。
+pub(crate) async fn insert_subnet(
+    connection: &mut SqliteConnection,
+    valid: ValidSubnet,
+) -> sqlx::Result<i64> {
     let result = sqlx::query(
         "INSERT INTO subnets (cidr, name, note, gateway, kea_subnet_id) VALUES (?, ?, ?, ?, ?)",
     )
@@ -561,11 +567,18 @@ pub async fn create(pool: &SqlitePool, valid: ValidSubnet) -> sqlx::Result<Subne
     .bind(valid.note)
     .bind(valid.gateway.map(|address| address.to_string()))
     .bind(valid.kea_subnet_id)
-    .execute(&mut *transaction)
+    .execute(&mut *connection)
     .await?;
 
     let id = result.last_insert_rowid();
-    insert_pools(&mut transaction, id, &valid.pools).await?;
+    insert_pools(connection, id, &valid.pools).await?;
+    Ok(id)
+}
+
+/// 新增網段與其 pools（同一交易）。
+pub async fn create(pool: &SqlitePool, valid: ValidSubnet) -> sqlx::Result<Subnet> {
+    let mut transaction = pool.begin().await?;
+    let id = insert_subnet(&mut transaction, valid).await?;
     transaction.commit().await?;
 
     get(pool, id).await?.ok_or(sqlx::Error::RowNotFound)
@@ -665,7 +678,7 @@ async fn fetch_pools(pool: &SqlitePool, subnet_id: i64) -> sqlx::Result<Vec<Pool
 
 /// 寫入 pools；呼叫端負責交易。
 async fn insert_pools(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    connection: &mut SqliteConnection,
     subnet_id: i64,
     pools: &[ValidPool],
 ) -> sqlx::Result<()> {
@@ -674,7 +687,7 @@ async fn insert_pools(
             .bind(subnet_id)
             .bind(pool.start.to_string())
             .bind(pool.end.to_string())
-            .execute(&mut **transaction)
+            .execute(&mut *connection)
             .await?;
     }
     Ok(())
@@ -1019,5 +1032,84 @@ mod tests {
         let row = reader.records().next().expect("資料列").expect("資料列");
         assert_eq!(row.get(3), Some(""), "v6 的 Kea subnet-id 留空");
         assert_eq!(row.get(4), Some(""), "v6 的位址池留空");
+    }
+
+    /// 建立測試資料庫並套用 migrations（比照 `backend/tests/` 整合測試）。
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("建立記憶體資料庫");
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("套用 migrations");
+
+        pool
+    }
+
+    /// 測試用已驗證網段（含一段 pool）。
+    fn valid_subnet() -> ValidSubnet {
+        validate_fields(
+            Some("10.0.0.0/24".to_string()),
+            Some("測試網段".to_string()),
+            None,
+            None,
+            None,
+            vec![PoolInput {
+                start_ip: Some("10.0.0.10".to_string()),
+                end_ip: Some("10.0.0.20".to_string()),
+            }],
+        )
+        .expect("有效網段")
+    }
+
+    #[tokio::test]
+    async fn insert_subnet_is_visible_in_same_transaction() {
+        let pool = test_pool().await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+
+        let id = insert_subnet(&mut transaction, valid_subnet())
+            .await
+            .expect("新增網段");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subnets WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("同交易讀取網段");
+        let pools: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM subnet_pools WHERE subnet_id = ?")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .expect("同交易讀取 pools");
+
+        assert_eq!(count, 1, "原語建立後同交易可見");
+        assert_eq!(pools, 1, "pools 於同一交易寫入");
+    }
+
+    #[tokio::test]
+    async fn insert_subnet_rollback_leaves_nothing() {
+        let pool = test_pool().await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+
+        insert_subnet(&mut transaction, valid_subnet())
+            .await
+            .expect("新增網段");
+        transaction.rollback().await.expect("回滾交易");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subnets")
+            .fetch_one(&pool)
+            .await
+            .expect("回滾後讀取網段");
+        let pools: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subnet_pools")
+            .fetch_one(&pool)
+            .await
+            .expect("回滾後讀取 pools");
+
+        assert_eq!(count, 0, "回滾後不留下網段");
+        assert_eq!(pools, 0, "回滾後不留下 pools");
     }
 }

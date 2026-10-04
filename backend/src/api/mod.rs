@@ -14,6 +14,7 @@ mod import;
 mod interfaces;
 mod ips;
 mod peer;
+mod subnet_import;
 mod subnets;
 
 pub use error::ApiError;
@@ -38,6 +39,7 @@ mod v1 {
             .merge(super::import::router())
             .merge(super::interfaces::router())
             .merge(super::subnets::router())
+            .merge(super::subnet_import::router())
             .merge(super::ips::router())
             .merge(super::peer::router())
     }
