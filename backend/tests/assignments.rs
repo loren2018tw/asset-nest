@@ -80,6 +80,28 @@ async fn create_asset(pool: &SqlitePool, description: &str, location: &str) -> i
     json["id"].as_i64().expect("回應含 id")
 }
 
+/// 新增含財產編號的資產並斷言成功，回傳 id（供票 15 顯示格式斷言）。
+async fn create_asset_with_property_no(
+    pool: &SqlitePool,
+    property_no: &str,
+    description: &str,
+    location: &str,
+) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        "/api/v1/assets",
+        Some(json!({
+            "property_no": property_no,
+            "description": description,
+            "location": location
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新增資產應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
 /// 對資產新增介面並斷言成功，回傳 id。
 async fn create_interface(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 {
     let (status, json) = send(
@@ -178,7 +200,7 @@ async fn assignment_count(pool: &SqlitePool) -> i64 {
 #[tokio::test]
 async fn static_assignment_and_cancel_round_trip() {
     let pool = test_pool().await;
-    let asset_id = create_asset(&pool, "資料庫主機", "機房 A").await;
+    let asset_id = create_asset_with_property_no(&pool, "P-001", "資料庫主機", "機房 A").await;
     let interface_id = create_interface(
         &pool,
         asset_id,
@@ -220,6 +242,7 @@ async fn static_assignment_and_cancel_round_trip() {
     assert_eq!(assigned["purpose"], "static");
     assert_eq!(assigned["in_pool"], false);
     assert_eq!(assigned["assignment"]["asset_id"], asset_id);
+    assert_eq!(assigned["assignment"]["asset_property_no"], "P-001");
     assert_eq!(assigned["assignment"]["asset_description"], "資料庫主機");
     assert_eq!(assigned["assignment"]["asset_location"], "機房 A");
     assert_eq!(assigned["assignment"]["interface_id"], interface_id);
@@ -722,6 +745,10 @@ async fn list_search_and_status_filter_cover_assignment_target() {
     let page = list_ips(&pool, subnet_id, "?status=static").await;
     assert_eq!(page["total"], 1);
     assert_eq!(page["items"][0]["address"], "10.0.0.1");
+    assert!(
+        page["items"][0]["assignment"]["asset_property_no"].is_null(),
+        "資產無財產編號時為 null（見票 15）"
+    );
 
     let page = list_ips(&pool, subnet_id, "?status=reservation").await;
     assert_eq!(page["total"], 1);

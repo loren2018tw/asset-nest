@@ -7,7 +7,9 @@
         <q-card-section>
           <div class="text-h6">指派 IP</div>
           <div class="text-subtitle2 text-grey-7">
-            {{ asset.description }}（{{ asset.location }}）
+            {{ assetLabel(asset.property_no, asset.description) }}（{{
+              asset.location
+            }}）
           </div>
         </q-card-section>
 
@@ -166,6 +168,7 @@ import { createInterface, type Interface } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { parseAddress } from "@/utils/cidr";
+import { assetLabel } from "@/utils/assetLabel";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -442,8 +445,9 @@ function onSaved(saved: AssetAssignmentSaved) {
   open.value = false;
 }
 
-/** 後端「位址已指派給其他介面」提示所需欄位（見票 10）。 */
+/** 後端「位址已指派給其他介面」提示所需欄位（見票 10、票 15）。 */
 interface AssignedElsewhere {
+  asset_property_no: string | null;
   asset_description: string;
   asset_location: string;
   interface_name: string | null;
@@ -461,6 +465,7 @@ function parseAssignedElsewhere(cause: unknown): AssignedElsewhere | null {
 
   const details = cause.details;
   return {
+    asset_property_no: nullableTextOf(details.asset_property_no),
     asset_description: textOf(details.asset_description, "未知資產"),
     asset_location: textOf(details.asset_location, "未知位置"),
     interface_name: nullableTextOf(details.interface_name),
@@ -475,12 +480,16 @@ function confirmTransfer(
 ): Promise<boolean> {
   const interfaceName = target.interface_name ?? "未命名";
   const mac = target.mac ?? "無 MAC";
+  const assetText = assetLabel(
+    target.asset_property_no,
+    target.asset_description
+  );
 
   return new Promise(resolve => {
     $q.dialog({
       title: "位址已指派",
       message:
-        `位址 ${addressText} 目前已指派給「${target.asset_description}（${target.asset_location}）」` +
+        `位址 ${addressText} 目前已指派給「${assetText}（${target.asset_location}）」` +
         `的介面「${interfaceName}（${mac}）」。確定要將此指派移轉到目前介面？`,
       cancel: true,
       persistent: true

@@ -62,7 +62,7 @@
             <q-select
               v-model="selectedAsset"
               :options="assetOptions"
-              option-label="description"
+              :option-label="assetOptionLabel"
               :loading="searchingAssets"
               use-input
               input-debounce="300"
@@ -76,7 +76,9 @@
               <template #option="scope">
                 <q-item v-bind="scope.itemProps">
                   <q-item-section>
-                    <q-item-label>{{ scope.opt.description }}</q-item-label>
+                    <q-item-label>{{
+                      assetOptionLabel(scope.opt)
+                    }}</q-item-label>
                     <q-item-label caption>{{
                       scope.opt.location
                     }}</q-item-label>
@@ -241,6 +243,7 @@ import {
 } from "@/api/ips";
 import type { AddressFamily } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
+import { assetLabel } from "@/utils/assetLabel";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -341,7 +344,7 @@ const existingAssetLabel = computed(() => {
   const target = existing.value;
   return target === null
     ? ""
-    : `${target.asset_description}（${target.asset_location}）`;
+    : assetLabel(target.asset_property_no, target.asset_description);
 });
 
 const existingInterfaceLabel = computed(() => {
@@ -388,6 +391,11 @@ function prepare() {
 function interfaceLabel(name: string | null, mac: string | null): string {
   const label = name ?? "未命名";
   return mac === null ? `${label}（無 MAC）` : `${label} ｜ ${mac}`;
+}
+
+/** 資產搜尋選項／選取值的顯示標籤：財產編號(描述)；為空時僅描述（見票 15）。 */
+function assetOptionLabel(asset: Asset): string {
+  return assetLabel(asset.property_no, asset.description);
 }
 
 function onFilterAssets(input: string, update: (callback: () => void) => void) {

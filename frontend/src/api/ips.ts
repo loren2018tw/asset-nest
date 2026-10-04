@@ -10,6 +10,8 @@ export type IpPurpose = "static" | "reservation";
 /** IP 清單中的指派對象（見 spec §4.3）。 */
 export interface IpAssignmentTarget {
   asset_id: number;
+  /** 資產財產編號；未填為 null（對話框顯示「財產編號(描述)」，見票 15）。 */
+  asset_property_no: string | null;
   asset_description: string;
   asset_location: string;
   interface_id: number;

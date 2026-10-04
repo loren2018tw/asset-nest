@@ -204,6 +204,7 @@ mod tests {
             interface_name: Some("eth0".to_string()),
             mac: mac.map(str::to_string),
             asset_id: 1,
+            asset_property_no: None,
             asset_description: "測試主機".to_string(),
             asset_location: "機房 A".to_string(),
         }

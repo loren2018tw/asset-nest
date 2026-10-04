@@ -81,6 +81,28 @@ async fn create_asset(pool: &SqlitePool, description: &str, location: &str) -> i
     json["id"].as_i64().expect("回應含 id")
 }
 
+/// 新增含財產編號的資產並斷言成功，回傳 id（供票 15 顯示格式斷言）。
+async fn create_asset_with_property_no(
+    pool: &SqlitePool,
+    property_no: &str,
+    description: &str,
+    location: &str,
+) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        "/api/v1/assets",
+        Some(json!({
+            "property_no": property_no,
+            "description": description,
+            "location": location
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新增資產應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
 /// 對資產新增介面並斷言成功，回傳 id。
 async fn create_interface(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 {
     let (status, json) = send(
@@ -256,7 +278,7 @@ async fn asset_side_assignment_creates_and_updates_in_place() {
 #[tokio::test]
 async fn assigned_elsewhere_blocks_then_transfers_atomically() {
     let pool = test_pool().await;
-    let first_asset = create_asset(&pool, "資料庫主機", "機房 A").await;
+    let first_asset = create_asset_with_property_no(&pool, "P-100", "資料庫主機", "機房 A").await;
     let second_asset = create_asset(&pool, "印表機", "機房 B").await;
     let third_asset = create_asset(&pool, "測試機", "機房 C").await;
     let first_interface = create_interface(
@@ -307,6 +329,13 @@ async fn assigned_elsewhere_blocks_then_transfers_atomically() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // IP 清單指派對象含財產編號（見票 15）
+    let page = list_ips(&pool, subnet_id).await;
+    assert_eq!(
+        row(&page, "10.0.0.1")["assignment"]["asset_property_no"],
+        "P-100"
+    );
+
     // 已指派給其他介面：transfer 未提供（預設 false）即阻擋
     let (status, body) = put_asset_assignment(
         &pool,
@@ -341,6 +370,7 @@ async fn assigned_elsewhere_blocks_then_transfers_atomically() {
     assert_eq!(body["details"]["subnet_id"], subnet_id);
     assert_eq!(body["details"]["subnet_cidr"], "10.0.0.0/29");
     assert_eq!(body["details"]["asset_id"], first_asset);
+    assert_eq!(body["details"]["asset_property_no"], "P-100");
     assert_eq!(body["details"]["asset_description"], "資料庫主機");
     assert_eq!(body["details"]["asset_location"], "機房 A");
     assert_eq!(body["details"]["interface_id"], first_interface);
@@ -399,6 +429,10 @@ async fn assigned_elsewhere_blocks_then_transfers_atomically() {
     assert_eq!(
         row(&page, "10.0.0.1")["assignment"]["interface_id"],
         second_interface
+    );
+    assert!(
+        row(&page, "10.0.0.1")["assignment"]["asset_property_no"].is_null(),
+        "移轉後對象（印表機）無財產編號為 null"
     );
     assert_eq!(
         row(&page, "10.0.0.2")["assignment"]["interface_id"],
@@ -653,6 +687,10 @@ async fn asset_side_v6_registration_and_transfer() {
     assert_eq!(body["details"]["reason"], "address_assigned_elsewhere");
     assert_eq!(body["details"]["subnet_cidr"], "fd00::/64");
     assert_eq!(body["details"]["interface_id"], first_interface);
+    assert!(
+        body["details"]["asset_property_no"].is_null(),
+        "無財產編號為 null（見票 15）"
+    );
 
     // transfer=true：移轉
     let (status, transferred) = put_asset_assignment(

@@ -876,6 +876,7 @@ mod tests {
             interface_name: interface_name.map(str::to_string),
             mac: mac.map(str::to_string),
             asset_id: 1,
+            asset_property_no: None,
             asset_description: description.to_string(),
             asset_location: location.to_string(),
         }
@@ -1038,6 +1039,7 @@ mod tests {
         assert!(!static_row.in_pool);
         let target = static_row.assignment.as_ref().expect("含指派對象");
         assert_eq!(target.asset_description, "資料庫主機");
+        assert_eq!(target.asset_property_no, None, "未填財產編號為 null");
         assert_eq!(target.asset_location, "機房 A");
         assert_eq!(target.interface_name.as_deref(), Some("eth0"));
         assert_eq!(target.mac, None);
@@ -1069,6 +1071,18 @@ mod tests {
         assert_eq!(available.purpose, None);
         assert!(available.assignment.is_none());
         assert!(available.conflicts.is_empty(), "無指派不標記衝突");
+    }
+
+    #[test]
+    fn assignment_target_carries_asset_property_no() {
+        // 對話框顯示「財產編號(描述)」用；財產編號隨指派對象帶出（見票 15）。
+        let subnet = subnet("10.0.0.0/29", None, &[]);
+        let mut assignment = listed("10.0.0.1", "static", "資料庫主機", Some("eth0"), None);
+        assignment.asset_property_no = Some("P-001".to_string());
+
+        let (items, _) = list(&subnet, &filter(None, 1, 50), &[assignment]).expect("推導成功");
+        let target = items[0].assignment.as_ref().expect("含指派對象");
+        assert_eq!(target.asset_property_no.as_deref(), Some("P-001"));
     }
 
     #[test]

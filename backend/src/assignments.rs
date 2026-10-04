@@ -40,6 +40,7 @@ struct AssignmentRow {
 #[derive(Debug, FromRow)]
 struct AssignmentTargetRow {
     asset_id: i64,
+    asset_property_no: Option<String>,
     asset_description: String,
     asset_location: String,
     interface_id: i64,
@@ -175,6 +176,8 @@ impl RegisterInput {
 #[derive(Debug, Clone, Serialize)]
 pub struct IpAssignment {
     pub asset_id: i64,
+    /// 資產財產編號；未填為 `None`（對話框顯示「財產編號(描述)」，見 spec §4.3）。
+    pub asset_property_no: Option<String>,
     pub asset_description: String,
     pub asset_location: String,
     pub interface_id: i64,
@@ -193,6 +196,7 @@ pub struct ListedAssignment {
     pub interface_name: Option<String>,
     pub mac: Option<String>,
     pub asset_id: i64,
+    pub asset_property_no: Option<String>,
     pub asset_description: String,
     pub asset_location: String,
 }
@@ -202,6 +206,7 @@ impl ListedAssignment {
     pub fn target(&self) -> IpAssignment {
         IpAssignment {
             asset_id: self.asset_id,
+            asset_property_no: self.asset_property_no.clone(),
             asset_description: self.asset_description.clone(),
             asset_location: self.asset_location.clone(),
             interface_id: self.interface_id,
@@ -420,6 +425,7 @@ async fn assigned_elsewhere_error(
     .detail("subnet_id", json!(subnet.id))
     .detail("subnet_cidr", json!(subnet.cidr))
     .detail("asset_id", json!(target.asset_id))
+    .detail("asset_property_no", json!(target.asset_property_no))
     .detail("asset_description", json!(target.asset_description))
     .detail("asset_location", json!(target.asset_location))
     .detail("interface_id", json!(target.interface_id))
@@ -597,8 +603,8 @@ pub async fn list_for_subnet(
     sqlx::query_as::<_, ListedAssignment>(
         "SELECT a.address, a.purpose, a.hostname, a.interface_id,
                 i.name AS interface_name, i.mac,
-                s.id AS asset_id, s.description AS asset_description,
-                s.location AS asset_location
+                s.id AS asset_id, s.property_no AS asset_property_no,
+                s.description AS asset_description, s.location AS asset_location
            FROM ip_assignments a
            JOIN interfaces i ON i.id = a.interface_id
            JOIN assets s ON s.id = i.asset_id
@@ -837,9 +843,9 @@ async fn fetch_target(
     interface_id: i64,
 ) -> sqlx::Result<Option<AssignmentTargetRow>> {
     sqlx::query_as::<_, AssignmentTargetRow>(
-        "SELECT s.id AS asset_id, s.description AS asset_description,
-                s.location AS asset_location, i.id AS interface_id,
-                i.name AS interface_name, i.mac
+        "SELECT s.id AS asset_id, s.property_no AS asset_property_no,
+                s.description AS asset_description, s.location AS asset_location,
+                i.id AS interface_id, i.name AS interface_name, i.mac
            FROM interfaces i
            JOIN assets s ON s.id = i.asset_id
           WHERE i.id = ?",
