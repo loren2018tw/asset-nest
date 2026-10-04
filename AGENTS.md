@@ -10,4 +10,4 @@ Issues 以本機 markdown 檔案存放在 `.scratch/<feature>/` 下。See `docs/
 
 ### Domain docs
 
-Single-context 佈局：`CONTEXT.md` + `docs/adr/` 位於 repo 根目錄。See `docs/agents/domain.md`.
+Single-context 佈局：`GLOSSARY.md` + `docs/adr/` 位於 repo 根目錄。See `docs/agents/domain.md`.

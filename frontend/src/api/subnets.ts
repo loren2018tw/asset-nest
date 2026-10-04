@@ -8,7 +8,7 @@ import {
   type DownloadedFile
 } from "@/api/client";
 
-/** 位址族：單一網段為單一地址族，雙棧以兩筆表示（見 CONTEXT.md）。 */
+/** 位址族：單一網段為單一地址族，雙棧以兩筆表示（見 GLOSSARY.md）。 */
 export type AddressFamily = "ipv4" | "ipv6";
 
 /** DHCP 位址池（僅 IPv4；見 spec §2.3）。 */

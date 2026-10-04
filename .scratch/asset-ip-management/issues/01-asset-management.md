@@ -1,6 +1,6 @@
 # 01: 資產管理
 
-**What to build:** 資產管理縱切:側欄導覽(資產管理、IP 管理)、資產清單頁與新增/編輯對話框、位置既有值建議、屆齡徽章、刪除。依 `.scratch/asset-ip-management/spec.md` 與 `CONTEXT.md` 詞彙。
+**What to build:** 資產管理縱切:側欄導覽(資產管理、IP 管理)、資產清單頁與新增/編輯對話框、位置既有值建議、屆齡徽章、刪除。依 `.scratch/asset-ip-management/spec.md` 與 `GLOSSARY.md` 詞彙。
 
 **Blocked by:** None (can start immediately)
 

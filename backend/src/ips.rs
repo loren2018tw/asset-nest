@@ -1,7 +1,7 @@
 //! IP 位址（IpAddress）領域模組：v4 位址枚舉、v6 登錄制清單、pool
 //! 標示、衝突標記與分頁瀏覽。
 //!
-//! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§4.3、§7。
+//! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§4.3、§7。
 //! v4 位址由 Subnet 範圍伺服器端推導；v6 採登錄制，僅列出已指派（登錄）位址，
 //! 不枚舉空閒位址。指派為票 05、v6 登錄制為票 06、衝突標記為票 07
 //! （偵測集中於 [`crate::conflicts`]）；標頭排序為票 14。
@@ -175,7 +175,7 @@ impl IpStatusFilter {
 pub struct IpEntry {
     /// v4 或 v6 位址（JSON 序列化為文字）。
     pub address: IpAddr,
-    /// 落在 DHCP 位址池內；池內位址不可指派（v6 恆為 `false`，見 CONTEXT.md）。
+    /// 落在 DHCP 位址池內；池內位址不可指派（v6 恆為 `false`，見 GLOSSARY.md）。
     pub in_pool: bool,
     /// 狀態：`available`（可用）、`in_pool`（池內）、
     /// `static`（手動設定）或 `reservation`（保留）。

@@ -1,4 +1,4 @@
-# CONTEXT.md — asset-nest 領域詞彙
+# GLOSSARY.md — asset-nest 領域詞彙
 
 「IT 資產整合管理系統」（asset-nest）的領域詞彙表：只定義名詞與其精確意義，不含實作細節。程式中的型別與欄位以英文名稱為準。
 

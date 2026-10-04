@@ -31,7 +31,7 @@
 - 測試：`backend/tests/assignments.rs` 8 個整合測試——指派／改用途／冪等／取消／404、保留需 MAC、位址規則（出界、network/broadcast、pool、非法與 v6 位址、v6 網段、gateway 可指派）、重複位址與同介面同網段規則（含跨網段可各一）、兩條 UNIQUE 與 purpose CHECK 直寫驗證、刪除介面連動刪除（含刪除資產連動）、搜尋與狀態篩選、未知資源與缺漏欄位；`src/assignments.rs` 2 個單元測試（輸入驗證、hostname 僅限保留）；`src/ips.rs` 新增 4 個單元測試（指派狀態與對象、狀態篩選、關鍵字比對指派對象、篩選值解析）。
 - 驗收：`cargo test`（26 單元＋36 整合全綠）、`cargo fmt --check`、`pnpm typecheck`、`pnpm lint:check` 全綠；另 `pnpm build` 成功、以真實伺服器＋暫存 SQLite 手動 smoke（指派→改用途→清單／資產詳情顯示→pool 阻擋→取消）通過。
 - 與規格差異／取捨：
-  - 換介面不支援直接 PUT：位址已指派給其他介面時 400 並提示先取消（依 CONTEXT.md「換介面即取消後重新指派」；`details.interface_id` 附目前指派）。
+  - 換介面不支援直接 PUT：位址已指派給其他介面時 400 並提示先取消（依 GLOSSARY.md「換介面即取消後重新指派」；`details.interface_id` 附目前指派）。
   - `hostname` 僅限保留用途；手動設定帶非空 hostname 回 400（規格未明文，屬結構層防呆；改為手動且未帶 hostname 時自動清除）。
   - v6 指派回 400（票 06 實作登錄制時替換）；衝突標記與儲存警示（含 DuplicateHwAddress）依票 07。
   - 已指派位址落在 host 範圍外（網段縮小）暫不出現在清單，由票 07 以 IpOutOfSubnet 處理。

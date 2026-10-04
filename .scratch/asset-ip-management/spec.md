@@ -3,7 +3,7 @@
 - 狀態：已定案（2026-10-04，四輪逐題確認），待實作。
 - 追加定案（2026-10-04）：資產清單「已指派 IP」欄與搜尋補強、IP 清單「位置」欄與標頭排序、指派對話框資產顯示格式（見票 12–15）。
 - 追加定案（2026-10-04，第二批）：位置篩選可輸入過濾；指派對象顯示「描述(廠牌 型號)」；移除 IP 清單 Gateway 欄與排序。資產匯出與網段匯出／匯入見 `.scratch/csv-export-import/spec.md`。
-- 詞彙依 `CONTEXT.md`；關鍵取捨見 `docs/adr/0005`（指派以 Interface 為對象）與 `docs/adr/0006`（兩層驗證）。
+- 詞彙依 `GLOSSARY.md`；關鍵取捨見 `docs/adr/0005`（指派以 Interface 為對象）與 `docs/adr/0006`（兩層驗證）。
 
 ## 1. 範圍
 
@@ -213,7 +213,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 
 ## 8. 決策出處
 
-- `CONTEXT.md`：Asset / Interface / Subnet / IpAddress / Assignment / Reservation / pool 等詞彙與狀態定義。
+- `GLOSSARY.md`：Asset / Interface / Subnet / IpAddress / Assignment / Reservation / pool 等詞彙與狀態定義。
 - `docs/adr/0005`：指派以 Interface 為對象、同介面同網段至多一位址、無 MAC 不可保留、僅記目前指派。
 - `docs/adr/0006`：結構錯誤阻擋、語意衝突標記的兩層驗證原則。
 - `docs/adr/0001`~`0004`：Kealight 獨立、單向推送、SQLite、同源部署。

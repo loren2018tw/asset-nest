@@ -2,7 +2,7 @@
 
 Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統骨架。資產、IP 位址與 Kea DHCP 保留同步功能陸續開發中（目前僅骨架）。
 
-- 領域詞彙：`CONTEXT.md`
+- 領域詞彙：`GLOSSARY.md`
 - 決策記錄：`docs/adr/`
 - Issue 追蹤：`.scratch/`（見 `AGENTS.md`）
 

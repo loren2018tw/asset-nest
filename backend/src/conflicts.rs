@@ -1,7 +1,7 @@
 //! 語意衝突（semantic conflict）領域模組：IpInPool、IpOutOfSubnet、
 //! DuplicateHwAddress 的偵測、列標記與儲存警示。
 //!
-//! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §3.2，
+//! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §3.2，
 //! 決策見 ADR-0006：衝突是標記、不是狀態——僅提示、不阻擋儲存。
 //! IpInUse 已由「同網段不重複指派」的結構規則涵蓋，不在此偵測。
 

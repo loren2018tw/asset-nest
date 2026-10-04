@@ -1,6 +1,6 @@
 //! 資產（Asset）領域模組：欄位驗證、屆齡判斷與資料庫存取。
 //!
-//! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.1、§3。
+//! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.1、§3。
 
 use std::collections::HashSet;
 

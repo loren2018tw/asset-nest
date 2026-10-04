@@ -1,6 +1,6 @@
 //! 網段（Subnet）領域模組：CIDR 正規化、結構驗證與資料庫存取。
 //!
-//! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.3、§3.1。
+//! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.3、§3.1。
 //! 單一網段為單一地址族，雙棧以兩筆表示；pool 與 kea_subnet_id 僅支援 IPv4。
 
 use std::cmp::Ordering;

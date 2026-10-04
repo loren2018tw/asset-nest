@@ -1,6 +1,6 @@
 //! 網路介面（Interface）領域模組：MAC 正規化、名稱門檻與資料庫存取。
 //!
-//! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.2、§3.1。
+//! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.2、§3.1。
 
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};

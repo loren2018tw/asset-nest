@@ -1,6 +1,6 @@
 //! 指派（Assignment）領域模組：指派／改用途、v6 登錄、取消與指派對象查詢。
 //!
-//! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§3.1、
+//! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§3.1、
 //! §4.3、§5，決策見 ADR-0005（指派以 Interface 為對象）與 ADR-0006（結構錯誤阻擋）。
 //! v6 採登錄制：新增即指派、用途固定 static；語意衝突偵測見 [`crate::conflicts`]
 //! （票 07）——更新既有指派時，出界／落池不再重驗、改以標記呈現。
@@ -250,7 +250,7 @@ pub struct AssetAssignment {
 /// v4：新指派位址須為 host（扣除 network/broadcast）且不在 pool 內；
 /// v6：登錄制，新指派位址須落在 CIDR 內（含 network 位址；無 host 扣除概念），
 /// 用途固定 static。同一網段同一位址已指派給其他介面時阻擋，須先取消再
-/// 重新指派（換介面即取消＋重新指派，見 CONTEXT.md／ADR-0005）。
+/// 重新指派（換介面即取消＋重新指派，見 GLOSSARY.md／ADR-0005）。
 ///
 /// 更新既有指派（同介面同位址）時不重驗出界／落池：網段編輯可能使既有
 /// 位址出界或落池，該情形以語意衝突標記呈現、不阻擋儲存（見 ADR-0006、票 07）。
