@@ -543,3 +543,467 @@ async fn unknown_subnet_returns_404() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "validation_error");
 }
+
+// ---- 標頭排序（見票 14）----
+
+#[tokio::test]
+async fn list_sorts_by_whitelisted_columns_with_direction() {
+    let pool = test_pool().await;
+
+    // /29、gateway .1、pool .5–.6；.2 static（alpha／server room）、
+    // .3 保留（Zeta／Server Room，與 .2 位置同鍵）、.4 可用
+    let subnet = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/29",
+            "gateway": "10.0.0.1",
+            "pools": [{ "start_ip": "10.0.0.5", "end_ip": "10.0.0.6" }]
+        }),
+    )
+    .await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let alpha_asset = create_asset(&pool, "alpha", "server room").await;
+    let zeta_asset = create_asset(&pool, "Zeta", "Server Room").await;
+    let alpha_interface = create_interface(&pool, alpha_asset, json!({ "name": "eth0" })).await;
+    let zeta_interface = create_interface(
+        &pool,
+        zeta_asset,
+        json!({ "name": "eth1", "mac": "aa:bb:cc:dd:ee:ff" }),
+    )
+    .await;
+
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.2",
+        json!({ "interface_id": alpha_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.3",
+        json!({
+            "interface_id": zeta_interface,
+            "purpose": "reservation",
+            "hostname": "zeta-1"
+        }),
+    )
+    .await;
+
+    // 預設（未帶排序參數）與顯式 address 升冪完全相同
+    let default_page = list_ips(&pool, id, "").await;
+    let explicit = list_ips(&pool, id, "?sort=address&dir=asc").await;
+    assert_eq!(
+        addresses(&default_page),
+        addresses(&explicit),
+        "預設即 address 升冪"
+    );
+
+    let cases = [
+        (
+            "sort=address&dir=desc",
+            vec![
+                "10.0.0.6", "10.0.0.5", "10.0.0.4", "10.0.0.3", "10.0.0.2", "10.0.0.1",
+            ],
+        ),
+        // Gateway asc：非 gateway 先、gateway 最後；desc 反之
+        (
+            "sort=gateway&dir=asc",
+            vec![
+                "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.1",
+            ],
+        ),
+        (
+            "sort=gateway&dir=desc",
+            vec![
+                "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+            ],
+        ),
+        // 狀態 asc：可用→池內→手動設定→保留；desc 反轉（同鍵位址升冪）
+        (
+            "sort=status&dir=asc",
+            vec![
+                "10.0.0.1", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.2", "10.0.0.3",
+            ],
+        ),
+        (
+            "sort=status&dir=desc",
+            vec![
+                "10.0.0.3", "10.0.0.2", "10.0.0.5", "10.0.0.6", "10.0.0.1", "10.0.0.4",
+            ],
+        ),
+        // 位置：.2／.3 同鍵（不分大小寫）以位址升冪；未指派（.1、.4–.6）asc、desc 皆最後
+        (
+            "sort=location&dir=asc",
+            vec![
+                "10.0.0.2", "10.0.0.3", "10.0.0.1", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+            ],
+        ),
+        (
+            "sort=location&dir=desc",
+            vec![
+                "10.0.0.2", "10.0.0.3", "10.0.0.1", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+            ],
+        ),
+        // 指派對象 asc：alpha < Zeta（不分大小寫）；未指派最後
+        (
+            "sort=assignment&dir=asc",
+            vec![
+                "10.0.0.2", "10.0.0.3", "10.0.0.1", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+            ],
+        ),
+        (
+            "sort=assignment&dir=desc",
+            vec![
+                "10.0.0.3", "10.0.0.2", "10.0.0.1", "10.0.0.4", "10.0.0.5", "10.0.0.6",
+            ],
+        ),
+    ];
+    for (query, expected) in cases {
+        let page = list_ips(&pool, id, &format!("?{query}")).await;
+        assert_eq!(addresses(&page), expected, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn location_and_assignment_sorts_are_case_insensitive_with_blanks_last() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    // 位置與指派對象皆含大小寫差異；.1／.5／.6 未指派
+    let b_asset = create_asset(&pool, "alpha", "機房 B").await;
+    let a_asset = create_asset(&pool, "Bravo", "機房 a").await;
+    let s_asset = create_asset(&pool, "beta", "server").await;
+    let b_interface = create_interface(&pool, b_asset, json!({ "name": "eth0" })).await;
+    let a_interface = create_interface(&pool, a_asset, json!({ "name": "eth1" })).await;
+    let s_interface = create_interface(&pool, s_asset, json!({ "name": "eth2" })).await;
+
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.2",
+        json!({ "interface_id": b_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.3",
+        json!({ "interface_id": a_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.4",
+        json!({ "interface_id": s_interface, "purpose": "static" }),
+    )
+    .await;
+
+    // 位置 asc：server < 機房 a < 機房 B（不分大小寫）→ .4、.3、.2；未指派最後
+    let page = list_ips(&pool, id, "?sort=location&dir=asc").await;
+    assert_eq!(
+        addresses(&page),
+        [
+            "10.0.0.4", "10.0.0.3", "10.0.0.2", "10.0.0.1", "10.0.0.5", "10.0.0.6"
+        ]
+    );
+
+    // 位置 desc：反轉已指派組；未指派仍固定最後
+    let page = list_ips(&pool, id, "?sort=location&dir=desc").await;
+    assert_eq!(
+        addresses(&page),
+        [
+            "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.1", "10.0.0.5", "10.0.0.6"
+        ]
+    );
+
+    // 指派對象 asc：alpha < beta < Bravo（不分大小寫）
+    let page = list_ips(&pool, id, "?sort=assignment&dir=asc").await;
+    assert_eq!(
+        addresses(&page),
+        [
+            "10.0.0.2", "10.0.0.4", "10.0.0.3", "10.0.0.1", "10.0.0.5", "10.0.0.6"
+        ]
+    );
+
+    // 指派對象 desc：反轉；未指派仍固定最後
+    let page = list_ips(&pool, id, "?sort=assignment&dir=desc").await;
+    assert_eq!(
+        addresses(&page),
+        [
+            "10.0.0.3", "10.0.0.4", "10.0.0.2", "10.0.0.1", "10.0.0.5", "10.0.0.6"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn sorts_combine_with_q_and_status_filters() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let b_asset = create_asset(&pool, "alpha", "機房 B").await;
+    let a_asset = create_asset(&pool, "Bravo", "機房 a").await;
+    let s_asset = create_asset(&pool, "beta", "server").await;
+    let b_interface = create_interface(&pool, b_asset, json!({ "name": "eth0" })).await;
+    let a_interface = create_interface(&pool, a_asset, json!({ "name": "eth1" })).await;
+    let s_interface = create_interface(&pool, s_asset, json!({ "name": "eth2" })).await;
+
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.2",
+        json!({ "interface_id": b_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.3",
+        json!({ "interface_id": a_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.4",
+        json!({ "interface_id": s_interface, "purpose": "static" }),
+    )
+    .await;
+
+    // q（位置）＋指派對象 desc：僅命中「機房」的 .2、.3；Bravo > alpha
+    let page = list_ips(
+        &pool,
+        id,
+        &format!("?q={}&sort=assignment&dir=desc", encode("機房")),
+    )
+    .await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.3", "10.0.0.2"]);
+
+    // 狀態＋位置 asc：三列皆 static；server(.4) < 機房 a(.3) < 機房 B(.2)
+    let page = list_ips(&pool, id, "?status=static&sort=location&dir=asc").await;
+    assert_eq!(page["total"], 3);
+    assert_eq!(addresses(&page), ["10.0.0.4", "10.0.0.3", "10.0.0.2"]);
+
+    // 三者並用：q＋status＋排序
+    let page = list_ips(
+        &pool,
+        id,
+        &format!(
+            "?q={}&status=static&sort=assignment&dir=asc",
+            encode("機房")
+        ),
+    )
+    .await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.2", "10.0.0.3"]);
+
+    // 無結果的組合維持空集合
+    let page = list_ips(
+        &pool,
+        id,
+        &format!("?q={}&sort=assignment&dir=desc", encode("不存在")),
+    )
+    .await;
+    assert_eq!(page["total"], 0);
+    assert!(addresses(&page).is_empty());
+}
+
+#[tokio::test]
+async fn v6_list_sorts_consistently() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let zeta_asset = create_asset(&pool, "Zeta", "機房 B").await;
+    let alpha_asset = create_asset(&pool, "alpha", "機房 a").await;
+    let zeta_interface = create_interface(&pool, zeta_asset, json!({ "name": "eth0" })).await;
+    let alpha_interface = create_interface(&pool, alpha_asset, json!({ "name": "eth1" })).await;
+
+    register_ip(&pool, id, "fd00::10", zeta_interface).await;
+    register_ip(&pool, id, "fd00::2", alpha_interface).await;
+
+    // 預設：位址數值升冪
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(addresses(&page), ["fd00::2", "fd00::10"]);
+
+    // 位址 desc：數值反序（非文字序）
+    let page = list_ips(&pool, id, "?sort=address&dir=desc").await;
+    assert_eq!(addresses(&page), ["fd00::10", "fd00::2"]);
+
+    // 位置 asc：機房 a < 機房 B（不分大小寫）
+    let page = list_ips(&pool, id, "?sort=location&dir=asc").await;
+    assert_eq!(addresses(&page), ["fd00::2", "fd00::10"]);
+
+    let page = list_ips(&pool, id, "?sort=location&dir=desc").await;
+    assert_eq!(addresses(&page), ["fd00::10", "fd00::2"]);
+
+    // 指派對象 desc：Zeta > alpha
+    let page = list_ips(&pool, id, "?sort=assignment&dir=desc").await;
+    assert_eq!(addresses(&page), ["fd00::10", "fd00::2"]);
+
+    // 與狀態篩選組合（v6 恆 static；available 篩選為空）
+    let page = list_ips(&pool, id, "?status=static&sort=assignment&dir=asc").await;
+    assert_eq!(addresses(&page), ["fd00::2", "fd00::10"]);
+
+    let page = list_ips(&pool, id, "?status=available&sort=assignment&dir=asc").await;
+    assert_eq!(page["total"], 0);
+    assert!(addresses(&page).is_empty());
+}
+
+#[tokio::test]
+async fn non_default_sort_includes_out_of_subnet_assignments() {
+    let pool = test_pool().await;
+    // 先以 /24 指派，再縮小為 /25：.200 成為出界指派列（不阻擋，見票 07）
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/24" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let out_asset = create_asset(&pool, "出界主機", "機房 A").await;
+    let in_asset = create_asset(&pool, "本段主機", "機房 B").await;
+    let out_interface = create_interface(&pool, out_asset, json!({ "name": "eth0" })).await;
+    let in_interface = create_interface(&pool, in_asset, json!({ "name": "eth1" })).await;
+
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.200",
+        json!({ "interface_id": out_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.2",
+        json!({ "interface_id": in_interface, "purpose": "static" }),
+    )
+    .await;
+
+    let (status, updated) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{id}"),
+        Some(json!({ "cidr": "10.0.0.0/25" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "縮小 CIDR 不阻擋：{updated}");
+
+    // 位址 desc：出界列數值最大，排第一
+    let page = list_ips(&pool, id, "?sort=address&dir=desc").await;
+    assert_eq!(page["total"], 127);
+    assert_eq!(addresses(&page)[0], "10.0.0.200");
+
+    // 位置 asc：機房 A（.200）先於機房 B（.2）；未指派列最後
+    let page = list_ips(&pool, id, "?sort=location&dir=asc").await;
+    assert_eq!(page["total"], 127);
+    assert_eq!(addresses(&page)[..2].to_vec(), ["10.0.0.200", "10.0.0.2"]);
+
+    // 位置 desc 與 q 組合：命中「機房」的兩列反序
+    let page = list_ips(
+        &pool,
+        id,
+        &format!("?q={}&sort=location&dir=desc", encode("機房")),
+    )
+    .await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.2", "10.0.0.200"]);
+}
+
+#[tokio::test]
+async fn invalid_sort_and_dir_return_400() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?sort=id"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "sort");
+    assert!(
+        body["message"].as_str().expect("訊息為字串").contains("id"),
+        "錯誤訊息應指出無效值"
+    );
+
+    // 衝突、操作不可排序
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?sort=conflicts"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["details"]["field"], "sort");
+
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?sort=address&dir=sideways"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "dir");
+
+    // 有效值不受影響
+    let (status, _) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?sort=gateway&dir=desc"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn default_sort_stays_numeric_ascending_and_other_sorts_paginate() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/27" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    // 未帶排序參數：數值升冪（與既有行為相同）
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(page["total"], 30);
+    assert_eq!(
+        addresses(&page)[..3].to_vec(),
+        ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    );
+
+    // 非預設排序＋伺服器端分頁：當頁取自排序後結果
+    let page = list_ips(&pool, id, "?sort=address&dir=desc&page=2&per_page=10").await;
+    assert_eq!(page["total"], 30);
+    assert_eq!(page["page"], 2);
+    assert_eq!(page["per_page"], 10);
+    assert_eq!(
+        addresses(&page),
+        [
+            "10.0.0.20",
+            "10.0.0.19",
+            "10.0.0.18",
+            "10.0.0.17",
+            "10.0.0.16",
+            "10.0.0.15",
+            "10.0.0.14",
+            "10.0.0.13",
+            "10.0.0.12",
+            "10.0.0.11"
+        ]
+    );
+
+    // 超出範圍的頁：空列但總數不變
+    let page = list_ips(&pool, id, "?sort=gateway&dir=asc&page=9&per_page=10").await;
+    assert_eq!(page["total"], 30);
+    assert!(addresses(&page).is_empty());
+}

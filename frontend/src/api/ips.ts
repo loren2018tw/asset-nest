@@ -66,12 +66,24 @@ export interface RegistryInput {
   interface_id: number;
 }
 
-/** IP 清單搜尋與分頁參數（皆為伺服器端）。 */
+/** IP 清單可排序欄位（後端白名單；見 spec §5、票 14）。 */
+export type IpSortField =
+  | "address"
+  | "gateway"
+  | "status"
+  | "location"
+  | "assignment";
+
+/** IP 清單搜尋、排序與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
   /** 完整位址精確比對；否則對位址文字、資產描述、位置、介面名稱與 MAC 做子字串比對。 */
   q?: string | undefined;
   /** 狀態／用途篩選。 */
   status?: IpStatus | undefined;
+  /** 排序欄位；預設 address。 */
+  sort?: IpSortField | undefined;
+  /** 排序方向；預設 asc。 */
+  dir?: "asc" | "desc" | undefined;
   page?: number | undefined;
   per_page?: number | undefined;
 }

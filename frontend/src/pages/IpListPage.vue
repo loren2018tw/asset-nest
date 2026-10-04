@@ -69,7 +69,7 @@
       <template #body-cell-address="props">
         <q-td :props="props" class="ip-address">{{ props.value }}</q-td>
       </template>
-      <template #body-cell-is_gateway="props">
+      <template #body-cell-gateway="props">
         <q-td :props="props" class="text-center">
           <q-badge v-if="props.row.is_gateway" color="primary">
             Gateway
@@ -195,6 +195,7 @@ import {
   cancelAssignment,
   listSubnetIps,
   type IpEntry,
+  type IpSortField,
   type IpStatus
 } from "@/api/ips";
 import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
@@ -211,7 +212,21 @@ const filters = ref<{ q: string | null; status: IpStatus | null }>({
   q: "",
   status: null
 });
-const pagination = ref({ page: 1, rowsPerPage: 50, rowsNumber: 0 });
+
+/** 伺服器端分頁與排序；預設 IP 數值升冪（見 spec §4.3、票 14）。 */
+const pagination = ref<{
+  page: number;
+  rowsPerPage: number;
+  rowsNumber: number;
+  sortBy: IpSortField;
+  descending: boolean;
+}>({
+  page: 1,
+  rowsPerPage: 50,
+  rowsNumber: 0,
+  sortBy: "address",
+  descending: false
+});
 
 const assignmentOpen = ref(false);
 const assignmentEntry = ref<IpEntry | null>(null);
@@ -234,21 +249,43 @@ const statusOptions = computed<{ label: string; value: IpStatus }[]>(() =>
 );
 
 const columns: QTableProps["columns"] = [
-  { name: "address", label: "IP", field: "address", align: "left" },
   {
-    name: "is_gateway",
+    name: "address",
+    label: "IP",
+    field: "address",
+    align: "left",
+    sortable: true
+  },
+  {
+    // 欄位名對應後端排序白名單的 `gateway`（列資料仍為 is_gateway，見票 14）
+    name: "gateway",
     label: "Gateway",
     field: "is_gateway",
-    align: "center"
+    align: "center",
+    sortable: true
   },
-  { name: "status", label: "狀態／用途", field: "status", align: "left" },
+  {
+    name: "status",
+    label: "狀態／用途",
+    field: "status",
+    align: "left",
+    sortable: true
+  },
   {
     name: "location",
     label: "位置",
     field: (row: IpEntry) => row.assignment?.asset_location ?? "",
-    align: "left"
+    align: "left",
+    sortable: true
   },
-  { name: "assignment", label: "指派對象", field: "address", align: "left" },
+  {
+    name: "assignment",
+    label: "指派對象",
+    field: "address",
+    align: "left",
+    sortable: true
+  },
+  // 衝突、操作不可排序（見票 14）
   { name: "conflicts", label: "衝突", field: "conflicts", align: "left" },
   { name: "actions", label: "操作", field: "address", align: "right" }
 ];
@@ -318,6 +355,8 @@ async function fetchIps() {
     const page = await listSubnetIps(subnetId, {
       q: filters.value.q?.trim() || undefined,
       status: filters.value.status ?? undefined,
+      sort: pagination.value.sortBy,
+      dir: pagination.value.descending ? "desc" : "asc",
       page: pagination.value.page,
       per_page: pagination.value.rowsPerPage
     });
@@ -337,12 +376,40 @@ function reload() {
 }
 
 interface TableRequest {
-  pagination: { page: number; rowsPerPage: number };
+  pagination: {
+    page: number;
+    rowsPerPage: number;
+    sortBy: string | null;
+    descending: boolean;
+  };
+}
+
+/** q-table 的排序欄位名即欄位 `name`；僅白名單欄位可送後端（見票 14）。 */
+function toSortField(value: string | null): IpSortField {
+  switch (value) {
+    case "address":
+    case "gateway":
+    case "status":
+    case "location":
+    case "assignment":
+      return value;
+    default:
+      return "address";
+  }
 }
 
 function onRequest(request: TableRequest) {
-  pagination.value.page = request.pagination.page;
-  pagination.value.rowsPerPage = request.pagination.rowsPerPage;
+  const { page, rowsPerPage, sortBy, descending } = request.pagination;
+  const sort = toSortField(sortBy);
+  const sortChanged =
+    sort !== pagination.value.sortBy ||
+    descending !== pagination.value.descending;
+
+  pagination.value.sortBy = sort;
+  pagination.value.descending = descending;
+  // 切換排序時回到第 1 頁（見票 14）
+  pagination.value.page = sortChanged ? 1 : page;
+  pagination.value.rowsPerPage = rowsPerPage;
   void fetchIps();
 }
 

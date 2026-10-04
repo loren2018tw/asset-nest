@@ -18,7 +18,7 @@ use crate::api::ApiError;
 use crate::assignments::{self, Assignment, AssignmentInput, RegisterInput};
 use crate::conflicts;
 use crate::interfaces::Warning;
-use crate::ips::{self, IpEntry, IpFilter, IpStatusFilter};
+use crate::ips::{self, IpEntry, IpFilter, IpSortDir, IpSortField, IpStatusFilter};
 use crate::subnets;
 
 /// 清單預設每頁筆數（見 spec §6）；上限比照 `/assets`。
@@ -41,6 +41,11 @@ pub fn router() -> Router<AppState> {
 struct ListQuery {
     q: Option<String>,
     status: Option<String>,
+    /// 排序欄位白名單（`address`／`gateway`／`status`／`location`／`assignment`）；
+    /// 無效值回 400（見票 14）。
+    sort: Option<String>,
+    /// 排序方向 `asc`／`desc`；無效值回 400。
+    dir: Option<String>,
     page: Option<i64>,
     per_page: Option<i64>,
 }
@@ -118,6 +123,31 @@ async fn list_subnet_ips(
         None => None,
     };
 
+    // 排序欄位與方向經白名單驗證，無效值回 400（比照 `/assets`，見票 14）。
+    let sort = match query
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(value) => IpSortField::parse(value).ok_or_else(|| {
+            ApiError::validation(format!("無效的排序欄位：{value}")).field("sort")
+        })?,
+        None => IpSortField::default(),
+    };
+    let dir = match query
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(value) => IpSortDir::parse(value).ok_or_else(|| {
+            ApiError::validation(format!("無效的排序方向：{value}（僅接受 asc／desc）"))
+                .field("dir")
+        })?,
+        None => IpSortDir::default(),
+    };
+
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query
         .per_page
@@ -127,6 +157,8 @@ async fn list_subnet_ips(
     let filter = IpFilter {
         q: query.q,
         status,
+        sort,
+        dir,
         page,
         per_page,
     };
