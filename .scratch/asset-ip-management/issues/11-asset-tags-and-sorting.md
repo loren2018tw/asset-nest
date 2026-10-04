@@ -36,4 +36,4 @@
   - `tags` 排序以原始 JSON 字串比較（`tags COLLATE NOCASE`）：空陣列 `[]` 依字串序排在 `["a"]` 之後；行為確定、可測，未另做「取首個標籤」等特殊語意。
   - 標籤大小寫折疊沿用全系統 SQLite `COLLATE NOCASE` 的 ASCII 語意（Rust 端用 `to_ascii_lowercase`），非 ASCII 大小寫視為不同值。
   - `expired` 排序以 SQL 重算而非新增資料欄位；已以整合測試驗證排序與 Rust 屆齡旗標一致。
-- 實作 commit：`TODO`
+- 實作 commit：`1a1c185`（`11 資產標籤與清單排序：多值標籤、標籤篩選、伺服器端排序（後端＋前端）`）
