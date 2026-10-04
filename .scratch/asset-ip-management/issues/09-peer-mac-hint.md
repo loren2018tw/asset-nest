@@ -34,4 +34,4 @@
   - 不做本機網卡 fallback（比照 Kealight；跨網段、VPN、IPv6 一律 `{mac: null}`）。
   - 票列「資產端指派對話框」目前尚未存在（屬票 10 範圍），本次掛到既有兩個新增介面表單（指派對話框、資產對話框）；共用元件 `PeerMacHint.vue` 屆時可直接掛上。
   - 缺少 `ConnectInfo` 時由 axum 回預設 500；正式啟動一律帶 `into_make_service_with_connect_info`，故未特別處理（整合測試以注入情境為主）。
-- 實作 commit：（commit 後補）
+- 實作 commit：`a89bb51`（`09 連線主機 MAC 參考：ARP 反查端點與新增介面提示（後端＋前端）`）
