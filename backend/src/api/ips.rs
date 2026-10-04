@@ -71,15 +71,25 @@ async fn respond_with_warnings(
     subnet: &subnets::Subnet,
     assignment: Assignment,
 ) -> Result<Json<AssignmentResponse>, ApiError> {
-    let listed = assignments::list_for_subnet(&state.db, subnet.id)
-        .await
-        .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
-    let warnings = conflicts::warnings_for(subnet, &listed, &assignment.address)?;
-
+    let warnings = warnings_for_address(state, subnet, &assignment.address).await?;
     Ok(Json(AssignmentResponse {
         assignment,
         warnings,
     }))
+}
+
+/// 重新偵測該網段衝突並回傳該位址的警示（僅提示、不阻擋）。
+///
+/// 供指派端點與資產端指派共用；每次儲存即時重算，無快取（見票 07）。
+pub(super) async fn warnings_for_address(
+    state: &AppState,
+    subnet: &subnets::Subnet,
+    address: &str,
+) -> Result<Vec<Warning>, ApiError> {
+    let listed = assignments::list_for_subnet(&state.db, subnet.id)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
+    conflicts::warnings_for(subnet, &listed, address)
 }
 
 async fn list_subnet_ips(

@@ -80,6 +80,14 @@
             flat
             dense
             round
+            icon="add_link"
+            aria-label="指派 IP"
+            @click="openAssign(props.row)"
+          />
+          <q-btn
+            flat
+            dense
+            round
             icon="edit"
             aria-label="編輯"
             @click="openEdit(props.row)"
@@ -98,6 +106,13 @@
     </q-table>
 
     <asset-form-dialog v-model="dialogOpen" :asset="editing" @saved="onSaved" />
+
+    <assign-ip-dialog
+      v-if="assignAsset !== null"
+      v-model="assignOpen"
+      :asset="assignAsset"
+      @saved="onAssignSaved"
+    />
   </q-page>
 </template>
 
@@ -115,6 +130,7 @@ import {
   type Asset,
   type AssetDetail
 } from "@/api/assets";
+import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 
 const $q = useQuasar();
@@ -154,6 +170,9 @@ const columns: QTableProps["columns"] = [
 
 const dialogOpen = ref(false);
 const editing = ref<Asset | null>(null);
+
+const assignOpen = ref(false);
+const assignAsset = ref<Asset | null>(null);
 
 interface TableRequest {
   pagination: { page: number; rowsPerPage: number };
@@ -220,6 +239,16 @@ function openEdit(asset: Asset) {
 function onSaved() {
   void fetchAssets();
   void loadFilterOptions();
+}
+
+/** 由資產列直接指派 IP（見票 10）；位址可能反推自任一網段。 */
+function openAssign(asset: Asset) {
+  assignAsset.value = asset;
+  assignOpen.value = true;
+}
+
+function onAssignSaved() {
+  void fetchAssets();
 }
 
 function confirmDelete(asset: Asset) {

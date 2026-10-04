@@ -394,6 +394,36 @@ pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Subnet>> {
     Ok(Some(row.into_subnet(pools)))
 }
 
+/// 依位址尋找所屬網段（含 pools）；找不到回傳 `None`。
+///
+/// 網段不得重疊（見 spec §3.1），故至多一個網段包含該位址。供資產端指派
+/// 由位址反推網段（見票 10）；位址若因網段縮小而出界，將找不到所屬網段。
+pub async fn find_by_address(
+    pool: &SqlitePool,
+    address: IpAddr,
+) -> Result<Option<Subnet>, ApiError> {
+    let rows =
+        sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
+            .fetch_all(pool)
+            .await
+            .map_err(|error| ApiError::internal("讀取網段失敗", error))?;
+
+    for row in rows {
+        let network: IpNet = row
+            .cidr
+            .parse()
+            .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))?;
+        if network.contains(&address) {
+            let pools = fetch_pools(pool, row.id)
+                .await
+                .map_err(|error| ApiError::internal("讀取網段 pools 失敗", error))?;
+            return Ok(Some(row.into_subnet(pools)));
+        }
+    }
+
+    Ok(None)
+}
+
 /// 新增網段與其 pools（同一交易）。
 pub async fn create(pool: &SqlitePool, valid: ValidSubnet) -> sqlx::Result<Subnet> {
     let mut transaction = pool.begin().await?;

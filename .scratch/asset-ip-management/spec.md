@@ -165,6 +165,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 | PATCH | `/assets/{id}` | 編輯 |
 | DELETE | `/assets/{id}` | 連動刪除 |
 | POST | `/assets/{id}/interfaces` | 新增介面 |
+| PUT | `/assets/{id}/assignments` | 資產端指派／確認後移轉（見 ADR-0007） |
 | PATCH | `/interfaces/{id}` | 編輯介面 |
 | DELETE | `/interfaces/{id}` | 刪除介面（連動） |
 | GET | `/locations` | 位置建議值（既有值去重） |

@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::AppState;
 
+mod asset_assignments;
 mod assets;
 mod error;
 mod interfaces;
@@ -31,6 +32,7 @@ mod v1 {
 
     pub fn router() -> Router<AppState> {
         Router::new()
+            .merge(super::asset_assignments::router())
             .merge(super::assets::router())
             .merge(super::interfaces::router())
             .merge(super::subnets::router())

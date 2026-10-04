@@ -202,10 +202,21 @@
                     hint="冒號／連字號／無分隔皆可"
                   />
                 </div>
-                <div class="col-12 col-sm-3">
+                <div class="col-12 col-sm-2">
                   <q-input v-model="row.note" outlined dense label="備註" />
                 </div>
-                <div class="col-12 col-sm-1 text-right">
+                <div class="col-12 col-sm-2 text-right">
+                  <!-- 指派一律以已儲存的介面為對象（未儲存介面不顯示） -->
+                  <q-btn
+                    v-if="row.id !== null"
+                    flat
+                    dense
+                    round
+                    icon="add_link"
+                    color="primary"
+                    aria-label="指派 IP"
+                    @click="openAssign(row)"
+                  />
                   <q-btn
                     flat
                     dense
@@ -275,6 +286,15 @@
       </q-form>
     </q-card>
   </q-dialog>
+
+  <!-- 介面列「指派 IP」：以該介面為固定目標（見票 10） -->
+  <assign-ip-dialog
+    v-if="asset !== null && assignInterface !== null"
+    v-model="assignOpen"
+    :asset="asset"
+    :fixed-interface="assignInterface"
+    @saved="onAssignSaved"
+  />
 </template>
 
 <script setup lang="ts">
@@ -299,6 +319,7 @@ import {
   type InterfaceInput
 } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
+import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 
 const props = defineProps<{
@@ -372,6 +393,10 @@ const loadingInterfaces = ref(false);
 const interfaceError = ref("");
 /** 新增模式已建立、但介面尚未同步完成時記下的資產 id。 */
 const savedAssetId = ref<number | null>(null);
+
+/** 介面列「指派 IP」對話框：固定目標介面（見票 10）。 */
+const assignOpen = ref(false);
+const assignInterface = ref<Interface | null>(null);
 
 /** QMenu 的定位目標；template ref 於掛載後才有值。 */
 const locationTarget = computed(() => locationField.value ?? undefined);
@@ -554,6 +579,36 @@ function confirmRemoveInterface(row: InterfaceDraft) {
       item => item.key !== row.key
     );
   });
+}
+
+/** 由已儲存的介面列開啟指派對話框（目標介面固定；未儲存介面不顯示按鈕）。 */
+function openAssign(row: InterfaceDraft) {
+  if (row.id === null) {
+    return;
+  }
+  const target = originalInterfaces.value.find(item => item.id === row.id);
+  if (target === undefined) {
+    return;
+  }
+  assignInterface.value = target;
+  assignOpen.value = true;
+}
+
+/** 指派對話框儲存後：更新唯讀的「已指派 IP」；不重載介面草稿，保留未儲存編輯。 */
+async function onAssignSaved() {
+  const asset = props.asset;
+  if (asset === null) {
+    return;
+  }
+  try {
+    const detail = await fetchAsset(asset.id);
+    assignments.value = detail.assignments;
+  } catch (cause) {
+    $q.notify({
+      type: "negative",
+      message: `讀取指派失敗：${messageOf(cause)}`
+    });
+  }
 }
 
 async function checkDuplicateSerial(value: string, token: number) {

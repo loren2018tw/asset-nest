@@ -7,7 +7,9 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 export class ApiError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    /** 後端錯誤 body 的 `details`（結構錯誤的額外資訊；見 spec §5）。 */
+    readonly details?: Record<string, unknown>
   ) {
     super(message);
     this.name = "ApiError";
@@ -17,6 +19,7 @@ export class ApiError extends Error {
 interface ErrorBody {
   error?: string;
   message?: string;
+  details?: Record<string, unknown>;
 }
 
 async function request<T>(
@@ -34,10 +37,8 @@ async function request<T>(
   const response = await fetch(`${BASE_URL}${path}`, init);
 
   if (!response.ok) {
-    throw new ApiError(
-      response.status,
-      await errorMessage(response, method, path)
-    );
+    const error = await parseError(response, method, path);
+    throw new ApiError(response.status, error.message, error.details);
   }
 
   if (response.status === 204) {
@@ -47,22 +48,24 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
-/** 優先採用後端 `{error, message}` 的訊息（見 spec §5）。 */
-async function errorMessage(
+/** 優先採用後端 `{error, message}` 的訊息（見 spec §5），並保留 `details`。 */
+async function parseError(
   response: Response,
   method: string,
   path: string
-): Promise<string> {
+): Promise<{ message: string; details: Record<string, unknown> | undefined }> {
+  const fallback = `${method} ${path} 失敗（HTTP ${response.status}）`;
+
   try {
     const body = (await response.json()) as ErrorBody;
-    if (body.message) {
-      return body.message;
-    }
+    return {
+      message: body.message || fallback,
+      details: body.details
+    };
   } catch {
     // 非 JSON 內容：改用狀態碼訊息
+    return { message: fallback, details: undefined };
   }
-
-  return `${method} ${path} 失敗（HTTP ${response.status}）`;
 }
 
 export function apiGet<T>(path: string): Promise<T> {

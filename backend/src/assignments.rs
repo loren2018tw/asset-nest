@@ -13,10 +13,10 @@ use serde_json::json;
 use sqlx::{FromRow, SqlitePool};
 
 use crate::api::ApiError;
-use crate::assets::optional_text;
+use crate::assets::{self, optional_text};
 use crate::interfaces;
 use crate::ips::HostRange;
-use crate::subnets::Subnet;
+use crate::subnets::{self, Subnet};
 
 /// `ip_assignments` 資料表完整欄位清單。
 const COLUMNS: &str =
@@ -33,6 +33,17 @@ struct AssignmentRow {
     hostname: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+/// 目前指派對象（資產＋介面）；供資產端移轉提示（見票 10）。
+#[derive(Debug, FromRow)]
+struct AssignmentTargetRow {
+    asset_id: i64,
+    asset_description: String,
+    asset_location: String,
+    interface_id: i64,
+    interface_name: Option<String>,
+    mac: Option<String>,
 }
 
 /// API 回傳的指派（僅記目前狀態，無歷程）。
@@ -94,6 +105,43 @@ impl AssignmentInput {
             purpose,
             hostname,
         })
+    }
+}
+
+/// 資產端指派的輸入（見票 10）；缺漏欄位由 `validate` 回報。
+///
+/// `address` 為完整 IP（v4／v6），由後端反推所屬網段；`transfer` 為
+/// 位址已指派給其他介面時，是否確認移轉（預設 `false`）。
+#[derive(Debug, Default, Deserialize)]
+pub struct AssetAssignmentInput {
+    pub address: Option<String>,
+    pub interface_id: Option<i64>,
+    pub purpose: Option<String>,
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub transfer: bool,
+}
+
+impl AssetAssignmentInput {
+    /// 驗證輸入；回傳（位址、是否移轉、已驗證的指派內容）。
+    ///
+    /// 位址須為合法 IP；介面、用途與 hostname 的規則沿用 [`AssignmentInput`]。
+    pub fn validate(self) -> Result<(IpAddr, bool, ValidAssignment), ApiError> {
+        let text = optional_text(self.address)
+            .ok_or_else(|| ApiError::validation("位址為必填").field("address"))?;
+        let address: IpAddr = text.parse().map_err(|_| {
+            ApiError::validation(format!("位址格式錯誤：{text}（須為合法 IP 位址）"))
+                .field("address")
+        })?;
+
+        let valid = AssignmentInput {
+            interface_id: self.interface_id,
+            purpose: self.purpose,
+            hostname: self.hostname,
+        }
+        .validate()?;
+
+        Ok((address, self.transfer, valid))
     }
 }
 
@@ -240,6 +288,187 @@ pub async fn assign(
     }
 
     write(pool, subnet.id, &address_text, existing_address, valid).await
+}
+
+/// 資產端指派（見票 10）：由位址反推所屬網段，指派給該資產的指定介面。
+///
+/// 位址已指派給其他介面時：
+/// - `transfer == false`：回 400 `address_assigned_elsewhere`，附目前指派對象
+///   （供前端提示確認；見 ADR-0007）。
+/// - `transfer == true`：同一交易內原子移轉（刪除舊指派＋建立新指派），
+///   不留歷程；不重驗出界／落池，沿用既有位址的處理原則（見 ADR-0006）。
+///
+/// 結構規則不因移轉而放寬：保留需介面有 MAC、同一介面同一網段至多一位址、
+/// v6 用途固定 static；位址未指派時 v4 須為 host 且非池內、v6 須落在 CIDR 內。
+/// 位址已指派給同一介面＝更新用途／hostname（`transferred` 為 `false`）。
+///
+/// 回傳（指派、是否發生移轉）。
+pub async fn assign_for_asset(
+    pool: &SqlitePool,
+    asset_id: i64,
+    address: IpAddr,
+    valid: ValidAssignment,
+    transfer: bool,
+) -> Result<(Assignment, bool), ApiError> {
+    let address_text = address.to_string();
+
+    // 資產存在；介面存在且屬於該資產（見票 10）。
+    if assets::get(pool, asset_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取資產失敗", error))?
+        .is_none()
+    {
+        return Err(ApiError::not_found("找不到資產"));
+    }
+
+    let interface = interfaces::get(pool, valid.interface_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面失敗", error))?
+        .ok_or_else(|| ApiError::validation("找不到介面").field("interface_id"))?;
+
+    if interface.asset_id != asset_id {
+        return Err(ApiError::validation("介面不屬於此資產")
+            .field("interface_id")
+            .detail("asset_id", json!(interface.asset_id)));
+    }
+
+    // 由位址找所屬網段；網段不重疊，至多一個（見 spec §2.3、§3.1）。
+    let subnet = subnets::find_by_address(pool, address)
+        .await?
+        .ok_or_else(|| {
+            ApiError::validation(format!("位址 {address} 不在任何網段內"))
+                .field("address")
+                .detail("reason", json!("no_subnet"))
+        })?;
+
+    // 結構規則（不因移轉而放寬）：保留需 MAC；v6 用途固定 static。
+    if valid.purpose == "reservation" && interface.mac.is_none() {
+        return Err(
+            ApiError::validation("保留需介面有 MAC；無 MAC 的介面僅能手動設定")
+                .field("purpose")
+                .detail("interface_id", json!(interface.id)),
+        );
+    }
+
+    if address.is_ipv6() && valid.purpose != "static" {
+        return Err(ApiError::validation("IPv6 位址用途固定為手動設定（static）").field("purpose"));
+    }
+
+    // 同一介面在同一網段至多一個位址：目標介面已有其他位址即阻擋。
+    if let Some(existing) = fetch_by_interface(pool, subnet.id, valid.interface_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派失敗", error))?
+    {
+        if existing.address != address_text {
+            return Err(ApiError::validation(format!(
+                "此介面在此網段已有位址 {}（同一介面同一網段至多一個位址）",
+                existing.address
+            ))
+            .field("interface_id")
+            .detail("existing_address", json!(existing.address)));
+        }
+    }
+
+    let existing_address = fetch_by_address(pool, subnet.id, &address_text)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派失敗", error))?;
+
+    let mut transferred = false;
+    if let Some(existing) = &existing_address {
+        if existing.interface_id != valid.interface_id {
+            if !transfer {
+                return Err(assigned_elsewhere_error(pool, &subnet, existing).await?);
+            }
+            transferred = true;
+        }
+    }
+
+    // 新指派驗證 host／pool；既有位址（更新或移轉）不重驗出界／落池。
+    validate_address(&subnet, address, valid.purpose, existing_address.is_some())?;
+
+    if transferred {
+        let old = existing_address
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("移轉指派失敗", "找不到舊指派"))?;
+        let assignment = transfer_atomically(pool, subnet.id, &address_text, old.id, valid).await?;
+        return Ok((assignment, true));
+    }
+
+    let assignment = write(pool, subnet.id, &address_text, existing_address, valid).await?;
+    Ok((assignment, false))
+}
+
+/// 「位址已指派給其他介面」的 400 錯誤；`details` 附目前指派對象供前端提示
+/// （見票 10、ADR-0007）。
+async fn assigned_elsewhere_error(
+    pool: &SqlitePool,
+    subnet: &Subnet,
+    existing: &AssignmentRow,
+) -> Result<ApiError, ApiError> {
+    let target = fetch_target(pool, existing.interface_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派對象失敗", error))?
+        .ok_or_else(|| ApiError::internal("讀取指派對象失敗", "介面不存在"))?;
+
+    Ok(ApiError::validation(format!(
+        "位址 {} 已指派給其他介面，請確認是否移轉",
+        existing.address
+    ))
+    .field("address")
+    .detail("reason", json!("address_assigned_elsewhere"))
+    .detail("subnet_id", json!(subnet.id))
+    .detail("subnet_cidr", json!(subnet.cidr))
+    .detail("asset_id", json!(target.asset_id))
+    .detail("asset_description", json!(target.asset_description))
+    .detail("asset_location", json!(target.asset_location))
+    .detail("interface_id", json!(target.interface_id))
+    .detail("interface_name", json!(target.interface_name))
+    .detail("mac", json!(target.mac)))
+}
+
+/// 原子移轉：同一交易內刪除舊指派、建立新指派；不留歷程（見 ADR-0007）。
+async fn transfer_atomically(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+    old_id: i64,
+    valid: ValidAssignment,
+) -> Result<Assignment, ApiError> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::internal("建立移轉交易失敗", error))?;
+
+    sqlx::query("DELETE FROM ip_assignments WHERE id = ?")
+        .bind(old_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ApiError::internal("刪除舊指派失敗", error))?;
+
+    let result = sqlx::query(
+        "INSERT INTO ip_assignments (subnet_id, address, interface_id, purpose, hostname)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .bind(valid.interface_id)
+    .bind(valid.purpose)
+    .bind(valid.hostname)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_write_error)?;
+
+    let id = result.last_insert_rowid();
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ApiError::internal("提交移轉交易失敗", error))?;
+
+    fetch_row(pool, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取指派失敗", error))?
+        .map(AssignmentRow::into_assignment)
+        .ok_or_else(|| ApiError::internal("讀取指派失敗", "列不存在"))
 }
 
 /// v6 登錄位址（新增即指派）：建立即為手動設定（static）。
@@ -522,6 +751,24 @@ async fn fetch_by_interface(
     .await
 }
 
+/// 讀取指派對象（資產＋介面）；介面不存在回傳 `None`。
+async fn fetch_target(
+    pool: &SqlitePool,
+    interface_id: i64,
+) -> sqlx::Result<Option<AssignmentTargetRow>> {
+    sqlx::query_as::<_, AssignmentTargetRow>(
+        "SELECT s.id AS asset_id, s.description AS asset_description,
+                s.location AS asset_location, i.id AS interface_id,
+                i.name AS interface_name, i.mac
+           FROM interfaces i
+           JOIN assets s ON s.id = i.asset_id
+          WHERE i.id = ?",
+    )
+    .bind(interface_id)
+    .fetch_optional(pool)
+    .await
+}
+
 impl AssignmentRow {
     fn into_assignment(self) -> Assignment {
         Assignment {
@@ -605,6 +852,72 @@ mod tests {
             .is_err(),
             "手動設定不可填 hostname"
         );
+    }
+
+    #[test]
+    fn asset_assignment_input_requires_address_and_parses_families() {
+        let (address, transfer, valid) = AssetAssignmentInput {
+            address: Some(" 10.0.0.5 ".to_string()),
+            interface_id: Some(7),
+            purpose: Some("static".to_string()),
+            hostname: None,
+            transfer: true,
+        }
+        .validate()
+        .expect("合法輸入");
+        assert_eq!(address.to_string(), "10.0.0.5");
+        assert!(transfer);
+        assert_eq!(valid.interface_id, 7);
+
+        let (address, _, _) = AssetAssignmentInput {
+            address: Some("fd00::5".to_string()),
+            interface_id: Some(7),
+            purpose: Some("static".to_string()),
+            hostname: None,
+            transfer: false,
+        }
+        .validate()
+        .expect("v6 亦為合法位址");
+        assert!(address.is_ipv6());
+
+        assert!(
+            AssetAssignmentInput {
+                address: None,
+                ..Default::default()
+            }
+            .validate()
+            .is_err(),
+            "缺位址應阻擋"
+        );
+        assert!(
+            AssetAssignmentInput {
+                address: Some("abc".to_string()),
+                ..Default::default()
+            }
+            .validate()
+            .is_err(),
+            "非法位址應阻擋"
+        );
+        assert!(
+            AssetAssignmentInput {
+                address: Some("10.0.0.5".to_string()),
+                ..Default::default()
+            }
+            .validate()
+            .is_err(),
+            "缺介面／用途應阻擋"
+        );
+    }
+
+    #[test]
+    fn asset_assignment_input_transfer_defaults_to_false() {
+        let input: AssetAssignmentInput = serde_json::from_value(serde_json::json!({
+            "address": "10.0.0.5",
+            "interface_id": 1,
+            "purpose": "static"
+        }))
+        .expect("反序列化成功");
+        assert!(!input.transfer, "未提供 transfer 視為 false");
     }
 
     #[test]
