@@ -36,7 +36,9 @@
           outlined
           dense
           clearable
+          use-input
           label="位置"
+          @filter="filterLocations"
           @update:model-value="reload"
         />
       </div>
@@ -188,6 +190,9 @@ const $q = useQuasar();
 
 const assets = ref<AssetListRow[]>([]);
 const loading = ref(false);
+/** 全部位置選項；位置篩選的本地過濾來源。 */
+const allLocationOptions = ref<string[]>([]);
+/** 依輸入過濾後顯示的位置選項。 */
 const locationOptions = ref<string[]>([]);
 const brandOptions = ref<string[]>([]);
 const tagOptions = ref<string[]>([]);
@@ -326,12 +331,26 @@ async function loadFilterOptions() {
       fetchBrands(),
       fetchTags()
     ]);
+    allLocationOptions.value = locations;
     locationOptions.value = locations;
     brandOptions.value = brands;
     tagOptions.value = tags;
   } catch (cause) {
     $q.notify({ type: "negative", message: messageOf(cause) });
   }
+}
+
+/** 依輸入本地即時過濾既有位置（大小寫無關、子字串）；輸入不觸發伺服器查詢。 */
+function filterLocations(
+  input: string,
+  update: (callback: () => void) => void
+) {
+  const needle = input.toLowerCase();
+  update(() => {
+    locationOptions.value = allLocationOptions.value.filter(location =>
+      location.toLowerCase().includes(needle)
+    );
+  });
 }
 
 function reload() {
