@@ -25,7 +25,7 @@
           dense
           clearable
           debounce="300"
-          placeholder="搜尋 IP／資產描述／MAC／介面名稱"
+          placeholder="搜尋 IP／資產描述／位置／MAC／介面名稱"
           @update:model-value="reload"
         >
           <template #prepend>
@@ -83,14 +83,18 @@
           </q-badge>
         </q-td>
       </template>
+      <template #body-cell-location="props">
+        <q-td :props="props">
+          <template v-if="props.row.assignment">
+            {{ props.row.assignment.asset_location }}
+          </template>
+          <span v-else class="text-grey-6">—</span>
+        </q-td>
+      </template>
       <template #body-cell-assignment="props">
         <q-td :props="props">
           <template v-if="props.row.assignment">
-            <div>
-              {{ props.row.assignment.asset_description }}（{{
-                props.row.assignment.asset_location
-              }}）
-            </div>
+            <div>{{ props.row.assignment.asset_description }}</div>
             <div class="text-caption text-grey-7">
               {{
                 interfaceLabel(
@@ -238,6 +242,12 @@ const columns: QTableProps["columns"] = [
     align: "center"
   },
   { name: "status", label: "狀態／用途", field: "status", align: "left" },
+  {
+    name: "location",
+    label: "位置",
+    field: (row: IpEntry) => row.assignment?.asset_location ?? "",
+    align: "left"
+  },
   { name: "assignment", label: "指派對象", field: "address", align: "left" },
   { name: "conflicts", label: "衝突", field: "conflicts", align: "left" },
   { name: "actions", label: "操作", field: "address", align: "right" }

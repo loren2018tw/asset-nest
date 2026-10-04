@@ -68,7 +68,7 @@ export interface RegistryInput {
 
 /** IP 清單搜尋與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
-  /** 完整位址精確比對；否則對位址文字、資產描述、介面名稱與 MAC 做子字串比對。 */
+  /** 完整位址精確比對；否則對位址文字、資產描述、位置、介面名稱與 MAC 做子字串比對。 */
   q?: string | undefined;
   /** 狀態／用途篩選。 */
   status?: IpStatus | undefined;

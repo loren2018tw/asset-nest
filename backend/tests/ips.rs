@@ -74,6 +74,56 @@ async fn create_subnet(pool: &SqlitePool, body: Value) -> Value {
     json
 }
 
+/// 新增資產並斷言成功，回傳 id。
+async fn create_asset(pool: &SqlitePool, description: &str, location: &str) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        "/api/v1/assets",
+        Some(json!({ "description": description, "location": location })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新增資產應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
+/// 對資產新增介面並斷言成功，回傳 id。
+async fn create_interface(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/assets/{asset_id}/interfaces"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新增介面應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
+/// 指派位址並斷言成功。
+async fn assign_ip(pool: &SqlitePool, subnet_id: i64, address: &str, body: Value) {
+    let (status, json) = send(
+        pool,
+        Method::PUT,
+        &format!("/api/v1/subnets/{subnet_id}/ips/{address}/assignment"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "指派應成功：{json}");
+}
+
+/// v6 登錄位址（新增即指派）並斷言成功。
+async fn register_ip(pool: &SqlitePool, subnet_id: i64, address: &str, interface_id: i64) {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/subnets/{subnet_id}/ips"),
+        Some(json!({ "address": address, "interface_id": interface_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "登錄位址應成功：{json}");
+}
+
 /// 讀取某網段的 IP 清單（`query` 含開頭 `?` 或空字串）並斷言成功。
 async fn list_ips(pool: &SqlitePool, id: i64, query: &str) -> Value {
     let (status, json) = send(
@@ -87,6 +137,24 @@ async fn list_ips(pool: &SqlitePool, id: i64, query: &str) -> Value {
     json
 }
 
+/// 以關鍵字搜尋 IP 清單；`q` 經百分比編碼（容許空白與非 ASCII）。
+async fn search_ips(pool: &SqlitePool, id: i64, q: &str) -> Value {
+    list_ips(pool, id, &format!("?q={}", encode(q))).await
+}
+
+/// 將查詢值編碼為 URI 可接受的百分比格式（僅處理測試用到的字元）。
+fn encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
 /// 取出回應列中的位址字串。
 fn addresses(page: &Value) -> Vec<&str> {
     page["items"]
@@ -95,6 +163,16 @@ fn addresses(page: &Value) -> Vec<&str> {
         .iter()
         .map(|item| item["address"].as_str().expect("address 為字串"))
         .collect()
+}
+
+/// 取出 IP 清單中某位址的列。
+fn row<'a>(page: &'a Value, address: &str) -> &'a Value {
+    page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .find(|item| item["address"] == address)
+        .unwrap_or_else(|| panic!("清單含 {address}"))
 }
 
 #[tokio::test]
@@ -269,6 +347,162 @@ async fn search_matches_exact_address_or_substring() {
     // 無符合的子字串：空結果
     let page = list_ips(&pool, id, "?q=255").await;
     assert_eq!(page["total"], 0);
+}
+
+#[tokio::test]
+async fn rows_report_assignment_location() {
+    let pool = test_pool().await;
+    let db_asset = create_asset(&pool, "資料庫主機", "機房 A").await;
+    let printer_asset = create_asset(&pool, "印表機", "Server Room B").await;
+    let db_interface = create_interface(&pool, db_asset, json!({ "name": "eth0" })).await;
+    let printer_interface = create_interface(
+        &pool,
+        printer_asset,
+        json!({ "name": "wlan0", "mac": "aa:bb:cc:dd:ee:ff" }),
+    )
+    .await;
+
+    // v4：指派列的 `assignment.asset_location` 供「位置」欄顯示；未指派列為 null
+    let v4 = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let v4_id = v4["id"].as_i64().expect("回應含 id");
+    assign_ip(
+        &pool,
+        v4_id,
+        "10.0.0.1",
+        json!({ "interface_id": db_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        v4_id,
+        "10.0.0.2",
+        json!({
+            "interface_id": printer_interface,
+            "purpose": "reservation",
+            "hostname": "printer-1"
+        }),
+    )
+    .await;
+
+    let page = list_ips(&pool, v4_id, "").await;
+    assert_eq!(
+        row(&page, "10.0.0.1")["assignment"]["asset_location"],
+        "機房 A"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.2")["assignment"]["asset_location"],
+        "Server Room B"
+    );
+    assert!(
+        row(&page, "10.0.0.3")["assignment"].is_null(),
+        "未指派列不含位置"
+    );
+
+    // v6：登錄列同樣含位置（v4／v6 回應形狀一致）
+    let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_id = v6["id"].as_i64().expect("回應含 id");
+    register_ip(&pool, v6_id, "fd00::10", db_interface).await;
+    register_ip(&pool, v6_id, "fd00::20", printer_interface).await;
+
+    let page = list_ips(&pool, v6_id, "").await;
+    assert_eq!(
+        row(&page, "fd00::10")["assignment"]["asset_location"],
+        "機房 A"
+    );
+    assert_eq!(
+        row(&page, "fd00::20")["assignment"]["asset_location"],
+        "Server Room B"
+    );
+}
+
+#[tokio::test]
+async fn search_matches_assignment_location() {
+    let pool = test_pool().await;
+    let db_asset = create_asset(&pool, "資料庫主機", "機房 A").await;
+    let printer_asset = create_asset(&pool, "印表機", "Server Room B").await;
+    let db_interface = create_interface(&pool, db_asset, json!({ "name": "eth0" })).await;
+    let printer_interface = create_interface(
+        &pool,
+        printer_asset,
+        json!({ "name": "wlan0", "mac": "aa:bb:cc:dd:ee:ff" }),
+    )
+    .await;
+
+    let v4 = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let v4_id = v4["id"].as_i64().expect("回應含 id");
+    assign_ip(
+        &pool,
+        v4_id,
+        "10.0.0.1",
+        json!({ "interface_id": db_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        v4_id,
+        "10.0.0.2",
+        json!({
+            "interface_id": printer_interface,
+            "purpose": "reservation",
+            "hostname": "printer-1"
+        }),
+    )
+    .await;
+
+    // 位置關鍵字：子字串比對、不分大小寫；僅命中已指派列
+    let page = search_ips(&pool, v4_id, "機房").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["10.0.0.1"]);
+
+    let page = search_ips(&pool, v4_id, "server room").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["10.0.0.2"]);
+
+    // 與狀態篩選並用（AND）：位置的用途為 static，reservation 應排除
+    let page = list_ips(
+        &pool,
+        v4_id,
+        &format!("?q={}&status=static", encode("機房")),
+    )
+    .await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["10.0.0.1"]);
+
+    let page = list_ips(
+        &pool,
+        v4_id,
+        &format!("?q={}&status=reservation", encode("機房")),
+    )
+    .await;
+    assert_eq!(page["total"], 0);
+
+    // 同一關鍵字可比對位置或既有欄位（描述）並累計結果
+    let page = search_ips(&pool, v4_id, "機").await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.1", "10.0.0.2"]);
+
+    // 無結果
+    let page = search_ips(&pool, v4_id, "不存在的機房").await;
+    assert_eq!(page["total"], 0);
+    assert!(addresses(&page).is_empty());
+
+    // v6：登錄清單的位置搜尋行為一致
+    let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_id = v6["id"].as_i64().expect("回應含 id");
+    register_ip(&pool, v6_id, "fd00::10", db_interface).await;
+    register_ip(&pool, v6_id, "fd00::20", printer_interface).await;
+
+    let page = search_ips(&pool, v6_id, "機房").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["fd00::10"]);
+
+    let page = search_ips(&pool, v6_id, "SERVER ROOM").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["fd00::20"]);
+
+    let page = search_ips(&pool, v6_id, "不存在").await;
+    assert_eq!(page["total"], 0);
+    assert!(addresses(&page).is_empty());
 }
 
 #[tokio::test]

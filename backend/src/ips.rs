@@ -84,7 +84,7 @@ impl PoolRange {
 #[derive(Debug, Default)]
 pub struct IpFilter {
     /// 關鍵字：可解析為完整位址時精確比對，否則對位址文字與指派對象
-    /// （資產描述／介面名稱／MAC）做子字串比對。
+    /// （資產描述／位置／介面名稱／MAC）做子字串比對。
     pub q: Option<String>,
     /// 狀態／用途篩選；未提供即全部。
     pub status: Option<IpStatusFilter>,
@@ -442,7 +442,7 @@ fn purpose_str(purpose: &str) -> &'static str {
     }
 }
 
-/// 關鍵字比對：位址文字或指派對象（資產描述／介面名稱／MAC）子字串，
+/// 關鍵字比對：位址文字或指派對象（資產描述／位置／介面名稱／MAC）子字串，
 /// 皆不分大小寫（見 spec §4.3）。
 fn matches_query(
     assignment: Option<&ListedAssignment>,
@@ -461,6 +461,10 @@ fn matches_query(
         .asset_description
         .to_lowercase()
         .contains(query_lower)
+        || assignment
+            .asset_location
+            .to_lowercase()
+            .contains(query_lower)
         || assignment
             .interface_name
             .as_deref()
@@ -570,11 +574,23 @@ mod tests {
         list(subnet, filter, &[])
     }
 
-    /// 測試用指派列。
+    /// 測試用指派列（資產位置固定「機房 A」）。
     fn listed(
         address: &str,
         purpose: &str,
         description: &str,
+        interface_name: Option<&str>,
+        mac: Option<&str>,
+    ) -> ListedAssignment {
+        listed_at(address, purpose, description, "機房 A", interface_name, mac)
+    }
+
+    /// 測試用指派列（指定資產位置）。
+    fn listed_at(
+        address: &str,
+        purpose: &str,
+        description: &str,
+        location: &str,
         interface_name: Option<&str>,
         mac: Option<&str>,
     ) -> ListedAssignment {
@@ -587,7 +603,7 @@ mod tests {
             mac: mac.map(str::to_string),
             asset_id: 1,
             asset_description: description.to_string(),
-            asset_location: "機房 A".to_string(),
+            asset_location: location.to_string(),
         }
     }
 
@@ -831,10 +847,11 @@ mod tests {
         let subnet = subnet("10.0.0.0/29", None, &[]);
         let assignments = [
             listed("10.0.0.1", "static", "資料庫主機", Some("eth0"), None),
-            listed(
+            listed_at(
                 "10.0.0.2",
                 "reservation",
                 "印表機",
+                "Server Room B",
                 Some("wlan0"),
                 Some("AA:BB:CC:DD:EE:FF"),
             ),
@@ -855,6 +872,17 @@ mod tests {
         // MAC 子字串（不分大小寫）。
         let (items, total) =
             list(&subnet, &filter(Some("bb:cc"), 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.2"]);
+
+        // 資產位置（子字串、不分大小寫）。
+        let (items, total) =
+            list(&subnet, &filter(Some("機房"), 1, 50), &assignments).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.1"]);
+
+        let (items, total) =
+            list(&subnet, &filter(Some("SERVER ROOM"), 1, 50), &assignments).expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.2"]);
 
@@ -935,10 +963,11 @@ mod tests {
         let subnet = subnet("fd00::/64", None, &[]);
         let assignments = [
             listed("fd00::10", "static", "資料庫主機", Some("eth0"), None),
-            listed(
+            listed_at(
                 "fd00::2",
                 "static",
                 "印表機",
+                "Server Room B",
                 Some("wlan0"),
                 Some("AA:BB:CC:DD:EE:FF"),
             ),
@@ -959,11 +988,13 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["fd00::10"]);
 
-        // 關鍵字比對指派對象（資產描述／介面名稱／MAC）
+        // 關鍵字比對指派對象（資產描述／位置／介面名稱／MAC）；v4／v6 同一路徑
         for (query, address) in [
             ("資料庫", "fd00::10"),
+            ("機房", "fd00::10"),
             ("ETH0", "fd00::10"),
             ("WLAN0", "fd00::2"),
+            ("SERVER ROOM", "fd00::2"),
             ("bb:cc", "fd00::2"),
         ] {
             let (items, total) =
