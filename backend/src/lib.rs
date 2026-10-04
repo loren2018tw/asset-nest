@@ -1,6 +1,7 @@
 //! asset-nest 後端：API 與前端靜態檔的同源服務（見 `docs/adr/0004`）。
 
 pub mod api;
+pub mod asset_export;
 pub mod assets;
 pub mod assignments;
 pub mod auth;

@@ -1,4 +1,12 @@
-import { apiDelete, apiGet, apiPatch, apiPost, apiUpload } from "@/api/client";
+import {
+  apiDelete,
+  apiDownload,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiUpload,
+  type DownloadedFile
+} from "@/api/client";
 import type { Interface } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
 
@@ -56,6 +64,9 @@ export interface AssetListParams {
   page?: number | undefined;
   per_page?: number | undefined;
 }
+
+/** 匯出參數：與清單相同，但忽略分頁（後端亦忽略 `page`／`per_page`；見 spec §4）。 */
+export type AssetExportParams = Omit<AssetListParams, "page" | "per_page">;
 
 export interface AssetPage {
   /** 清單列含已指派 IP；POST／PATCH 回應的 `Asset` 不含此欄位。 */
@@ -173,7 +184,8 @@ interface StringItems {
   items: string[];
 }
 
-export function listAssets(params: AssetListParams = {}): Promise<AssetPage> {
+/** 將參數轉為查詢字串（含 `?`）；略過 undefined／null／空字串。 */
+function queryString(params: object): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== "") {
@@ -182,9 +194,21 @@ export function listAssets(params: AssetListParams = {}): Promise<AssetPage> {
   }
 
   const search = query.toString();
-  return apiGet<AssetPage>(
-    `/api/v1/assets${search === "" ? "" : `?${search}`}`
-  );
+  return search === "" ? "" : `?${search}`;
+}
+
+export function listAssets(params: AssetListParams = {}): Promise<AssetPage> {
+  return apiGet<AssetPage>(`/api/v1/assets${queryString(params)}`);
+}
+
+/**
+ * 下載目前搜尋／篩選／排序的資產匯出 CSV（14 欄、UTF-8 BOM；
+ * 見 spec §4、§5）。
+ */
+export function downloadAssetsCsv(
+  params: AssetExportParams = {}
+): Promise<DownloadedFile> {
+  return apiDownload(`/api/v1/assets/export${queryString(params)}`);
 }
 
 export function createAsset(input: AssetInput): Promise<Asset> {

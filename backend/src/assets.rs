@@ -276,13 +276,7 @@ pub async fn list(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<(Vec<
 
     let mut query = QueryBuilder::new(format!("SELECT {COLUMNS} FROM assets WHERE 1 = 1"));
     push_filters(&mut query, filter);
-    // 排序欄位與方向經白名單驗證；以 id 作為穩定排序的決勝鍵（見 spec §6、票 11）。
-    query
-        .push(" ORDER BY ")
-        .push(filter.sort.order_expression())
-        .push(" ")
-        .push(filter.dir.keyword())
-        .push(", id ASC");
+    push_order(&mut query, filter);
     query.push(" LIMIT ").push_bind(filter.per_page);
     query
         .push(" OFFSET ")
@@ -290,6 +284,16 @@ pub async fn list(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<(Vec<
     let rows: Vec<AssetRow> = query.build_query_as().fetch_all(pool).await?;
 
     Ok((into_assets(rows), total))
+}
+
+/// 搜尋／篩選後的全部符合資產（不分頁；供匯出使用，見票 04）。
+pub async fn list_all(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<Vec<Asset>> {
+    let mut query = QueryBuilder::new(format!("SELECT {COLUMNS} FROM assets WHERE 1 = 1"));
+    push_filters(&mut query, filter);
+    push_order(&mut query, filter);
+    let rows: Vec<AssetRow> = query.build_query_as().fetch_all(pool).await?;
+
+    Ok(into_assets(rows))
 }
 
 /// 讀取單一資產；不存在回傳 `None`。
@@ -491,6 +495,17 @@ impl AssetRow {
             updated_at: self.updated_at,
         }
     }
+}
+
+/// 在篩選條件之後附加排序子句；欄位與方向經白名單驗證，以 id 作為穩定
+/// 排序的決勝鍵（見 spec §6、票 11）。
+fn push_order(query: &mut QueryBuilder<'_, Sqlite>, filter: &AssetFilter) {
+    query
+        .push(" ORDER BY ")
+        .push(filter.sort.order_expression())
+        .push(" ")
+        .push(filter.dir.keyword())
+        .push(", id ASC");
 }
 
 /// 在篩選條件之後附加 SQL；關鍵字以 `LIKE` 子字串比對（SQLite 對 ASCII 不分大小寫）。

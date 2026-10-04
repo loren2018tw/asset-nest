@@ -1,14 +1,18 @@
 //! `/api/v1` 資產管理路由（見 spec §4.1、§5）。
 
+use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::api::ApiError;
+use crate::api::{ApiError, encode_filename};
+use crate::asset_export;
 use crate::assets::{
     self, Asset, AssetFilter, AssetInput, AssetPatch, SortDir, SortField, optional_text,
 };
@@ -23,6 +27,9 @@ const MAX_PER_PAGE: i64 = 200;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/assets", get(list_assets).post(create_asset))
+        // 靜態路徑與既有 `/assets/{id}` 動態路由並存，axum 以靜態優先
+        // （同 `/assets/import` 前例；見票 04）。
+        .route("/assets/export", get(export_assets))
         .route(
             "/assets/{id}",
             get(get_asset).patch(update_asset).delete(delete_asset),
@@ -46,6 +53,38 @@ struct ListQuery {
     dir: Option<String>,
     page: Option<i64>,
     per_page: Option<i64>,
+}
+
+impl ListQuery {
+    /// 驗證排序白名單並組成篩選條件；分頁供清單使用，匯出忽略
+    /// （僅沿用其篩選與排序；見票 04）。
+    fn into_filter(self, page: i64, per_page: i64) -> Result<AssetFilter, ApiError> {
+        let sort = match optional_text(self.sort) {
+            Some(value) => SortField::parse(&value).ok_or_else(|| {
+                ApiError::validation(format!("無效的排序欄位：{value}")).field("sort")
+            })?,
+            None => SortField::default(),
+        };
+        let dir = match optional_text(self.dir) {
+            Some(value) => SortDir::parse(&value).ok_or_else(|| {
+                ApiError::validation(format!("無效的排序方向：{value}（僅接受 asc／desc）"))
+                    .field("dir")
+            })?,
+            None => SortDir::default(),
+        };
+
+        Ok(AssetFilter {
+            q: self.q,
+            location: self.location,
+            brand: self.brand,
+            device_serial: self.device_serial,
+            tag: self.tag,
+            sort,
+            dir,
+            page,
+            per_page,
+        })
+    }
 }
 
 /// 資產清單列：資產欄位攤平，加上全部已指派位址（「已指派 IP」欄；見票 12）。
@@ -90,32 +129,7 @@ async fn list_assets(
         .per_page
         .unwrap_or(DEFAULT_PER_PAGE)
         .clamp(1, MAX_PER_PAGE);
-
-    let sort = match optional_text(query.sort) {
-        Some(value) => SortField::parse(&value).ok_or_else(|| {
-            ApiError::validation(format!("無效的排序欄位：{value}")).field("sort")
-        })?,
-        None => SortField::default(),
-    };
-    let dir = match optional_text(query.dir) {
-        Some(value) => SortDir::parse(&value).ok_or_else(|| {
-            ApiError::validation(format!("無效的排序方向：{value}（僅接受 asc／desc）"))
-                .field("dir")
-        })?,
-        None => SortDir::default(),
-    };
-
-    let filter = AssetFilter {
-        q: query.q,
-        location: query.location,
-        brand: query.brand,
-        device_serial: query.device_serial,
-        tag: query.tag,
-        sort,
-        dir,
-        page,
-        per_page,
-    };
+    let filter = query.into_filter(page, per_page)?;
 
     let (items, total) = assets::list(&state.db, &filter)
         .await
@@ -140,6 +154,32 @@ async fn list_assets(
         page,
         per_page,
     }))
+}
+
+/// 匯出資產 CSV（見 spec §4、§5）：套用目前搜尋／篩選／排序的**全部**符合
+/// 資產（忽略分頁）；attachment、UTF-8 BOM、檔名 `資產匯出_YYYYMMDD.csv`
+/// （RFC 5987 `filename*`，比照票 01）。
+async fn export_assets(
+    State(state): State<AppState>,
+    query: Result<Query<ListQuery>, QueryRejection>,
+) -> Result<Response<Body>, ApiError> {
+    let Query(query) = query.map_err(|_| ApiError::validation("查詢參數格式錯誤"))?;
+    let filter = query.into_filter(1, DEFAULT_PER_PAGE)?;
+
+    let body = asset_export::export_csv(&state.db, &filter).await?;
+
+    let date = Local::now().format("%Y%m%d");
+    let filename = format!("資產匯出_{date}.csv");
+    let content_disposition = format!(
+        "attachment; filename=\"assets_export_{date}.csv\"; filename*=UTF-8''{}",
+        encode_filename(&filename)
+    );
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(header::CONTENT_DISPOSITION, content_disposition)
+        .body(Body::from(body))
+        .map_err(|error| ApiError::internal("建立資產匯出回應失敗", error))
 }
 
 async fn get_asset(

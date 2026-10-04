@@ -698,6 +698,134 @@ fn address_sort_key(address: &str) -> (u8, u128) {
     }
 }
 
+/// 資產匯出所需的網路欄位（MAC／IPv4／IPv6／hostname；見 spec §4）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ExportNetwork {
+    pub mac: Option<String>,
+    pub ipv4: Option<String>,
+    pub ipv6: Option<String>,
+    pub hostname: Option<String>,
+}
+
+/// 匯出查詢列：介面 LEFT JOIN 其指派（無指派時 address 為 NULL）。
+#[derive(Debug, FromRow)]
+struct ExportRow {
+    asset_id: i64,
+    interface_id: i64,
+    mac: Option<String>,
+    address: Option<String>,
+    purpose: Option<String>,
+    hostname: Option<String>,
+}
+
+/// 批次讀取多資產的匯出網路欄位（單一查詢，避免逐資產 N+1；見票 04）。
+///
+/// 回傳 map 僅含至少有一個介面的資產；無介面的資產由呼叫端視為全空。
+pub async fn export_networks(
+    pool: &SqlitePool,
+    asset_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, ExportNetwork>> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query = QueryBuilder::new(
+        "SELECT i.asset_id, i.id AS interface_id, i.mac,
+                a.address, a.purpose, a.hostname
+           FROM interfaces i
+           LEFT JOIN ip_assignments a ON a.interface_id = i.id
+          WHERE i.asset_id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for asset_id in asset_ids {
+        separated.push_bind(*asset_id);
+    }
+    separated.push_unseparated(")");
+    // 同介面的列連續，且依指派 id 升冪；選取只需逐列掃描（見 [`select_export_network`]）。
+    query.push(" ORDER BY i.asset_id ASC, i.id ASC, a.id ASC");
+
+    let rows: Vec<ExportRow> = query.build_query_as().fetch_all(pool).await?;
+
+    let mut grouped: HashMap<i64, Vec<ExportRow>> = HashMap::new();
+    for row in rows {
+        grouped.entry(row.asset_id).or_default().push(row);
+    }
+
+    Ok(grouped
+        .into_iter()
+        .map(|(asset_id, rows)| (asset_id, select_export_network(&rows)))
+        .collect())
+}
+
+/// 由一資產的介面列套用 spec §4 的匯出選取規則：
+///
+/// 1. 介面：有指派位址的介面中 id 最小者；若皆無指派，取 id 最小介面；
+///    無介面 → MAC／IPv4／IPv6／hostname 全空。
+/// 2. IPv4／IPv6：所選介面的指派中，同族位址數值最小者（v4 用 u32、v6 用 u128）；
+///    無 → 空。
+/// 3. hostname：僅當匯出的 IPv4 為 reservation 時帶該筆 hostname；其餘空。
+///
+/// 列須依 `interface_id` 升冪（同介面連續）；無法解析的位址略過不選。
+fn select_export_network(rows: &[ExportRow]) -> ExportNetwork {
+    // 依 interface_id 切出連續區段；取第一個有指派的介面，否則第一個介面。
+    let mut chosen: Option<&[ExportRow]> = None;
+    let mut fallback: Option<&[ExportRow]> = None;
+    let mut start = 0;
+    while start < rows.len() {
+        let mut end = start;
+        while end < rows.len() && rows[end].interface_id == rows[start].interface_id {
+            end += 1;
+        }
+        let interface_rows = &rows[start..end];
+        if fallback.is_none() {
+            fallback = Some(interface_rows);
+        }
+        if chosen.is_none() && interface_rows.iter().any(|row| row.address.is_some()) {
+            chosen = Some(interface_rows);
+        }
+        start = end;
+    }
+
+    let Some(interface_rows) = chosen.or(fallback) else {
+        return ExportNetwork::default();
+    };
+
+    let mut ipv4: Option<(u32, &ExportRow)> = None;
+    let mut ipv6: Option<(u128, &ExportRow)> = None;
+    for row in interface_rows {
+        let Some(address) = row.address.as_deref() else {
+            continue;
+        };
+        match address.parse::<IpAddr>() {
+            Ok(IpAddr::V4(address)) => {
+                let value = u32::from(address);
+                if ipv4.as_ref().is_none_or(|(best, _)| value < *best) {
+                    ipv4 = Some((value, row));
+                }
+            }
+            Ok(IpAddr::V6(address)) => {
+                let value = u128::from(address);
+                if ipv6.as_ref().is_none_or(|(best, _)| value < *best) {
+                    ipv6 = Some((value, row));
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    let hostname = ipv4
+        .as_ref()
+        .filter(|(_, row)| row.purpose.as_deref() == Some("reservation"))
+        .and_then(|(_, row)| row.hostname.clone());
+
+    ExportNetwork {
+        mac: interface_rows[0].mac.clone(),
+        ipv4: ipv4.as_ref().and_then(|(_, row)| row.address.clone()),
+        ipv6: ipv6.as_ref().and_then(|(_, row)| row.address.clone()),
+        hostname,
+    }
+}
+
 /// 目前指派對象摘要（供匯入報告「已被指派／已登錄」訊息；見票 02）。
 #[derive(Debug)]
 pub(crate) struct AssignmentTarget {
@@ -1079,5 +1207,167 @@ mod tests {
             vec!["10.0.0.2", "10.0.0.10", "10.9.0.2", "fd00::a", "fd00:1::5"],
             "v4 先、v6 後；同族依數值"
         );
+    }
+
+    /// 測試用匯出列；`address` 為 `None` 代表該介面無此指派。
+    fn export_row(
+        interface_id: i64,
+        mac: Option<&str>,
+        address: Option<&str>,
+        purpose: Option<&str>,
+        hostname: Option<&str>,
+    ) -> ExportRow {
+        ExportRow {
+            asset_id: 1,
+            interface_id,
+            mac: mac.map(str::to_string),
+            address: address.map(str::to_string),
+            purpose: purpose.map(str::to_string),
+            hostname: hostname.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn export_network_prefers_first_interface_with_assignments() {
+        // 第一介面無指派、第二介面有 → 選第二（含其 MAC）。
+        let rows = vec![
+            export_row(1, Some("aa:bb:cc:dd:ee:01"), None, None, None),
+            export_row(
+                2,
+                Some("aa:bb:cc:dd:ee:02"),
+                Some("10.0.0.5"),
+                Some("static"),
+                None,
+            ),
+        ];
+        let network = select_export_network(&rows);
+        assert_eq!(network.mac.as_deref(), Some("aa:bb:cc:dd:ee:02"));
+        assert_eq!(network.ipv4.as_deref(), Some("10.0.0.5"));
+        assert_eq!(network.ipv6, None);
+    }
+
+    #[test]
+    fn export_network_falls_back_to_first_interface_without_assignments() {
+        let rows = vec![
+            export_row(1, Some("aa:bb:cc:dd:ee:01"), None, None, None),
+            export_row(2, Some("aa:bb:cc:dd:ee:02"), None, None, None),
+        ];
+        let network = select_export_network(&rows);
+        assert_eq!(
+            network.mac.as_deref(),
+            Some("aa:bb:cc:dd:ee:01"),
+            "取 id 最小介面"
+        );
+        assert_eq!(network.ipv4, None);
+        assert_eq!(network.ipv6, None);
+        assert_eq!(network.hostname, None);
+    }
+
+    #[test]
+    fn export_network_without_interfaces_is_empty() {
+        assert_eq!(select_export_network(&[]), ExportNetwork::default());
+    }
+
+    #[test]
+    fn export_network_picks_numerically_smallest_address_per_family() {
+        let rows = vec![
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("10.0.0.10"),
+                Some("static"),
+                None,
+            ),
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("10.0.0.2"),
+                Some("static"),
+                None,
+            ),
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("fd00::a"),
+                Some("static"),
+                None,
+            ),
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("fd00::2"),
+                Some("static"),
+                None,
+            ),
+        ];
+        let network = select_export_network(&rows);
+        assert_eq!(
+            network.ipv4.as_deref(),
+            Some("10.0.0.2"),
+            "v4 依數值而非字串"
+        );
+        assert_eq!(
+            network.ipv6.as_deref(),
+            Some("fd00::2"),
+            "v6 依數值而非字串"
+        );
+    }
+
+    #[test]
+    fn export_network_hostname_only_from_reservation_ipv4() {
+        // 匯出的 IPv4 為 reservation → 帶該筆 hostname。
+        let rows = vec![export_row(
+            1,
+            Some("aa:bb:cc:dd:ee:01"),
+            Some("10.0.0.2"),
+            Some("reservation"),
+            Some("pc-1"),
+        )];
+        assert_eq!(
+            select_export_network(&rows).hostname.as_deref(),
+            Some("pc-1")
+        );
+
+        // 匯出的 IPv4 為 static（數值較小）→ hostname 空，即使保留另有 hostname。
+        let rows = vec![
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("10.0.0.1"),
+                Some("static"),
+                None,
+            ),
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("10.0.0.2"),
+                Some("reservation"),
+                Some("pc-1"),
+            ),
+        ];
+        let network = select_export_network(&rows);
+        assert_eq!(network.ipv4.as_deref(), Some("10.0.0.1"));
+        assert_eq!(network.hostname, None, "非保留不帶 hostname");
+
+        // 同時有 v4 保留與 v6 指派 → 兩族皆帶，hostname 取自 v4 保留。
+        let rows = vec![
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("10.0.0.9"),
+                Some("reservation"),
+                Some("pc-9"),
+            ),
+            export_row(
+                1,
+                Some("aa:bb:cc:dd:ee:01"),
+                Some("fd00::9"),
+                Some("static"),
+                None,
+            ),
+        ];
+        let network = select_export_network(&rows);
+        assert_eq!(network.ipv6.as_deref(), Some("fd00::9"));
+        assert_eq!(network.hostname.as_deref(), Some("pc-9"));
     }
 }

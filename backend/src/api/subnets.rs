@@ -11,7 +11,7 @@ use chrono::Local;
 use serde::Serialize;
 
 use crate::AppState;
-use crate::api::ApiError;
+use crate::api::{ApiError, encode_filename};
 use crate::subnets::{self, Subnet, SubnetInput, SubnetPatch, SubnetSummary};
 
 pub fn router() -> Router<AppState> {
@@ -58,19 +58,6 @@ async fn export_subnets(State(state): State<AppState>) -> Result<Response<Body>,
         .header(header::CONTENT_DISPOSITION, content_disposition)
         .body(Body::from(body))
         .map_err(|error| ApiError::internal("建立網段匯出回應失敗", error))
-}
-
-/// RFC 5987 `filename*` 值：attr-char 原樣保留，其餘 UTF-8 位元組以 `%XX` 表示。
-fn encode_filename(name: &str) -> String {
-    name.bytes()
-        .map(|byte| match byte {
-            b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~' => {
-                (byte as char).to_string()
-            }
-            byte if byte.is_ascii_alphanumeric() => (byte as char).to_string(),
-            byte => format!("%{byte:02X}"),
-        })
-        .collect()
 }
 
 async fn get_subnet(
@@ -148,22 +135,5 @@ async fn delete_subnet(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("找不到網段"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encode_filename_keeps_attr_chars_and_encodes_non_ascii() {
-        assert_eq!(
-            encode_filename("subnets_export_20261004.csv"),
-            "subnets_export_20261004.csv"
-        );
-        assert_eq!(
-            encode_filename("網段匯出_20261004.csv"),
-            "%E7%B6%B2%E6%AE%B5%E5%8C%AF%E5%87%BA_20261004.csv"
-        );
     }
 }

@@ -6,6 +6,14 @@
       <q-btn
         color="primary"
         outline
+        icon="download"
+        label="匯出"
+        :loading="exporting"
+        @click="exportCsv"
+      />
+      <q-btn
+        color="primary"
+        outline
         icon="upload_file"
         label="匯入"
         @click="importOpen = true"
@@ -173,6 +181,7 @@ import { onMounted, ref } from "vue";
 
 import {
   deleteAsset,
+  downloadAssetsCsv,
   fetchAsset,
   fetchBrands,
   fetchLocations,
@@ -182,6 +191,7 @@ import {
   type AssetDetail,
   type AssetListRow
 } from "@/api/assets";
+import { saveBlob } from "@/api/client";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssetImportDialog from "@/components/AssetImportDialog.vue";
@@ -284,6 +294,7 @@ const dialogOpen = ref(false);
 const editing = ref<Asset | null>(null);
 
 const importOpen = ref(false);
+const exporting = ref(false);
 
 const assignOpen = ref(false);
 const assignAsset = ref<Asset | null>(null);
@@ -321,6 +332,35 @@ async function fetchAssets() {
     $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
     loading.value = false;
+  }
+}
+
+/** 後端未帶檔名時的預設匯出檔名（本機日期，格式 `資產匯出_YYYYMMDD.csv`）。 */
+function exportFilename(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `資產匯出_${year}${month}${day}.csv`;
+}
+
+/** 匯出目前搜尋／篩選／排序的全部資產（忽略分頁；見 spec §4）。 */
+async function exportCsv() {
+  exporting.value = true;
+  try {
+    const { blob, filename } = await downloadAssetsCsv({
+      q: filters.value.q?.trim() || undefined,
+      location: filters.value.location ?? undefined,
+      brand: filters.value.brand ?? undefined,
+      tag: filters.value.tag ?? undefined,
+      sort: pagination.value.sortBy ?? undefined,
+      dir: pagination.value.descending ? "desc" : "asc"
+    });
+    saveBlob(blob, filename ?? exportFilename());
+    $q.notify({ type: "positive", message: "已下載資產匯出檔" });
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    exporting.value = false;
   }
 }
 

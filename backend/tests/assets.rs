@@ -1,9 +1,9 @@
 //! 資產管理整合測試：CRUD、必填驗證、搜尋與篩選、屆齡計算（見票 01）、
 //! 標籤、標籤篩選、伺服器端排序與 `GET /tags`（見票 11）、清單已指派 IP
-//! 欄與 MAC／IP 搜尋（見票 12）。
+//! 欄與 MAC／IP 搜尋（見票 12）、資產匯出（見票 04）。
 
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -69,6 +69,62 @@ async fn send(
     (status, json)
 }
 
+/// 以 `oneshot` 發送 GET；回傳狀態碼、標頭與原始內容（CSV 等非 JSON 回應用）。
+async fn send_bytes(pool: &SqlitePool, uri: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("建立請求");
+
+    let response = app(AppState::new(
+        pool.clone(),
+        std::env::temp_dir().join("asset-nest-test-no-dist"),
+    ))
+    .oneshot(request)
+    .await
+    .expect("執行請求");
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("讀取回應內容")
+        .to_bytes()
+        .to_vec();
+
+    (status, headers, bytes)
+}
+
+/// 發送資產匯出請求；`params` 為查詢字串（不含 `?`，可空）。
+async fn export_bytes(pool: &SqlitePool, params: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let uri = if params.is_empty() {
+        "/api/v1/assets/export".to_string()
+    } else {
+        format!("/api/v1/assets/export?{params}")
+    };
+    send_bytes(pool, &uri).await
+}
+
+/// 解析匯出 CSV（跳過 BOM）；回傳標題與資料列。
+fn parse_export(bytes: &[u8]) -> (Vec<String>, Vec<csv::StringRecord>) {
+    assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "回應須有 UTF-8 BOM");
+    let mut reader = csv::Reader::from_reader(&bytes[3..]);
+    let headers = reader
+        .headers()
+        .expect("標題列")
+        .iter()
+        .map(str::to_string)
+        .collect();
+    let rows = reader
+        .into_records()
+        .map(|record| record.expect("資料列"))
+        .collect();
+    (headers, rows)
+}
+
 /// 新增資產並斷言成功，回傳回應 JSON。
 async fn create_asset(pool: &SqlitePool, body: Value) -> Value {
     let (status, json) = send(pool, Method::POST, "/api/v1/assets", Some(body)).await;
@@ -96,16 +152,33 @@ async fn create_subnet(pool: &SqlitePool, body: Value) -> i64 {
     json["id"].as_i64().expect("回應含 id")
 }
 
-/// 將位址以手動設定（static）指派給介面並斷言成功。
-async fn assign_static(pool: &SqlitePool, subnet_id: i64, address: &str, interface_id: i64) {
+/// 指派位址（可指定用途與 hostname）並斷言成功。
+async fn assign(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+    interface_id: i64,
+    purpose: &str,
+    hostname: Option<&str>,
+) {
+    let mut body = json!({ "interface_id": interface_id, "purpose": purpose });
+    if let Some(hostname) = hostname {
+        body["hostname"] = json!(hostname);
+    }
+
     let (status, json) = send(
         pool,
         Method::PUT,
         &format!("/api/v1/subnets/{subnet_id}/ips/{address}/assignment"),
-        Some(json!({ "interface_id": interface_id, "purpose": "static" })),
+        Some(body),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "指派 {address} 應成功：{json}");
+}
+
+/// 將位址以手動設定（static）指派給介面並斷言成功。
+async fn assign_static(pool: &SqlitePool, subnet_id: i64, address: &str, interface_id: i64) {
+    assign(pool, subnet_id, address, interface_id, "static", None).await;
 }
 
 /// 以 `q` 搜尋並回傳命中的資產 id（依預設排序）。
@@ -1155,4 +1228,266 @@ async fn q_matches_mac_and_assigned_ips() {
     // 無結果
     assert!(search_ids(&pool, "no-such-value").await.is_empty());
     assert!(search_ids(&pool, "10.20.30.99").await.is_empty());
+}
+
+#[tokio::test]
+async fn export_assets_applies_filters_sort_and_ignores_pagination() {
+    let pool = test_pool().await;
+
+    // 空庫：僅標題列；標頭與檔名（含中文 filename* 編碼）
+    let (status, headers, bytes) = export_bytes(&pool, "").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "靜態 export 路由優先於 /assets/{{id}}"
+    );
+    assert_eq!(headers[header::CONTENT_TYPE], "text/csv; charset=utf-8");
+    let date = chrono::Local::now().format("%Y%m%d");
+    let disposition = headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .expect("Content-Disposition 為文字");
+    assert!(disposition.starts_with("attachment"), "{disposition}");
+    assert!(
+        disposition.contains(&format!(
+            "filename*=UTF-8''%E8%B3%87%E7%94%A2%E5%8C%AF%E5%87%BA_{date}.csv"
+        )),
+        "中文檔名以 filename* 編碼：{disposition}"
+    );
+    let (headers_row, rows) = parse_export(&bytes);
+    assert_eq!(
+        headers_row,
+        [
+            "財產編號",
+            "描述",
+            "位置",
+            "設備序號",
+            "廠牌",
+            "型號",
+            "購置日期",
+            "年限",
+            "備註",
+            "標籤",
+            "MAC",
+            "IPv4",
+            "IPv6",
+            "hostname"
+        ],
+        "14 欄與 ADR-0008 一致"
+    );
+    assert!(rows.is_empty(), "空庫僅有標題列");
+
+    // A 含全部欄位與逗號備註；B 同位置；C 另一位置不同標籤；D 無標籤
+    create_asset(
+        &pool,
+        json!({
+            "property_no": "PC-001",
+            "description": "Bravo 電腦",
+            "location": "機房 A",
+            "device_serial": "SN-A",
+            "brand": "ASUS",
+            "model": "BM6630",
+            "purchase_date": "2024-01-15",
+            "lifespan_years": 5,
+            "note": "含,逗號",
+            "tags": ["行政", "電腦"]
+        }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "alpha 電腦", "location": "機房 A", "tags": ["行政"] }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "Charlie 印表機", "location": "機房 B", "tags": ["周邊"] }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "Delta 電腦", "location": "機房 B" }),
+    )
+    .await;
+
+    // 無篩選：全部 4 筆；預設描述升冪（不分大小寫）
+    let (_, _, bytes) = export_bytes(&pool, "").await;
+    let (_, rows) = parse_export(&bytes);
+    let descriptions: Vec<&str> = rows.iter().map(|row| row.get(1).expect("描述欄")).collect();
+    assert_eq!(
+        descriptions,
+        ["alpha 電腦", "Bravo 電腦", "Charlie 印表機", "Delta 電腦"]
+    );
+
+    // 完整列：欄位、日期、標籤與引號往返
+    let row = &rows[1];
+    assert_eq!(row.get(0), Some("PC-001"));
+    assert_eq!(row.get(3), Some("SN-A"));
+    assert_eq!(row.get(4), Some("ASUS"));
+    assert_eq!(row.get(5), Some("BM6630"));
+    assert_eq!(row.get(6), Some("2024-01-15"), "日期為 YYYY-MM-DD");
+    assert_eq!(row.get(7), Some("5"));
+    assert_eq!(row.get(8), Some("含,逗號"), "含逗號欄位經引號往返");
+    assert_eq!(row.get(9), Some("行政|電腦"), "標籤以 | 串接");
+
+    // q 篩選
+    let (_, _, bytes) = export_bytes(&pool, &format!("q={}", encode("電腦"))).await;
+    let (_, rows) = parse_export(&bytes);
+    assert_eq!(rows.len(), 3, "q=電腦 命中 3 筆");
+
+    // location＋tag 組合篩選
+    let (_, _, bytes) = export_bytes(
+        &pool,
+        &format!("location={}&tag={}", encode("機房 B"), encode("周邊")),
+    )
+    .await;
+    let (_, rows) = parse_export(&bytes);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get(1), Some("Charlie 印表機"));
+
+    // 排序套用（描述降冪）
+    let (_, _, bytes) = export_bytes(&pool, "sort=description&dir=desc").await;
+    let (_, rows) = parse_export(&bytes);
+    let descriptions: Vec<&str> = rows.iter().map(|row| row.get(1).expect("描述欄")).collect();
+    assert_eq!(
+        descriptions,
+        ["Delta 電腦", "Charlie 印表機", "Bravo 電腦", "alpha 電腦"]
+    );
+
+    // 忽略分頁：per_page=1&page=2 仍匯出全部符合資產
+    let (_, _, bytes) = export_bytes(&pool, "per_page=1&page=2").await;
+    let (_, rows) = parse_export(&bytes);
+    assert_eq!(rows.len(), 4, "匯出忽略分頁");
+}
+
+#[tokio::test]
+async fn export_assets_rejects_invalid_sort_and_dir() {
+    let pool = test_pool().await;
+
+    let (status, _, bytes) = export_bytes(&pool, "sort=id").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&bytes).expect("錯誤回應為 JSON");
+    assert_eq!(body["details"]["field"], "sort");
+
+    let (status, _, bytes) = export_bytes(&pool, "sort=description&dir=sideways").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&bytes).expect("錯誤回應為 JSON");
+    assert_eq!(body["details"]["field"], "dir");
+}
+
+#[tokio::test]
+async fn export_assets_selects_interface_addresses_and_hostname() {
+    let pool = test_pool().await;
+
+    // 無介面：MAC／IPv4／IPv6／hostname 全空
+    create_asset(
+        &pool,
+        json!({ "description": "純周邊", "location": "機房" }),
+    )
+    .await;
+
+    // 多介面：第一介面無指派、第二介面有 → 取第二（含其 MAC）
+    let multi = create_asset(
+        &pool,
+        json!({ "description": "多功能主機", "location": "機房" }),
+    )
+    .await;
+    let multi_id = multi["id"].as_i64().expect("回應含 id");
+    create_interface(&pool, multi_id, json!({ "name": "eth0" })).await;
+    let second = create_interface(
+        &pool,
+        multi_id,
+        json!({ "name": "eth1", "mac": "AA:BB:CC:DD:EE:11" }),
+    )
+    .await;
+
+    let v4_low = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let v4_high = create_subnet(&pool, json!({ "cidr": "10.0.0.8/29" })).await;
+    let v6_low = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_high = create_subnet(&pool, json!({ "cidr": "fd00:1::/64" })).await;
+
+    // 刻意逆序指派；同介面同族取數值最小（v4 .2、v6 ::2）
+    assign(&pool, v4_high, "10.0.0.10", second, "static", None).await;
+    assign(&pool, v6_high, "fd00:1::a", second, "static", None).await;
+    assign(
+        &pool,
+        v4_low,
+        "10.0.0.2",
+        second,
+        "reservation",
+        Some("pc-multi"),
+    )
+    .await;
+    assign(&pool, v6_low, "fd00::2", second, "static", None).await;
+
+    // hostname 非保留：最小 v4 為 static（另一筆保留的 hostname 不帶出）
+    let static_asset = create_asset(
+        &pool,
+        json!({ "description": "非保留主機", "location": "機房" }),
+    )
+    .await;
+    let static_id = static_asset["id"].as_i64().expect("回應含 id");
+    let static_interface = create_interface(
+        &pool,
+        static_id,
+        json!({ "name": "eth0", "mac": "AA:BB:CC:DD:EE:22" }),
+    )
+    .await;
+    let other_low = create_subnet(&pool, json!({ "cidr": "10.9.0.0/29" })).await;
+    let other_high = create_subnet(&pool, json!({ "cidr": "10.10.0.0/29" })).await;
+    assign(
+        &pool,
+        other_low,
+        "10.9.0.1",
+        static_interface,
+        "static",
+        None,
+    )
+    .await;
+    assign(
+        &pool,
+        other_high,
+        "10.10.0.2",
+        static_interface,
+        "reservation",
+        Some("unused"),
+    )
+    .await;
+
+    let (status, _, bytes) = export_bytes(&pool, "").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, rows) = parse_export(&bytes);
+    assert_eq!(rows.len(), 3);
+
+    let by_description: std::collections::HashMap<&str, &csv::StringRecord> = rows
+        .iter()
+        .map(|row| (row.get(1).expect("描述欄"), row))
+        .collect();
+
+    let bare = by_description["純周邊"];
+    assert_eq!(bare.get(10), Some(""), "無介面 MAC 空");
+    assert_eq!(bare.get(11), Some(""), "無介面 IPv4 空");
+    assert_eq!(bare.get(12), Some(""), "無介面 IPv6 空");
+    assert_eq!(bare.get(13), Some(""), "無介面 hostname 空");
+
+    let multi_row = by_description["多功能主機"];
+    assert_eq!(
+        multi_row.get(10),
+        Some("aa:bb:cc:dd:ee:11"),
+        "第一介面無指派、第二介面有 → 取第二介面（MAC 小寫冒號）"
+    );
+    assert_eq!(multi_row.get(11), Some("10.0.0.2"), "v4 取數值最小");
+    assert_eq!(multi_row.get(12), Some("fd00::2"), "v6 取數值最小");
+    assert_eq!(
+        multi_row.get(13),
+        Some("pc-multi"),
+        "v4 為保留時帶 hostname"
+    );
+
+    let static_row = by_description["非保留主機"];
+    assert_eq!(static_row.get(11), Some("10.9.0.1"), "v4 取數值最小");
+    assert_eq!(
+        static_row.get(13),
+        Some(""),
+        "最小 v4 為 static → hostname 空"
+    );
 }
