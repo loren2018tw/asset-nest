@@ -1,4 +1,4 @@
-//! IP 位址（IpAddress）領域模組：v4 位址枚舉、v6 登錄制清單、pool/gateway
+//! IP 位址（IpAddress）領域模組：v4 位址枚舉、v6 登錄制清單、pool
 //! 標示、衝突標記與分頁瀏覽。
 //!
 //! 詞彙依 `CONTEXT.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§4.3、§7。
@@ -102,7 +102,6 @@ pub struct IpFilter {
 pub enum IpSortField {
     #[default]
     Address,
-    Gateway,
     Status,
     Location,
     Assignment,
@@ -113,7 +112,6 @@ impl IpSortField {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "address" => Some(Self::Address),
-            "gateway" => Some(Self::Gateway),
             "status" => Some(Self::Status),
             "location" => Some(Self::Location),
             "assignment" => Some(Self::Assignment),
@@ -179,8 +177,6 @@ pub struct IpEntry {
     pub address: IpAddr,
     /// 落在 DHCP 位址池內；池內位址不可指派（v6 恆為 `false`，見 CONTEXT.md）。
     pub in_pool: bool,
-    /// 是否為網段設定的 gateway（僅標記，仍可被指派）。
-    pub is_gateway: bool,
     /// 狀態：`available`（可用）、`in_pool`（池內）、
     /// `static`（手動設定）或 `reservation`（保留）。
     pub status: &'static str,
@@ -223,7 +219,6 @@ fn list_v4(
     assignments: &[ListedAssignment],
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
     let pools = parse_pools(subnet)?;
-    let gateway = parse_gateway_v4(subnet.gateway.as_deref())?;
     let range = HostRange::of(network);
     let conflicts = conflicts::by_address(subnet, assignments)?;
 
@@ -264,7 +259,7 @@ fn list_v4(
                     let total =
                         u64::from(range.contains(exact) || extras.binary_search(&exact).is_ok());
                     let items = if offset == 0 && total == 1 {
-                        vec![entry_v4(exact, &pools, gateway, &by_address, &conflicts)]
+                        vec![entry_v4(exact, &pools, &by_address, &conflicts)]
                     } else {
                         Vec::new()
                     };
@@ -279,7 +274,7 @@ fn list_v4(
             let end = offset.saturating_add(per_page).min(total);
             let items = (offset..end)
                 .filter_map(|index| range.nth(index))
-                .map(|address| entry_v4(address, &pools, gateway, &by_address, &conflicts))
+                .map(|address| entry_v4(address, &pools, &by_address, &conflicts))
                 .collect();
             return Ok((items, total));
         }
@@ -288,7 +283,6 @@ fn list_v4(
         // 極大前綴成本較高，實務網段規模（/16–/32）可忽略（見票 04 註記）。
         let mut scanner = V4Scanner {
             pools: &pools,
-            gateway,
             assignments: &by_address,
             conflicts: &conflicts,
             status: filter.status,
@@ -326,7 +320,6 @@ fn list_v4(
                     &mut keys,
                     *extra,
                     &pools,
-                    gateway,
                     &by_address,
                     filter.status,
                     query_lower.as_deref(),
@@ -337,7 +330,6 @@ fn list_v4(
             &mut keys,
             address,
             &pools,
-            gateway,
             &by_address,
             filter.status,
             query_lower.as_deref(),
@@ -348,7 +340,6 @@ fn list_v4(
             &mut keys,
             *extra,
             &pools,
-            gateway,
             &by_address,
             filter.status,
             query_lower.as_deref(),
@@ -365,7 +356,7 @@ fn list_v4(
         .map(|key| {
             // 鍵的位址由 v4 u32 值轉存 u128，還原必為合法 v4 位址。
             let address = Ipv4Addr::from(key.address as u32);
-            entry_v4(address, &pools, gateway, &by_address, &conflicts)
+            entry_v4(address, &pools, &by_address, &conflicts)
         })
         .collect();
 
@@ -377,7 +368,6 @@ fn push_sort_key_v4(
     keys: &mut Vec<SortKey>,
     address: Ipv4Addr,
     pools: &[PoolRange],
-    gateway: Option<Ipv4Addr>,
     assignments: &HashMap<&str, &ListedAssignment>,
     status: Option<IpStatusFilter>,
     query_lower: Option<&str>,
@@ -390,7 +380,6 @@ fn push_sort_key_v4(
 
     keys.push(SortKey::new(
         u128::from(address.to_bits()),
-        gateway == Some(address),
         status_of(pools, address, assignment),
         assignment,
     ));
@@ -421,7 +410,6 @@ fn matches_v4_filters(
 /// v4 清單掃描：合併 host 範圍與出界指派列，依序套用篩選與分頁。
 struct V4Scanner<'a> {
     pools: &'a [PoolRange],
-    gateway: Option<Ipv4Addr>,
     assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
     conflicts: &'a HashMap<String, Vec<&'static str>>,
     status: Option<IpStatusFilter>,
@@ -453,7 +441,6 @@ impl V4Scanner<'_> {
             self.items.push(entry_v4(
                 address,
                 self.pools,
-                self.gateway,
                 self.assignments,
                 self.conflicts,
             ));
@@ -466,7 +453,6 @@ impl V4Scanner<'_> {
 fn entry_v4(
     address: Ipv4Addr,
     pools: &[PoolRange],
-    gateway: Option<Ipv4Addr>,
     assignments: &HashMap<&str, &ListedAssignment>,
     conflicts: &HashMap<String, Vec<&'static str>>,
 ) -> IpEntry {
@@ -476,7 +462,6 @@ fn entry_v4(
     IpEntry {
         address: IpAddr::V4(address),
         in_pool,
-        is_gateway: gateway == Some(address),
         status: status_of(pools, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
@@ -499,7 +484,6 @@ fn list_v6(
     filter: &IpFilter,
     assignments: &[ListedAssignment],
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
-    let gateway = parse_gateway_v6(subnet.gateway.as_deref())?;
     let conflicts = conflicts::by_address(subnet, assignments)?;
 
     // 指派資料即登錄清單；用途經資料庫 CHECK 驗證，v6 恆為 static，
@@ -549,12 +533,7 @@ fn list_v6(
             }
         }
         matched.push((
-            SortKey::new(
-                u128::from(address),
-                gateway == Some(address),
-                "static",
-                Some(assignment),
-            ),
+            SortKey::new(u128::from(address), "static", Some(assignment)),
             assignment,
             address,
         ));
@@ -567,7 +546,7 @@ fn list_v6(
     let end = offset.saturating_add(per_page).min(total);
     let items = matched[start as usize..end as usize]
         .iter()
-        .map(|(_, assignment, address)| entry_v6(*address, gateway, assignment, &conflicts))
+        .map(|(_, assignment, address)| entry_v6(*address, assignment, &conflicts))
         .collect();
 
     Ok((items, total))
@@ -576,14 +555,12 @@ fn list_v6(
 /// 建立一列 v6 登錄位址；狀態恆為「手動設定」。
 fn entry_v6(
     address: Ipv6Addr,
-    gateway: Option<Ipv6Addr>,
     assignment: &ListedAssignment,
     conflicts: &HashMap<String, Vec<&'static str>>,
 ) -> IpEntry {
     IpEntry {
         address: IpAddr::V6(address),
         in_pool: false,
-        is_gateway: gateway == Some(address),
         status: "static",
         purpose: Some("static"),
         assignment: Some(assignment.target()),
@@ -634,7 +611,6 @@ fn status_rank(status: &str) -> u8 {
 /// 文字欄先轉小寫，供不分大小寫比較且不於比較器內重複配置。
 struct SortKey {
     address: u128,
-    is_gateway: bool,
     status_rank: u8,
     /// 指派資產位置（小寫）；未指派為 `None`（固定排最後）。
     location_lower: Option<String>,
@@ -644,15 +620,9 @@ struct SortKey {
 
 impl SortKey {
     /// 建立列鍵；`assignment` 為 `None` 代表未指派。
-    fn new(
-        address: u128,
-        is_gateway: bool,
-        status: &str,
-        assignment: Option<&ListedAssignment>,
-    ) -> Self {
+    fn new(address: u128, status: &str, assignment: Option<&ListedAssignment>) -> Self {
         Self {
             address,
-            is_gateway,
             status_rank: status_rank(status),
             location_lower: assignment.map(|item| item.asset_location.to_lowercase()),
             assignment_lower: assignment.map(|item| item.asset_description.to_lowercase()),
@@ -667,7 +637,6 @@ impl SortKey {
 fn compare_sort_keys(a: &SortKey, b: &SortKey, sort: IpSortField, dir: IpSortDir) -> Ordering {
     let primary = match sort {
         IpSortField::Address => a.address.cmp(&b.address),
-        IpSortField::Gateway => a.is_gateway.cmp(&b.is_gateway),
         IpSortField::Status => a.status_rank.cmp(&b.status_rank),
         IpSortField::Location => compare_optional_text(
             a.location_lower.as_deref(),
@@ -756,21 +725,6 @@ fn parse_pools(subnet: &Subnet) -> Result<Vec<PoolRange>, ApiError> {
             })
         })
         .collect()
-}
-
-/// 解析 v4 gateway；未設定為 `None`。
-fn parse_gateway_v4(value: Option<&str>) -> Result<Option<Ipv4Addr>, ApiError> {
-    value.map(parse_stored_address).transpose()
-}
-
-/// 解析 v6 gateway；未設定為 `None`。
-fn parse_gateway_v6(value: Option<&str>) -> Result<Option<Ipv6Addr>, ApiError> {
-    value
-        .map(|text| {
-            text.parse()
-                .map_err(|error| ApiError::internal("gateway 格式錯誤", error))
-        })
-        .transpose()
 }
 
 /// 解析資料庫中已驗證過的 v4 位址文字。
@@ -947,8 +901,8 @@ mod tests {
     }
 
     #[test]
-    fn pool_and_gateway_are_marked() {
-        let subnet = subnet("10.0.0.0/29", Some("10.0.0.1"), &[("10.0.0.2", "10.0.0.3")]);
+    fn pool_is_marked() {
+        let subnet = subnet("10.0.0.0/29", None, &[("10.0.0.2", "10.0.0.3")]);
         let (items, total) = list_entries(&subnet, &filter(None, 1, 50)).expect("推導成功");
         assert_eq!(total, 6);
 
@@ -959,12 +913,10 @@ mod tests {
                 .expect("位址存在")
         };
 
-        assert!(entry("10.0.0.1").is_gateway, "gateway 標記");
         assert!(!entry("10.0.0.1").in_pool);
         assert_eq!(entry("10.0.0.1").status, "available");
 
         assert!(entry("10.0.0.2").in_pool, "pool 內標記");
-        assert!(!entry("10.0.0.2").is_gateway);
         assert_eq!(entry("10.0.0.2").status, "in_pool");
         assert_eq!(entry("10.0.0.2").purpose, None, "票 05 前無指派用途");
         assert!(entry("10.0.0.2").conflicts.is_empty(), "無指派不標記衝突");
@@ -1257,7 +1209,6 @@ mod tests {
         assert_eq!(first.status, "static");
         assert_eq!(first.purpose, Some("static"));
         assert!(!first.in_pool, "v6 無 pool 概念");
-        assert!(first.is_gateway, "gateway 位址仍標記");
         assert_eq!(
             first
                 .assignment
@@ -1472,13 +1423,17 @@ mod tests {
     fn sort_parse_accepts_whitelisted_values_only() {
         for (value, expected) in [
             ("address", IpSortField::Address),
-            ("gateway", IpSortField::Gateway),
             ("status", IpSortField::Status),
             ("location", IpSortField::Location),
             ("assignment", IpSortField::Assignment),
         ] {
             assert_eq!(IpSortField::parse(value), Some(expected), "{value}");
         }
+        assert_eq!(
+            IpSortField::parse("gateway"),
+            None,
+            "gateway 已移除（見票 17）"
+        );
         assert_eq!(IpSortField::parse("conflicts"), None, "衝突不可排序");
         assert_eq!(IpSortField::parse("actions"), None, "操作不可排序");
 
@@ -1509,31 +1464,6 @@ mod tests {
         let (items, total) = list_entries(&subnet, &paged).expect("推導成功");
         assert_eq!(total, 6);
         assert_eq!(addresses(&items), ["10.0.0.4", "10.0.0.3"]);
-    }
-
-    #[test]
-    fn sort_by_gateway_groups_flagged_last_asc_first_desc() {
-        let subnet = subnet("10.0.0.0/29", Some("10.0.0.3"), &[]);
-
-        let (items, _) = list_entries(&subnet, &sort_filter(IpSortField::Gateway, IpSortDir::Asc))
-            .expect("推導成功");
-        assert_eq!(
-            addresses(&items),
-            [
-                "10.0.0.1", "10.0.0.2", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.3"
-            ],
-            "升冪：非 gateway 先、gateway 最後"
-        );
-
-        let (items, _) = list_entries(&subnet, &sort_filter(IpSortField::Gateway, IpSortDir::Desc))
-            .expect("推導成功");
-        assert_eq!(
-            addresses(&items),
-            [
-                "10.0.0.3", "10.0.0.1", "10.0.0.2", "10.0.0.4", "10.0.0.5", "10.0.0.6"
-            ],
-            "降冪：gateway 最前"
-        );
     }
 
     #[test]

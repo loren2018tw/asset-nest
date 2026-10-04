@@ -1,4 +1,4 @@
-//! v4 IP 清單整合測試：枚舉邊界、pool/gateway 標示、搜尋與分頁（見票 04）。
+//! v4 IP 清單整合測試：枚舉邊界、pool 標示、搜尋、排序與分頁（見票 04、14）。
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -220,7 +220,6 @@ async fn v4_subnet_lists_all_hosts_in_numeric_order() {
     // 本票尚無指派：列含預留欄位（status/purpose/conflicts）
     let first = &page["items"][0];
     assert_eq!(first["in_pool"], false);
-    assert_eq!(first["is_gateway"], false);
     assert_eq!(first["status"], "available");
     assert!(first["purpose"].is_null());
     assert_eq!(first["conflicts"], json!([]));
@@ -268,10 +267,10 @@ async fn slash31_and_slash32_list_every_address() {
 }
 
 #[tokio::test]
-async fn pool_and_gateway_flags_are_reported() {
+async fn pool_flags_are_reported() {
     let pool = test_pool().await;
 
-    // gateway 不在 pool 內；pool 有兩段（含單一位址段）
+    // pool 有兩段（含單一位址段）；gateway 設定不影響清單列（見票 17）
     let subnet = create_subnet(
         &pool,
         json!({
@@ -296,8 +295,7 @@ async fn pool_and_gateway_flags_are_reported() {
             .unwrap_or_else(|| panic!("列含 {address}"))
     };
 
-    // gateway：標記但非池內、仍為可用（見 spec §7）
-    assert_eq!(item("10.0.0.1")["is_gateway"], true);
+    // gateway 位址非池內、仍為可用（列不再標記，見 spec §7、票 17）
     assert_eq!(item("10.0.0.1")["in_pool"], false);
     assert_eq!(item("10.0.0.1")["status"], "available");
 
@@ -305,7 +303,6 @@ async fn pool_and_gateway_flags_are_reported() {
     for address in ["10.0.0.2", "10.0.0.3", "10.0.0.6"] {
         assert_eq!(item(address)["in_pool"], true, "{address} 在 pool 內");
         assert_eq!(item(address)["status"], "in_pool", "{address} 狀態為池內");
-        assert_eq!(item(address)["is_gateway"], false);
         assert!(item(address)["purpose"].is_null());
     }
 
@@ -313,7 +310,7 @@ async fn pool_and_gateway_flags_are_reported() {
     assert_eq!(item("10.0.0.4")["in_pool"], false);
     assert_eq!(item("10.0.0.4")["status"], "available");
 
-    // gateway 落在 pool 內時兩個標記並存（pool 涵蓋 gateway 提示不擋，見 spec §6）
+    // gateway 落在 pool 內：pool 標記不受影響（pool 涵蓋 gateway 提示不擋，見 spec §6）
     let subnet = create_subnet(
         &pool,
         json!({
@@ -327,7 +324,6 @@ async fn pool_and_gateway_flags_are_reported() {
     let page = list_ips(&pool, id, "").await;
     let gateway = &page["items"][0];
     assert_eq!(gateway["address"], "10.0.3.1");
-    assert_eq!(gateway["is_gateway"], true);
     assert_eq!(gateway["in_pool"], true);
     assert_eq!(gateway["status"], "in_pool");
 }
@@ -663,13 +659,12 @@ async fn unknown_subnet_returns_404() {
 async fn list_sorts_by_whitelisted_columns_with_direction() {
     let pool = test_pool().await;
 
-    // /29、gateway .1、pool .5–.6；.2 static（alpha／server room）、
+    // /29、pool .5–.6；.2 static（alpha／server room）、
     // .3 保留（Zeta／Server Room，與 .2 位置同鍵）、.4 可用
     let subnet = create_subnet(
         &pool,
         json!({
             "cidr": "10.0.0.0/29",
-            "gateway": "10.0.0.1",
             "pools": [{ "start_ip": "10.0.0.5", "end_ip": "10.0.0.6" }]
         }),
     )
@@ -719,19 +714,6 @@ async fn list_sorts_by_whitelisted_columns_with_direction() {
             "sort=address&dir=desc",
             vec![
                 "10.0.0.6", "10.0.0.5", "10.0.0.4", "10.0.0.3", "10.0.0.2", "10.0.0.1",
-            ],
-        ),
-        // Gateway asc：非 gateway 先、gateway 最後；desc 反之
-        (
-            "sort=gateway&dir=asc",
-            vec![
-                "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.1",
-            ],
-        ),
-        (
-            "sort=gateway&dir=desc",
-            vec![
-                "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6",
             ],
         ),
         // 狀態 asc：可用→池內→手動設定→保留；desc 反轉（同鍵位址升冪）
@@ -1058,6 +1040,25 @@ async fn invalid_sort_and_dir_return_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["details"]["field"], "sort");
 
+    // gateway 已移除排序白名單（見票 17）
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?sort=gateway"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "sort");
+    assert!(
+        body["message"]
+            .as_str()
+            .expect("訊息為字串")
+            .contains("gateway"),
+        "錯誤訊息應指出無效值"
+    );
+
     let (status, body) = send(
         &pool,
         Method::GET,
@@ -1073,7 +1074,7 @@ async fn invalid_sort_and_dir_return_400() {
     let (status, _) = send(
         &pool,
         Method::GET,
-        &format!("/api/v1/subnets/{id}/ips?sort=gateway&dir=desc"),
+        &format!("/api/v1/subnets/{id}/ips?sort=location&dir=desc"),
         None,
     )
     .await;
@@ -1116,7 +1117,7 @@ async fn default_sort_stays_numeric_ascending_and_other_sorts_paginate() {
     );
 
     // 超出範圍的頁：空列但總數不變
-    let page = list_ips(&pool, id, "?sort=gateway&dir=asc&page=9&per_page=10").await;
+    let page = list_ips(&pool, id, "?sort=status&dir=asc&page=9&per_page=10").await;
     assert_eq!(page["total"], 30);
     assert!(addresses(&page).is_empty());
 }

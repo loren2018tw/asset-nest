@@ -28,8 +28,6 @@ export interface IpEntry {
   address: string;
   /** 落在 DHCP 位址池內；池內位址不可指派（v6 恆為 false）。 */
   in_pool: boolean;
-  /** 是否為網段 gateway（僅標記，仍可被指派）。 */
-  is_gateway: boolean;
   status: IpStatus;
   /** 指派用途；未指派為 null（v6 登錄列恆為 static）。 */
   purpose: IpPurpose | null;
@@ -72,12 +70,7 @@ export interface RegistryInput {
 }
 
 /** IP 清單可排序欄位（後端白名單；見 spec §5、票 14）。 */
-export type IpSortField =
-  | "address"
-  | "gateway"
-  | "status"
-  | "location"
-  | "assignment";
+export type IpSortField = "address" | "status" | "location" | "assignment";
 
 /** IP 清單搜尋、排序與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {

@@ -69,13 +69,6 @@
       <template #body-cell-address="props">
         <q-td :props="props" class="ip-address">{{ props.value }}</q-td>
       </template>
-      <template #body-cell-gateway="props">
-        <q-td :props="props" class="text-center">
-          <q-badge v-if="props.row.is_gateway" color="primary">
-            Gateway
-          </q-badge>
-        </q-td>
-      </template>
       <template #body-cell-status="props">
         <q-td :props="props">
           <q-badge :color="statusColor(props.row.status)">
@@ -258,14 +251,6 @@ const columns: QTableProps["columns"] = [
     sortable: true
   },
   {
-    // 欄位名對應後端排序白名單的 `gateway`（列資料仍為 is_gateway，見票 14）
-    name: "gateway",
-    label: "Gateway",
-    field: "is_gateway",
-    align: "center",
-    sortable: true
-  },
-  {
     name: "status",
     label: "狀態／用途",
     field: "status",
@@ -400,7 +385,6 @@ interface TableRequest {
 function toSortField(value: string | null): IpSortField {
   switch (value) {
     case "address":
-    case "gateway":
     case "status":
     case "location":
     case "assignment":

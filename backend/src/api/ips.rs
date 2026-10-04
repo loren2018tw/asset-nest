@@ -41,7 +41,7 @@ pub fn router() -> Router<AppState> {
 struct ListQuery {
     q: Option<String>,
     status: Option<String>,
-    /// 排序欄位白名單（`address`／`gateway`／`status`／`location`／`assignment`）；
+    /// 排序欄位白名單（`address`／`status`／`location`／`assignment`）；
     /// 無效值回 400（見票 14）。
     sort: Option<String>,
     /// 排序方向 `asc`／`desc`；無效值回 400。

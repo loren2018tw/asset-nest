@@ -223,7 +223,6 @@ async fn register_creates_static_assignment_and_lists_only_registered() {
     assert_eq!(registered["status"], "static");
     assert_eq!(registered["purpose"], "static");
     assert_eq!(registered["in_pool"], false, "v6 無 pool 概念");
-    assert_eq!(registered["is_gateway"], false);
     assert_eq!(registered["conflicts"], json!([]), "衝突欄位預留票 07");
     assert_eq!(registered["assignment"]["asset_id"], asset_id);
     assert_eq!(registered["assignment"]["asset_description"], "資料庫主機");
@@ -231,7 +230,7 @@ async fn register_creates_static_assignment_and_lists_only_registered() {
     assert_eq!(registered["assignment"]["interface_id"], first_interface);
     assert_eq!(registered["assignment"]["interface_name"], "eth0");
 
-    // gateway 位址可登錄（僅標記，見 spec §7）
+    // gateway 位址仍可登錄（僅不再標記於清單列，見 spec §7、票 17）
     let (status, _) = register_ip(
         &pool,
         subnet_id,
@@ -241,7 +240,7 @@ async fn register_creates_static_assignment_and_lists_only_registered() {
     assert_eq!(status, StatusCode::CREATED);
     let page = list_ips(&pool, subnet_id, "").await;
     assert_eq!(page["total"], 2);
-    assert_eq!(row(&page, "fd00::1")["is_gateway"], true);
+    assert_eq!(row(&page, "fd00::1")["status"], "static");
 
     // 資產詳情含 v6 指派（含網段資訊）
     let detail = get_asset(&pool, asset_id).await;
