@@ -62,6 +62,7 @@
             <q-select
               v-model="selectedAsset"
               :options="assetOptions"
+              option-label="description"
               :loading="searchingAssets"
               use-input
               input-debounce="300"
