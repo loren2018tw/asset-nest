@@ -426,18 +426,23 @@ pub async fn brands(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
 }
 
 /// 標籤建議值：所有已使用標籤去重（不分大小寫），同值不同大小寫保留最早寫入的原文（見票 11）。
+///
+/// 以視窗函式單次展開所有標籤後，取每個標籤（NOCASE）中 id 最小的資產原文；原本的相關子查詢
+/// 會對每個標籤列重掃全表展開標籤，成本隨 `資產數 × 標籤數` 的平方成長。
 pub async fn tags(pool: &SqlitePool) -> sqlx::Result<Vec<String>> {
     sqlx::query_scalar(
-        "SELECT je.value
-         FROM assets a, json_each(a.tags) AS je
-         WHERE trim(je.value) <> ''
-           AND a.id = (
-               SELECT MIN(a2.id)
-               FROM assets a2, json_each(a2.tags) AS je2
-               WHERE je2.value = je.value COLLATE NOCASE
-           )
-         GROUP BY je.value COLLATE NOCASE
-         ORDER BY je.value COLLATE NOCASE ASC",
+        "SELECT value
+         FROM (
+             SELECT je.value AS value,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY je.value COLLATE NOCASE
+                        ORDER BY a.id, je.value COLLATE NOCASE, je.value
+                    ) AS rn
+             FROM assets a, json_each(a.tags) AS je
+             WHERE trim(je.value) <> ''
+         )
+         WHERE rn = 1
+         ORDER BY value COLLATE NOCASE ASC",
     )
     .fetch_all(pool)
     .await
