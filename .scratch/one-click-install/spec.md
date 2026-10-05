@@ -29,4 +29,4 @@
 
 ## 實作記錄
 
-- 主實作 commit：（待補）
+- 主實作 commit：`b3c5a4e`（`deploy/install.sh`、`deploy/uninstall.sh`、CI workflow、README 一鍵安裝章節、ADR-0012；決策見 ADR-0012）。
