@@ -49,12 +49,19 @@ _Avoid_: 序號
 
 衝突是標記，不是狀態；以標記呈現，不阻擋儲存與編輯。結構性規則（如網段重疊、同網段重複指派）則直接阻擋，兩層分界見 ADR-0006。
 
-## 衝突詞彙（沿用 Kealight 已定案者）
+## 衝突詞彙
+
+沿用 Kealight 已定案者：
 
 - **DuplicateHwAddress**：同一 MAC 在同一 Subnet 出現多筆保留。
 - **IpInUse**：指派的 IP 已被其他保留佔用。
 - **IpInPool**：指派的 IP 落在動態配發池內（Kea 允許此用法，本系統仍沿用 Kealight 的檢出定義）。
 - **IpOutOfSubnet**：指派的 IP 不在該 Subnet 範圍內。
+
+觀測衍生（新增，見 ADR-0014）：
+
+- **ObservedMacMismatch**：已指派的位址被觀測到由非宣告 MAC 使用。
+- **ObservedOnUnassigned**：未指派且非池內的位址被觀測到有主。
 
 ## 同步詞彙
 
@@ -66,6 +73,30 @@ _Avoid_: 序號
 **對帳（reconcile）**：由 Kea 讀回保留與租約、比對差異的唯讀動作；完整同步的計畫階段即為保留對帳（租約對帳後續階段）。
 
 明確非目標：**雙向同步**。
+
+## 觀測詞彙
+
+**觀測（observation）**
+對某個位址在某一時刻所見狀態的記錄；由觀測來源產生、唯讀保存，與宣告（Assignment、Reservation）分離，不修改宣告。
+
+**觀測來源（observation source）**
+產生觀測的手段：本地 ARP 探測、Kea 租約；未來含遠端 agent。
+
+**最後可見（last seen）**
+某位址最後一次被任一觀測來源實際看到的時間；已指派但從未看到顯示「從未上線」。
+_Avoid_: 上線、在線
+
+**未觀測（not observed）**
+位址未被任何已啟用的觀測涵蓋；顯示為「未觀測」，與「從未上線」不同。
+
+**快速掃描（quick sweep）**
+對已指派與有租約位址的週期探測。
+
+**探索掃描（discovery sweep）**
+對網段內全部位址的整段探測；用於發現未指派卻有主、未登錄 MAC。
+
+**未知裝置（unknown device）**
+被觀測到、但不對應任何 Interface 的 MAC；為觀測值，不是實體。
 
 ## 匯入與匯出詞彙
 
