@@ -148,6 +148,44 @@
           </template>
         </q-card-section>
 
+        <!-- 已有指派：列於表單下方，可逐筆取消（見票 20） -->
+        <q-card-section v-if="assignments.length > 0" class="q-pt-none">
+          <q-separator class="q-mb-md" />
+
+          <div class="text-subtitle2 q-mb-sm">已指派 IP</div>
+
+          <q-list dense separator>
+            <q-item v-for="item in assignments" :key="item.id">
+              <q-item-section>
+                <q-item-label class="text-mono">{{
+                  item.address
+                }}</q-item-label>
+                <q-item-label caption>
+                  {{ item.subnet_name ? `${item.subnet_name}｜` : ""
+                  }}{{ item.subnet_cidr }} ｜
+                  {{ assignmentPurposeLabel(item.purpose) }} ｜
+                  {{ interfaceLabel(item.interface_name, item.mac) }}
+                  <template v-if="item.hostname">
+                    ｜ {{ item.hostname }}
+                  </template>
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-btn
+                  flat
+                  dense
+                  size="sm"
+                  color="negative"
+                  label="取消指派"
+                  :loading="cancellingId === item.id"
+                  :disable="cancellingId !== null && cancellingId !== item.id"
+                  @click="confirmCancelAssignment(item)"
+                />
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-card-section>
+
         <q-card-actions align="right">
           <q-btn v-close-popup flat label="取消" />
           <q-btn color="primary" type="submit" label="指派" :loading="saving" />
@@ -161,11 +199,11 @@
 import { useQuasar } from "quasar";
 import { computed, ref, watch } from "vue";
 
-import { fetchAsset, type Asset } from "@/api/assets";
+import { fetchAsset, type Asset, type AssetAssignment } from "@/api/assets";
 import { assignFromAsset, type AssetAssignmentSaved } from "@/api/assignments";
 import { ApiError } from "@/api/client";
 import { createInterface, type Interface } from "@/api/interfaces";
-import type { IpPurpose } from "@/api/ips";
+import { cancelAssignment, type IpPurpose } from "@/api/ips";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { parseAddress } from "@/utils/cidr";
 import { assetLabel } from "@/utils/assetLabel";
@@ -193,6 +231,10 @@ const address = ref("");
 const interfaces = ref<Interface[]>([]);
 const loadingInterfaces = ref(false);
 const selectedInterfaceId = ref<number | null>(null);
+/** 該資產目前已指派 IP（表單下方清單；可逐筆取消，見票 20）。 */
+const assignments = ref<AssetAssignment[]>([]);
+/** 取消中的指派 id；供逐列 loading 與避免重複點擊。 */
+const cancellingId = ref<number | null>(null);
 
 const showNewInterface = ref(false);
 const newInterface = ref({ name: "", mac: "" });
@@ -300,6 +342,8 @@ async function prepare() {
   newInterface.value = { name: "", mac: "" };
   interfaces.value = [];
   selectedInterfaceId.value = null;
+  assignments.value = [];
+  cancellingId.value = null;
 
   loadingInterfaces.value = true;
   try {
@@ -308,6 +352,7 @@ async function prepare() {
       return;
     }
     interfaces.value = detail.interfaces;
+    assignments.value = detail.assignments;
     if (!isFixed.value && detail.interfaces.length === 1) {
       selectedInterfaceId.value = detail.interfaces[0]?.id ?? null;
     }
@@ -443,6 +488,47 @@ function onSaved(saved: AssetAssignmentSaved) {
   });
   emit("saved");
   open.value = false;
+}
+
+/** 指派用途標籤（清單顯示）。 */
+function assignmentPurposeLabel(purpose: IpPurpose): string {
+  return purpose === "reservation" ? "保留" : "手動設定";
+}
+
+/** 重載該資產的已指派 IP，供取消後即時更新清單。 */
+async function refreshAssignments() {
+  const detail = await fetchAsset(props.asset.id);
+  assignments.value = detail.assignments;
+}
+
+/** 取消指派前確認；v6 取消後自登錄清單移除（見票 06）。 */
+function confirmCancelAssignment(item: AssetAssignment) {
+  const message =
+    parseAddress(item.address)?.family === "ipv6"
+      ? `確定要取消 ${item.address} 的指派？取消後該位址將自登錄清單移除。`
+      : `確定要取消 ${item.address} 的指派？取消後該位址回到「可用」。`;
+  $q.dialog({
+    title: "取消指派",
+    message,
+    cancel: true,
+    persistent: true
+  }).onOk(() => {
+    void cancelAssignmentItem(item);
+  });
+}
+
+async function cancelAssignmentItem(item: AssetAssignment) {
+  cancellingId.value = item.id;
+  try {
+    await cancelAssignment(item.subnet_id, item.address);
+    $q.notify({ type: "positive", message: "已取消指派" });
+    emit("saved");
+    await refreshAssignments();
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    cancellingId.value = null;
+  }
 }
 
 /** 後端「位址已指派給其他介面」提示所需欄位（見票 10、票 15）。 */

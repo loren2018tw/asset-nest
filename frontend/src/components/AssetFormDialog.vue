@@ -249,7 +249,7 @@
         <q-card-section v-if="asset !== null" class="q-pt-none">
           <q-separator class="q-mb-md" />
 
-          <div class="text-subtitle2 q-mb-sm">已指派 IP（唯讀）</div>
+          <div class="text-subtitle2 q-mb-sm">已指派 IP</div>
 
           <div v-if="loadingInterfaces" class="row justify-center q-pa-md">
             <q-spinner color="primary" />
@@ -275,21 +275,36 @@
                 </q-item-label>
               </q-item-section>
               <q-item-section side>
-                <q-btn
-                  flat
-                  dense
-                  size="sm"
-                  color="primary"
-                  :to="`/subnets/${item.subnet_id}/ips`"
-                  label="IP 管理"
-                  @click="open = false"
-                />
+                <div class="row q-gutter-xs">
+                  <q-btn
+                    flat
+                    dense
+                    size="sm"
+                    color="primary"
+                    :to="`/subnets/${item.subnet_id}/ips`"
+                    label="IP 管理"
+                    @click="open = false"
+                  />
+                  <q-btn
+                    flat
+                    dense
+                    size="sm"
+                    color="negative"
+                    label="取消指派"
+                    :loading="cancellingAssignmentId === item.id"
+                    :disable="
+                      cancellingAssignmentId !== null &&
+                      cancellingAssignmentId !== item.id
+                    "
+                    @click="confirmCancelAssignment(item)"
+                  />
+                </div>
               </q-item-section>
             </q-item>
           </q-list>
 
           <div class="text-caption text-grey-7 q-mt-sm">
-            指派操作一律在 IP 管理頁進行；IP 值不可修改。
+            指派由「指派 IP」入口進行；IP 值不可修改。
           </div>
         </q-card-section>
 
@@ -333,9 +348,10 @@ import {
   type Interface,
   type InterfaceInput
 } from "@/api/interfaces";
-import type { IpPurpose } from "@/api/ips";
+import { cancelAssignment, type IpPurpose } from "@/api/ips";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import PeerMacHint from "@/components/PeerMacHint.vue";
+import { parseAddress } from "@/utils/cidr";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -407,8 +423,10 @@ const locationField = ref<HTMLElement | null>(null);
 const interfaceDrafts = ref<InterfaceDraft[]>([]);
 /** 對話框開啟時載入的既有介面，供儲存時找出已刪除者。 */
 const originalInterfaces = ref<Interface[]>([]);
-/** 該資產已指派的 IP（唯讀顯示；指派一律在 IP 管理頁操作）。 */
+/** 該資產已指派的 IP（清單顯示；可逐筆取消，見票 20）。 */
 const assignments = ref<AssetAssignment[]>([]);
+/** 取消中的指派 id；供逐列 loading 與避免重複點擊。 */
+const cancellingAssignmentId = ref<number | null>(null);
 const loadingInterfaces = ref(false);
 const interfaceError = ref("");
 /** 新增模式已建立、但介面尚未同步完成時記下的資產 id。 */
@@ -532,6 +550,7 @@ async function loadInterfaces() {
   originalInterfaces.value = [];
   interfaceDrafts.value = [];
   assignments.value = [];
+  cancellingAssignmentId.value = null;
   interfaceError.value = "";
   loadingInterfaces.value = false;
 
@@ -635,8 +654,15 @@ function openAssign(row: InterfaceDraft) {
   assignOpen.value = true;
 }
 
-/** 指派對話框儲存後：更新唯讀的「已指派 IP」；不重載介面草稿，保留未儲存編輯。 */
+/** 指派對話框儲存後：更新「已指派 IP」並通知外層刷新清單；
+ *  不重載介面草稿，保留未儲存編輯。 */
 async function onAssignSaved() {
+  emit("saved");
+  await refreshAssignments();
+}
+
+/** 重載該資產的已指派 IP（取消後即時反映）。 */
+async function refreshAssignments() {
   const asset = props.asset;
   if (asset === null) {
     return;
@@ -649,6 +675,36 @@ async function onAssignSaved() {
       type: "negative",
       message: `讀取指派失敗：${messageOf(cause)}`
     });
+  }
+}
+
+/** 取消指派前確認；v6 取消後自登錄清單移除（見票 06）。 */
+function confirmCancelAssignment(item: AssetAssignment) {
+  const message =
+    parseAddress(item.address)?.family === "ipv6"
+      ? `確定要取消 ${item.address} 的指派？取消後該位址將自登錄清單移除。`
+      : `確定要取消 ${item.address} 的指派？取消後該位址回到「可用」。`;
+  $q.dialog({
+    title: "取消指派",
+    message,
+    cancel: true,
+    persistent: true
+  }).onOk(() => {
+    void cancelAssignmentItem(item);
+  });
+}
+
+async function cancelAssignmentItem(item: AssetAssignment) {
+  cancellingAssignmentId.value = item.id;
+  try {
+    await cancelAssignment(item.subnet_id, item.address);
+    $q.notify({ type: "positive", message: "已取消指派" });
+    emit("saved");
+    await refreshAssignments();
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    cancellingAssignmentId.value = null;
   }
 }
 
