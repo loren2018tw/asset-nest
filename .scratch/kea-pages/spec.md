@@ -87,12 +87,12 @@
 - `api/kea.ts` 新增 `getKeaStatus()`、`listKeaLeases()` 與型別。
 - **租約清單頁**：
   - `q-table`（client-side）欄位：IP、MAC、Hostname、網段（CIDR（名稱）；無對應顯示 `Kea #id`）、到期時間（本地時區；已到期淡化）、狀態 chip。
-  - 狀態標籤：`default`→使用中、`declined`→已拒絕、`expired`→已過期、`released`→已釋放；未知顯示原值；tooltip 顯示正規化後的原始字串。
+  - 狀態標籤：`default`→使用中、`declined`→已拒絕、`expired`→已過期、`released`→已釋放；未知顯示原值；tooltip 顯示原始字串。
   - 預設排序 IP 升冪（八位元組數值比較）；每頁 50；搜尋 IP／MAC／hostname（不分大小寫）＋狀態篩選。
   - 進頁自動載入；「重新整理」＋上次更新時間。
   - 錯誤（400／502）：頂部 `q-banner` 顯示訊息＋「前往系統狀態」連結；空表。
 - **系統狀態頁**：
-  - 區塊：連線（可達／未設定／失敗；顯示 `url`；未設定文案「未設定 Kea 連線（KEA_API_URL）」）、版本、監聽介面（設定值；空＝「未監聽任何介面（不主動服務 DHCP；安裝預設）」；有 runtime sockets 時並列「實際綁定」）、運行資訊（pid／uptime（人化）／reload（本地時間））、DHCPv4 摘要（Kea 網段數 vs 本地受管數；不一致加 warning chip；租約庫類型）。
+  - 區塊：連線（可達／未設定／失敗；顯示 `url`；未設定文案「未設定 Kea 連線（KEA_API_URL）」）、版本（`version ?? text`）、監聽介面（設定值；空＝「未監聽任何介面（不主動服務 DHCP；安裝預設）」）、運行資訊（pid／uptime（人化相對秒數）／reload（人化「X 前」）／socket 狀態（值存在時以「socket 狀態：ready」一行呈現；真機為物件 `{"status":"ready"}`，非綁定清單））、DHCPv4 摘要（Kea 網段數 vs 本地受管數；不一致加 warning chip；租約庫類型）。
   - 分區錯誤：各區塊顯示「無法取得」；頁面其餘部分照常運作。
   - 進頁自動載入；「重新整理」＋上次更新時間。
 

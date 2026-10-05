@@ -77,3 +77,90 @@ export function getSyncPlan(): Promise<KeaSyncPlan> {
 export function applySync(): Promise<KeaApplyReport> {
   return apiPost<KeaApplyReport>("/api/v1/kea/sync", {});
 }
+
+/** `version-get` 回應區塊（見票 01）。 */
+export interface KeaVersionBlock {
+  /** 回應 `arguments.version`；真機 3.2.1 未提供為 null。 */
+  version: string | null;
+  /** 回應 `text`（如 "3.2.1"）；未提供為 null。 */
+  text: string | null;
+}
+
+/** `status-get` 的 socket 狀態（真機 3.2.1 為物件 `{"status":"ready"}`）。 */
+export interface KeaSocketStatus {
+  /** socket 狀態（如 `ready`）；未提供為 null。 */
+  status: string | null;
+}
+
+/** `status-get` 的伺服器運行資訊；`uptime`／`reload` 皆為相對秒數（非 epoch）。 */
+export interface KeaRuntimeInfo {
+  pid: number | null;
+  /** 伺服器啟動後經過秒數。 */
+  uptime: number | null;
+  /** 距上次設定重載秒數。 */
+  reload: number | null;
+  /** socket 狀態；伺服端未提供為 null。 */
+  sockets: KeaSocketStatus | null;
+}
+
+/** `config-get` 的 DHCPv4 摘要（見票 01）。 */
+export interface KeaDhcp4Block {
+  /** Kea `Dhcp4.subnet4` 筆數。 */
+  subnet_count: number;
+  /** 本地 `kea_subnet_id IS NOT NULL` 的網段數。 */
+  managed_subnet_count: number;
+  /** 租約庫類型（如 `memfile`）；未提供為 null。 */
+  lease_backend: string | null;
+}
+
+/** 各命令獨立的失敗訊息；全成功時後端省略 `errors`。 */
+export interface KeaStatusErrors {
+  version?: string;
+  config?: string;
+  status?: string;
+}
+
+/** Kea 系統狀態回應（一律 200、分區容錯；見票 01）。 */
+export interface KeaStatus {
+  configured: boolean;
+  reachable: boolean;
+  url: string | null;
+  version: KeaVersionBlock | null;
+  /** 監聽介面（設定值）；空陣列＝未監聽、null＝無法取得。 */
+  interfaces: string[] | null;
+  runtime: KeaRuntimeInfo | null;
+  dhcp4: KeaDhcp4Block | null;
+  errors?: KeaStatusErrors;
+}
+
+/** 單筆 Kea DHCPv4 動態租約（見票 02）。 */
+export interface KeaLease {
+  ip_address: string | null;
+  hw_address: string | null;
+  hostname: string | null;
+  subnet_id: number | null;
+  /** 本地受管網段（`kea_subnet_id`）對應的 CIDR；無對應為 null。 */
+  subnet_cidr: string | null;
+  /** 本地受管網段名稱；無對應或未命名為 null。 */
+  subnet_name: string | null;
+  /** `cltt + valid_lft`（ISO 8601 UTC）；缺欄位為 null。 */
+  expires_at: string | null;
+  /** 狀態：`default`／`declined`／`expired`／`released`，未知保留原值。 */
+  state: string | null;
+}
+
+/** Kea 系統狀態（唯讀診斷；見票 01）。 */
+export function getKeaStatus(): Promise<KeaStatus> {
+  return apiGet<KeaStatus>("/api/v1/kea/status");
+}
+
+interface KeaLeaseItems {
+  leases: KeaLease[];
+}
+
+/** Kea DHCPv4 動態租約清單（唯讀；見票 02）。 */
+export function listKeaLeases(): Promise<KeaLease[]> {
+  return apiGet<KeaLeaseItems>("/api/v1/kea/leases").then(
+    result => result.leases
+  );
+}

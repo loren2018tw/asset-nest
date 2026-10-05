@@ -11,6 +11,14 @@ const routes: RouteRecordRaw[] = [
       {
         path: "subnets/:id/ips",
         component: () => import("@/pages/IpListPage.vue")
+      },
+      {
+        path: "kea/leases",
+        component: () => import("@/pages/KeaLeasesPage.vue")
+      },
+      {
+        path: "kea/status",
+        component: () => import("@/pages/KeaStatusPage.vue")
       }
     ]
   },
