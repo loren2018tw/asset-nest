@@ -25,6 +25,12 @@ export interface KeaPlanSkip {
   reason: string;
 }
 
+/** gateway（routers option）變更；null＝未設／移除（見 ADR-0013）。 */
+export interface KeaGatewayPlan {
+  current: string | null;
+  desired: string | null;
+}
+
 export interface KeaPlanSubnet {
   /** asset-nest 的網段 id。 */
   subnet_id: number;
@@ -35,12 +41,29 @@ export interface KeaPlanSubnet {
   update: KeaPlanItem[];
   delete: KeaPlanItem[];
   skipped: KeaPlanSkip[];
+  /** 要新增的 pool 範圍（正規化 `start-end`）。 */
+  pool_add: string[];
+  /** 要刪除的 pool 範圍（正規化 `start-end`）。 */
+  pool_delete: string[];
+  /** gateway 變更；相同時省略。 */
+  gateway?: KeaGatewayPlan | null;
   error?: string | null;
 }
 
 export interface KeaSyncPlan {
   subnets: KeaPlanSubnet[];
-  totals: { add: number; update: number; delete: number; skipped: number };
+  totals: {
+    add: number;
+    update: number;
+    delete: number;
+    skipped: number;
+    /** 要新增的 pool 筆數。 */
+    pool_add: number;
+    /** 要刪除的 pool 筆數。 */
+    pool_delete: number;
+    /** 要變更 gateway 的網段數。 */
+    gateway: number;
+  };
 }
 
 export interface KeaApplyFailure {
@@ -58,6 +81,14 @@ export interface KeaApplySubnet {
   updated: number;
   deleted: number;
   skipped: number;
+  /** 成功新增的 pool 筆數。 */
+  pool_added: number;
+  /** 成功刪除的 pool 筆數。 */
+  pool_deleted: number;
+  /** gateway 是否已更新。 */
+  gateway_updated: boolean;
+  /** 網段層（pool／gateway）套用失敗訊息；成功時省略。 */
+  settings_error?: string | null;
   failures: KeaApplyFailure[];
   error?: string | null;
 }

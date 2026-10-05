@@ -29,8 +29,12 @@
       <q-card-section v-else-if="report" class="q-gutter-y-md">
         <q-banner class="bg-grey-2 text-grey-8" rounded>
           完成：新增 {{ reportTotals.added }}／更新
-          {{ reportTotals.updated }}／刪除 {{ reportTotals.deleted }}；Kea
-          設定檔寫入：{{ configWriteLabel }}。
+          {{ reportTotals.updated }}／刪除 {{ reportTotals.deleted }}；位址池
+          新增 {{ reportTotals.poolAdded }}／刪除
+          {{ reportTotals.poolDeleted }}、gateway 更新
+          {{ reportTotals.gateways }} 個網段；Kea 設定檔寫入：{{
+            configWriteLabel
+          }}。
         </q-banner>
         <div v-for="subnet in report.subnets" :key="subnet.subnet_id">
           <div class="text-subtitle2">{{ label(subnet) }}</div>
@@ -40,7 +44,12 @@
           <template v-else>
             <div class="text-body2">
               新增 {{ subnet.added }}／更新 {{ subnet.updated }}／刪除
-              {{ subnet.deleted }}（跳過 {{ subnet.skipped }}）
+              {{ subnet.deleted }}（跳過 {{ subnet.skipped }}）；位址池 新增
+              {{ subnet.pool_added }}／刪除 {{ subnet.pool_deleted
+              }}<span v-if="subnet.gateway_updated">、gateway 已更新</span>
+            </div>
+            <div v-if="subnet.settings_error" class="text-negative text-body2">
+              網段層設定同步失敗：{{ subnet.settings_error }}
             </div>
             <q-list
               v-if="subnet.failures.length > 0"
@@ -74,7 +83,10 @@
           <q-banner class="bg-grey-2 text-grey-8" rounded>
             將以 asset-nest 為準對齊 Kea：新增 {{ plan.totals.add }}／更新
             {{ plan.totals.update }}／刪除 {{ plan.totals.delete }}／跳過
-            {{ plan.totals.skipped }}。刪除只限受管網段中多餘的保留。
+            {{ plan.totals.skipped }}；位址池 新增
+            {{ plan.totals.pool_add }}／刪除
+            {{ plan.totals.pool_delete }}、gateway 變更
+            {{ plan.totals.gateway }}。刪除只限受管網段中多餘的保留與位址池。
           </q-banner>
           <div v-for="subnet in plan.subnets" :key="subnet.subnet_id">
             <div class="text-subtitle2">{{ label(subnet) }}</div>
@@ -85,9 +97,17 @@
               <div class="text-body2">
                 新增 {{ subnet.add.length }}／更新
                 {{ subnet.update.length }}／刪除
-                {{ subnet.delete.length }}／跳過 {{ subnet.skipped.length }}
+                {{ subnet.delete.length }}／跳過
+                {{ subnet.skipped.length }}；位址池 新增
+                {{ subnet.pool_add.length }}／刪除 {{ subnet.pool_delete.length
+                }}<span v-if="subnet.gateway">、gateway 變更</span>
               </div>
-              <q-expansion-item dense icon="list" label="查看明細">
+              <q-expansion-item
+                v-if="hasDetail(subnet)"
+                dense
+                icon="list"
+                label="查看明細"
+              >
                 <q-list dense class="text-body2">
                   <q-item
                     v-for="item in subnet.add"
@@ -126,6 +146,32 @@
                       <span class="text-mono">{{ item.ip_address }}</span> （{{
                         item.current?.hw_address
                       }}）
+                    </q-item-section>
+                  </q-item>
+                  <q-item
+                    v-for="range in subnet.pool_add"
+                    :key="`pool-add-${range}`"
+                    dense
+                  >
+                    <q-item-section>
+                      新增位址池 <span class="text-mono">{{ range }}</span>
+                    </q-item-section>
+                  </q-item>
+                  <q-item
+                    v-for="range in subnet.pool_delete"
+                    :key="`pool-delete-${range}`"
+                    dense
+                  >
+                    <q-item-section>
+                      刪除位址池 <span class="text-mono">{{ range }}</span>
+                    </q-item-section>
+                  </q-item>
+                  <q-item v-if="subnet.gateway" dense>
+                    <q-item-section>
+                      gateway
+                      <span class="text-mono">{{
+                        gatewayText(subnet.gateway)
+                      }}</span>
                     </q-item-section>
                   </q-item>
                   <q-item
@@ -170,6 +216,8 @@ import {
   applySync,
   getSyncPlan,
   type KeaApplyReport,
+  type KeaGatewayPlan,
+  type KeaPlanSubnet,
   type KeaSyncPlan
 } from "@/api/kea";
 
@@ -191,15 +239,38 @@ const report = ref<KeaApplyReport | null>(null);
 
 const canApply = computed(() => {
   const totals = plan.value?.totals;
-  return totals !== undefined && totals.add + totals.update + totals.delete > 0;
+  if (totals === undefined) {
+    return false;
+  }
+  return (
+    totals.add +
+      totals.update +
+      totals.delete +
+      totals.pool_add +
+      totals.pool_delete +
+      totals.gateway >
+    0
+  );
 });
 
 const reportTotals = computed(() => {
-  const totals = { added: 0, updated: 0, deleted: 0 };
+  const totals = {
+    added: 0,
+    updated: 0,
+    deleted: 0,
+    poolAdded: 0,
+    poolDeleted: 0,
+    gateways: 0
+  };
   for (const subnet of report.value?.subnets ?? []) {
     totals.added += subnet.added;
     totals.updated += subnet.updated;
     totals.deleted += subnet.deleted;
+    totals.poolAdded += subnet.pool_added;
+    totals.poolDeleted += subnet.pool_deleted;
+    if (subnet.gateway_updated) {
+      totals.gateways += 1;
+    }
   }
   return totals;
 });
@@ -244,7 +315,9 @@ async function apply() {
     report.value = await applySync();
     const failed =
       report.value.config_write === "failed" ||
-      report.value.subnets.some(subnet => subnet.failures.length > 0);
+      report.value.subnets.some(
+        subnet => subnet.failures.length > 0 || Boolean(subnet.settings_error)
+      );
     $q.notify({
       type: failed ? "warning" : "positive",
       message: failed ? "完整同步完成，但有部分失敗" : "完整同步完成"
@@ -275,5 +348,22 @@ function failureAction(action: string): string {
     default:
       return action;
   }
+}
+
+/** 明細是否有內容可展開（保留或網段層差異）。 */
+function hasDetail(subnet: KeaPlanSubnet): boolean {
+  const items =
+    subnet.add.length +
+    subnet.update.length +
+    subnet.delete.length +
+    subnet.skipped.length +
+    subnet.pool_add.length +
+    subnet.pool_delete.length;
+  return items > 0 || Boolean(subnet.gateway);
+}
+
+/** gateway 變更顯示：null 以「未設」／「移除」呈現。 */
+function gatewayText(change: KeaGatewayPlan): string {
+  return `${change.current ?? "（未設）"} → ${change.desired ?? "（移除）"}`;
 }
 </script>
