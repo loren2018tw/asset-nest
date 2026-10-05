@@ -25,3 +25,4 @@
   - 資產編輯對話框的「取消指派」僅即時更新清單與外層，不動未儲存的表單／介面草稿。
 - 規格：`spec.md` 追加定案（2026-10-05，第二批）；§4.1、§4.3 同步。
 - 驗收：`pnpm --filter frontend typecheck`、`pnpm --filter frontend lint:check`、`pnpm --filter frontend build` 全綠。
+- 實作 commit：`4ca8ecc`（`20 已指派 IP 取消指派：指派對話框與資產編輯對話框清單入口（前端）`）
