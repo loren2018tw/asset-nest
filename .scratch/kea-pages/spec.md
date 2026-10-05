@@ -122,4 +122,4 @@ pnpm lint:check                                  # 前端
 
 ## 實作記錄
 
-- （待實作）
+- 票 01（後端系統狀態端點）主實作 commit：`7a3e18e`（`config_get_dhcp4`／`status_get`／`base_url`、`GET /api/v1/kea/status`、stub＋真機唯讀測試；真機實測列於「待實測定案」）。
