@@ -181,6 +181,72 @@ async fn assign_static(pool: &SqlitePool, subnet_id: i64, address: &str, interfa
     assign(pool, subnet_id, address, interface_id, "static", None).await;
 }
 
+/// 植入一筆觀測現況（比照 `observation_history.rs`；見票 08）。
+async fn insert_presence(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+    last_seen_at: Option<&str>,
+    mac: Option<&str>,
+    source: Option<&str>,
+    checked_at: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO ip_presence
+             (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source, last_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .bind(last_seen_at)
+    .bind(mac)
+    .bind(source)
+    .bind(checked_at)
+    .execute(pool)
+    .await
+    .expect("植入觀測現況");
+}
+
+/// 讀取清單中某資產的「最後可見」欄（JSON null 映射為 `None`）。
+async fn last_seen_of(pool: &SqlitePool, asset_id: i64) -> Option<String> {
+    let (status, page) = send(pool, Method::GET, "/api/v1/assets?per_page=200", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let value = page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .find(|item| item["id"].as_i64() == Some(asset_id))
+        .map(|item| item["last_seen_at"].clone())
+        .expect("清單含該資產");
+    if value.is_null() {
+        None
+    } else {
+        Some(value.as_str().expect("最後可見為字串").to_string())
+    }
+}
+
+/// 讀取單一資產詳情的「最後可見」欄。
+async fn detail_last_seen_of(pool: &SqlitePool, asset_id: i64) -> Option<String> {
+    let (status, detail) = send(
+        pool,
+        Method::GET,
+        &format!("/api/v1/assets/{asset_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    if detail["last_seen_at"].is_null() {
+        None
+    } else {
+        Some(
+            detail["last_seen_at"]
+                .as_str()
+                .expect("最後可見為字串")
+                .to_string(),
+        )
+    }
+}
+
 /// 以 `q` 搜尋並回傳命中的資產 id（依預設排序）。
 async fn search_ids(pool: &SqlitePool, q: &str) -> Vec<i64> {
     let (status, page) = send(
@@ -1579,4 +1645,239 @@ async fn export_assets_selects_interface_addresses_and_hostname() {
         Some(""),
         "最小 v4 為 static → hostname 空"
     );
+}
+
+#[tokio::test]
+async fn asset_last_seen_takes_max_over_assignment_and_interface_mac_hits() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/24" })).await;
+
+    // alpha：介面 MAC aa:…:01、指派 10.0.0.5。
+    let alpha = create_asset(&pool, json!({ "description": "alpha", "location": "機房" })).await;
+    let alpha_id = alpha["id"].as_i64().expect("回應含 id");
+    let alpha_interface = create_interface(
+        &pool,
+        alpha_id,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+    assign_static(&pool, subnet, "10.0.0.5", alpha_interface).await;
+
+    // 指派命中：宣告 MAC 與現況 MAC 不同仍算（比對位址、不比對 MAC）。
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.5",
+        Some("2026-10-01T08:00:00Z"),
+        Some("bb:bb:bb:bb:bb:bb"),
+        Some("arp"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+    // MAC 命中：未指派位址、時間較新 → 取最大值。
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.9",
+        Some("2026-10-03T08:00:00Z"),
+        Some("aa:bb:cc:dd:ee:01"),
+        Some("kea_lease"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+    // 無關現況：其他位址、其他 MAC 不影響。
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.7",
+        Some("2026-10-05T08:00:00Z"),
+        Some("cc:cc:cc:cc:cc:cc"),
+        Some("arp"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+    // 從未上線的指派位址：只有檢查時間，不計入。
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.6",
+        None,
+        Some("aa:bb:cc:dd:ee:01"),
+        None,
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+
+    assert_eq!(
+        last_seen_of(&pool, alpha_id).await.as_deref(),
+        Some("2026-10-03T08:00:00Z"),
+        "指派命中與 MAC 命中取最大；只有檢查時間者不計入"
+    );
+    assert_eq!(
+        detail_last_seen_of(&pool, alpha_id).await.as_deref(),
+        Some("2026-10-03T08:00:00Z"),
+        "詳情回應含相同的 last_seen_at"
+    );
+}
+
+#[tokio::test]
+async fn asset_last_seen_matches_mac_case_insensitively_and_per_asset() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/24" })).await;
+
+    let alpha = create_asset(&pool, json!({ "description": "alpha", "location": "機房" })).await;
+    let alpha_id = alpha["id"].as_i64().expect("回應含 id");
+    create_interface(
+        &pool,
+        alpha_id,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+
+    let bravo = create_asset(&pool, json!({ "description": "Bravo", "location": "機房" })).await;
+    let bravo_id = bravo["id"].as_i64().expect("回應含 id");
+    create_interface(
+        &pool,
+        bravo_id,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:02" }),
+    )
+    .await;
+
+    // charlie：無介面、無現況 → null。
+    let charlie = create_asset(
+        &pool,
+        json!({ "description": "Charlie", "location": "機房" }),
+    )
+    .await;
+    let charlie_id = charlie["id"].as_i64().expect("回應含 id");
+
+    // alpha 的現況以大寫寫入（模擬既有資料）：比對仍不分大小寫。
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.9",
+        Some("2026-10-02T08:00:00Z"),
+        Some("AA:BB:CC:DD:EE:01"),
+        Some("arp"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.8",
+        Some("2026-10-04T08:00:00Z"),
+        Some("aa:bb:cc:dd:ee:02"),
+        Some("arp"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+
+    assert_eq!(
+        last_seen_of(&pool, alpha_id).await.as_deref(),
+        Some("2026-10-02T08:00:00Z"),
+        "大寫現況 MAC 仍命中 alpha 介面"
+    );
+    assert_eq!(
+        last_seen_of(&pool, bravo_id).await.as_deref(),
+        Some("2026-10-04T08:00:00Z"),
+        "各資產只取自己命中的現況"
+    );
+    assert_eq!(
+        last_seen_of(&pool, charlie_id).await,
+        None,
+        "無命中現況為 null"
+    );
+    assert_eq!(detail_last_seen_of(&pool, charlie_id).await, None);
+}
+
+#[tokio::test]
+async fn list_sorts_by_last_seen_with_nulls_last() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/24" })).await;
+
+    // alpha：2026-10-01；Bravo：2026-10-03；Charlie：無現況（NULL 固定最後）。
+    let alpha = create_asset(&pool, json!({ "description": "alpha", "location": "機房" })).await;
+    let alpha_id = alpha["id"].as_i64().expect("回應含 id");
+    create_interface(
+        &pool,
+        alpha_id,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+    let bravo = create_asset(&pool, json!({ "description": "Bravo", "location": "機房" })).await;
+    let bravo_id = bravo["id"].as_i64().expect("回應含 id");
+    create_interface(
+        &pool,
+        bravo_id,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:02" }),
+    )
+    .await;
+    create_asset(
+        &pool,
+        json!({ "description": "Charlie", "location": "機房" }),
+    )
+    .await;
+
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.9",
+        Some("2026-10-01T08:00:00Z"),
+        Some("aa:bb:cc:dd:ee:01"),
+        Some("arp"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+    insert_presence(
+        &pool,
+        subnet,
+        "10.0.0.8",
+        Some("2026-10-03T08:00:00Z"),
+        Some("aa:bb:cc:dd:ee:02"),
+        Some("arp"),
+        Some("2026-10-06T08:00:00Z"),
+    )
+    .await;
+
+    assert_eq!(
+        descriptions(&pool, "sort=last_seen&dir=asc&per_page=10").await,
+        vec!["alpha", "Bravo", "Charlie"],
+        "升冪：時間舊到新，NULL 最後"
+    );
+    assert_eq!(
+        descriptions(&pool, "sort=last_seen&dir=desc&per_page=10").await,
+        vec!["Bravo", "alpha", "Charlie"],
+        "降冪：時間新到舊，NULL 仍最後"
+    );
+
+    // 分頁以排序後序列切頁，總數不變。
+    let (status, page) = send(
+        &pool,
+        Method::GET,
+        "/api/v1/assets?sort=last_seen&dir=asc&per_page=2&page=2",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 3);
+    let page_descriptions: Vec<&str> = page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .map(|item| item["description"].as_str().expect("描述為字串"))
+        .collect();
+    assert_eq!(page_descriptions, ["Charlie"]);
+
+    // 匯出沿用同一排序。
+    let (status, _, bytes) = export_bytes(&pool, "sort=last_seen&dir=desc").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, rows) = parse_export(&bytes);
+    let exported: Vec<&str> = rows.iter().map(|row| row.get(1).expect("描述欄")).collect();
+    assert_eq!(exported, ["Bravo", "alpha", "Charlie"]);
+
+    // 白名單外仍 400（新增欄位不放寬既有驗證）。
+    let (status, body) = send(&pool, Method::GET, "/api/v1/assets?sort=id", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["details"]["field"], "sort");
 }

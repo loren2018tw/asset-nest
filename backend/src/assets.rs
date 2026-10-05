@@ -3,7 +3,7 @@
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.1、§3。
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -177,7 +177,7 @@ impl AssetPatch {
     }
 }
 
-/// 清單可排序欄位白名單（見票 11、票 19）。
+/// 清單可排序欄位白名單（見票 11、票 19、票 08）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortField {
     PropertyNo,
@@ -190,6 +190,7 @@ pub enum SortField {
     Tags,
     Expired,
     AssignedIps,
+    LastSeen,
 }
 
 impl SortField {
@@ -205,6 +206,7 @@ impl SortField {
             "tags" => Some(Self::Tags),
             "expired" => Some(Self::Expired),
             "assigned_ips" => Some(Self::AssignedIps),
+            "last_seen" => Some(Self::LastSeen),
             _ => None,
         }
     }
@@ -223,6 +225,9 @@ impl SortField {
             // 「已指派 IP」於 Rust 端比較位址數值（SQLite 無 inet 型別）；
             // SQL 端僅需穩定基底，實際排序見 `list_all_by_assigned_ips`（票 19）。
             Self::AssignedIps => "id",
+            // 「最後可見」為觀測現況的聚合、且須 NULL-last；由 `push_order`
+            // 以 [`LAST_SEEN_EXPR`] 特判（見票 08）。
+            Self::LastSeen => "id",
         }
     }
 }
@@ -368,6 +373,65 @@ fn compare_first_assigned_ip(left: Option<&str>, right: Option<&str>, dir: SortD
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
+}
+
+/// 資產「最後可見」的 SQL 純量運算式（相關子查詢；見票 08、spec §讀取端）。
+///
+/// 取該資產命中的 `ip_presence.last_seen_at` 最大值（觀測唯讀，見 ADR-0014）；
+/// 命中路徑：
+/// 1. 指派命中：任一介面的指派 `(subnet_id, address)` 與現況列相同；
+/// 2. MAC 命中：現況 `last_seen_mac` 等於（不分大小寫）任一介面 MAC
+///    （含未指派位址）。
+///
+/// 無命中或 `last_seen_at` 全為空時為 NULL；以 `assets` 為外層表名。
+const LAST_SEEN_EXPR: &str = "(SELECT MAX(p.last_seen_at) \
+     FROM ip_presence p \
+    WHERE p.last_seen_at IS NOT NULL \
+      AND (EXISTS (SELECT 1 \
+                     FROM ip_assignments a \
+                     JOIN interfaces i ON i.id = a.interface_id \
+                    WHERE i.asset_id = assets.id \
+                      AND a.subnet_id = p.subnet_id \
+                      AND a.address = p.address) \
+       OR EXISTS (SELECT 1 \
+                    FROM interfaces m \
+                   WHERE m.asset_id = assets.id \
+                     AND LOWER(m.mac) = LOWER(p.last_seen_mac))))";
+
+/// 批次讀取多資產的「最後可見」時間（單一查詢，避免逐資產 N+1；見票 08）。
+///
+/// 回傳僅含至少一個命中現況的資產（無命中者由呼叫端視為 NULL）；
+/// 判定與 [`LAST_SEEN_EXPR`] 相同。
+pub async fn last_seen_for_assets(
+    pool: &SqlitePool,
+    asset_ids: &[i64],
+) -> sqlx::Result<HashMap<i64, String>> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query = QueryBuilder::new(format!(
+        "SELECT assets.id AS asset_id, {LAST_SEEN_EXPR} AS last_seen_at \
+           FROM assets WHERE assets.id IN ("
+    ));
+    let mut separated = query.separated(", ");
+    for asset_id in asset_ids {
+        separated.push_bind(*asset_id);
+    }
+    separated.push_unseparated(")");
+
+    let rows: Vec<(i64, Option<String>)> = query.build_query_as().fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(asset_id, last_seen_at)| last_seen_at.map(|value| (asset_id, value)))
+        .collect())
+}
+
+/// 單一資產的「最後可見」；無命中回 `None`（見票 08）。
+pub async fn last_seen_for_asset(pool: &SqlitePool, asset_id: i64) -> sqlx::Result<Option<String>> {
+    Ok(last_seen_for_assets(pool, std::slice::from_ref(&asset_id))
+        .await?
+        .remove(&asset_id))
 }
 
 /// 依 `filter` 的頁碼與每頁筆數切取一頁；供 Rust 端排序後的清單使用。
@@ -585,13 +649,26 @@ impl AssetRow {
 
 /// 在篩選條件之後附加排序子句；欄位與方向經白名單驗證，以 id 作為穩定
 /// 排序的決勝鍵（見 spec §6、票 11）。
+///
+/// 「最後可見」須 NULL（無命中現況）固定排最後、不分升降冪，比照 IP 清單
+/// （見 spec §讀取端、票 08）。
 fn push_order(query: &mut QueryBuilder<'_, Sqlite>, filter: &AssetFilter) {
-    query
-        .push(" ORDER BY ")
-        .push(filter.sort.order_expression())
-        .push(" ")
-        .push(filter.dir.keyword())
-        .push(", id ASC");
+    query.push(" ORDER BY ");
+    if filter.sort == SortField::LastSeen {
+        query
+            .push("(")
+            .push(LAST_SEEN_EXPR)
+            .push(") IS NULL ASC, ")
+            .push(LAST_SEEN_EXPR)
+            .push(" ")
+            .push(filter.dir.keyword());
+    } else {
+        query
+            .push(filter.sort.order_expression())
+            .push(" ")
+            .push(filter.dir.keyword());
+    }
+    query.push(", id ASC");
 }
 
 /// 在篩選條件之後附加 SQL；關鍵字以 `LIKE` 子字串比對（SQLite 對 ASCII 不分大小寫）。

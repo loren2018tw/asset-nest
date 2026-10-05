@@ -30,10 +30,12 @@ export interface Asset {
   updated_at: string;
 }
 
-/** 資產清單列：資產欄位＋全部已指派 IP（見 spec §2.1、票 12）。 */
+/** 資產清單列：資產欄位＋全部已指派 IP（見 spec §2.1、票 12）＋最後可見（票 08）。 */
 export interface AssetListRow extends Asset {
   /** 全部已指派位址（跨介面、跨網段；v4 先、v6 後，同地址族依數值）。 */
   assigned_ips: string[];
+  /** 最後可見（UTC）：介面指派位址或介面 MAC 命中的現況最大值；無命中為 null。 */
+  last_seen_at: string | null;
 }
 
 /** 新增／編輯表單內容；`null` 或空字串代表清除選填欄位。 */
@@ -50,6 +52,19 @@ export interface AssetInput {
   tags: string[];
 }
 
+/** 資產清單可排序欄位（後端白名單；無效值回 400；見 spec §2.1、票 08）。 */
+export type AssetSortField =
+  | "property_no"
+  | "description"
+  | "location"
+  | "assigned_ips"
+  | "brand"
+  | "model"
+  | "note"
+  | "tags"
+  | "expired"
+  | "last_seen";
+
 /** 清單搜尋、篩選、排序與分頁參數（皆為伺服器端）。 */
 export interface AssetListParams {
   q?: string | undefined;
@@ -59,7 +74,7 @@ export interface AssetListParams {
   /** 標籤：不分大小寫完全符合。 */
   tag?: string | undefined;
   /** 排序欄位（後端白名單；無效值回 400）。 */
-  sort?: string | undefined;
+  sort?: AssetSortField | undefined;
   dir?: "asc" | "desc" | undefined;
   page?: number | undefined;
   per_page?: number | undefined;
@@ -92,10 +107,12 @@ export interface AssetAssignment {
   updated_at: string;
 }
 
-/** 資產詳情：資產欄位＋介面清單＋已指派 IP（見 spec §5）。 */
+/** 資產詳情：資產欄位＋介面清單＋已指派 IP＋最後可見（見 spec §5、票 08）。 */
 export interface AssetDetail extends Asset {
   interfaces: Interface[];
   assignments: AssetAssignment[];
+  /** 最後可見（UTC）；無命中現況為 null。 */
+  last_seen_at: string | null;
 }
 
 /** 匯入列問題（見 spec §5.2、ADR-0008）。 */

@@ -245,6 +245,7 @@ import type { AddressFamily } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { assetLabel } from "@/utils/assetLabel";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { cancelAssignmentHint } from "@/utils/observationHint";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -502,9 +503,14 @@ function confirmCancel() {
   const message = isV6.value
     ? `確定要取消 ${address.value} 的指派？取消後該位址將自登錄清單移除。`
     : `確定要取消 ${address.value} 的指派？取消後該位址回到「可用」。`;
+  // 回收防呆：附上該位址的最後可見與最後 MAC（僅提醒、不阻擋；見票 08）。
   $q.dialog({
     title: "取消指派",
-    message,
+    message: `${message}<br>${cancelAssignmentHint({
+      last_seen_at: props.entry?.last_seen_at ?? null,
+      last_seen_mac: props.entry?.last_seen_mac ?? null
+    })}`,
+    html: true,
     cancel: true,
     persistent: true
   }).onOk(() => {

@@ -166,6 +166,11 @@
             />
           </div>
 
+          <!-- 編輯模式顯示觀測「最後可見」（見票 08）；無命中現況為「—」。 -->
+          <div v-if="asset !== null" class="text-caption text-grey-7 q-mb-sm">
+            最後可見：{{ lastSeenAt === null ? "—" : relativeTime(lastSeenAt) }}
+          </div>
+
           <PeerMacHint class="q-mb-sm" @fill="fillInterfaceMac" />
 
           <q-banner
@@ -222,6 +227,18 @@
                   <q-input v-model="row.note" outlined dense label="備註" />
                 </div>
                 <div class="col-12 col-sm-2 text-right">
+                  <!-- 介面 MAC 觀測歷史（見票 08）；MAC 空白／無效時不顯示 -->
+                  <q-btn
+                    v-if="macHistoryMac(row) !== null"
+                    flat
+                    dense
+                    round
+                    icon="history"
+                    aria-label="MAC 觀測歷史"
+                    @click="openMacHistory(row)"
+                  >
+                    <q-tooltip>觀測歷史</q-tooltip>
+                  </q-btn>
                   <!-- 指派一律以已儲存的介面為對象（未儲存介面不顯示） -->
                   <q-btn
                     v-if="row.id !== null"
@@ -326,6 +343,12 @@
     :fixed-interface="assignInterface"
     @saved="onAssignSaved"
   />
+
+  <!-- 介面 MAC 觀測歷史：以 MAC 進入（見票 06、票 08） -->
+  <observation-history-dialog
+    v-model="macHistoryOpen"
+    :mac="macHistoryTarget ?? undefined"
+  />
 </template>
 
 <script setup lang="ts">
@@ -352,9 +375,11 @@ import {
 } from "@/api/interfaces";
 import { cancelAssignment, type IpPurpose } from "@/api/ips";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
+import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { parseAddress } from "@/utils/cidr";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { relativeTime } from "@/utils/relativeTime";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -434,6 +459,11 @@ const assignments = ref<AssetAssignment[]>([]);
 const cancellingAssignmentId = ref<number | null>(null);
 const loadingInterfaces = ref(false);
 const interfaceError = ref("");
+/** 編輯模式載入資產詳情的「最後可見」（見票 08）；新增模式為 null。 */
+const lastSeenAt = ref<string | null>(null);
+/** 介面列 MAC 觀測歷史：目標 MAC 與開關（見票 06、票 08）。 */
+const macHistoryOpen = ref(false);
+const macHistoryTarget = ref<string | null>(null);
 /** 新增模式已建立、但介面尚未同步完成時記下的資產 id。 */
 const savedAssetId = ref<number | null>(null);
 
@@ -566,6 +596,7 @@ async function loadInterfaces() {
   originalInterfaces.value = [];
   interfaceDrafts.value = [];
   assignments.value = [];
+  lastSeenAt.value = null;
   cancellingAssignmentId.value = null;
   interfaceError.value = "";
   loadingInterfaces.value = false;
@@ -583,6 +614,7 @@ async function loadInterfaces() {
     originalInterfaces.value = detail.interfaces;
     interfaceDrafts.value = detail.interfaces.map(toDraft);
     assignments.value = detail.assignments;
+    lastSeenAt.value = detail.last_seen_at;
   } catch (cause) {
     if (token === interfaceLoadToken) {
       interfaceError.value = `讀取介面失敗：${messageOf(cause)}`;
@@ -626,6 +658,21 @@ function fillInterfaceMac(mac: string) {
     return;
   }
   blank.mac = mac;
+}
+
+/** 介面草稿的觀測歷史入口 MAC（正規化後）；無效或空白回 null（見票 08）。 */
+function macHistoryMac(row: InterfaceDraft): string | null {
+  return normalizeMac(row.mac);
+}
+
+/** 以該介面 MAC 開啟觀測歷史對話框（見票 06、票 08）。 */
+function openMacHistory(row: InterfaceDraft) {
+  const mac = normalizeMac(row.mac);
+  if (mac === null) {
+    return;
+  }
+  macHistoryTarget.value = mac;
+  macHistoryOpen.value = true;
 }
 
 function confirmRemoveInterface(row: InterfaceDraft) {

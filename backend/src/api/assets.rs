@@ -87,13 +87,16 @@ impl ListQuery {
     }
 }
 
-/// 資產清單列：資產欄位攤平，加上全部已指派位址（「已指派 IP」欄；見票 12）。
+/// 資產清單列：資產欄位攤平，加上全部已指派位址（「已指派 IP」欄；見票 12）
+/// 與「最後可見」（見票 08）。
 #[derive(Debug, Serialize)]
 struct AssetListRow {
     #[serde(flatten)]
     asset: Asset,
     /// 已指派位址：跨介面、跨網段；v4 先、v6 後，同地址族依位址數值（見 spec §2.1）。
     assigned_ips: Vec<String>,
+    /// 最後可見：介面指派位址或介面 MAC 命中的現況最大值；無命中為 `null`（見票 08）。
+    last_seen_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,13 +112,16 @@ struct StringItems {
     items: Vec<String>,
 }
 
-/// 資產詳情：資產欄位攤平，加上介面清單與已指派 IP（唯讀顯示；見 spec §5）。
+/// 資產詳情：資產欄位攤平，加上介面清單、已指派 IP 與最後可見
+/// （唯讀顯示；見 spec §5、票 08）。
 #[derive(Debug, Serialize)]
 struct AssetDetail {
     #[serde(flatten)]
     asset: Asset,
     interfaces: Vec<Interface>,
     assignments: Vec<AssetAssignment>,
+    /// 最後可見：無命中現況為 `null`（見票 08）。
+    last_seen_at: Option<String>,
 }
 
 async fn list_assets(
@@ -135,15 +141,20 @@ async fn list_assets(
         .await
         .map_err(|error| ApiError::internal("讀取資產清單失敗", error))?;
 
-    // 以單一查詢取當頁資產的已指派位址，附入每列供「已指派 IP」欄（見票 12）。
+    // 以各一筆查詢取當頁資產的已指派位址與最後可見，附入每列
+    // （見票 12、票 08；不以逐資產查詢避免 N+1）。
     let ids: Vec<i64> = items.iter().map(|asset| asset.id).collect();
     let mut assigned = assignments::list_for_assets(&state.db, &ids)
         .await
         .map_err(|error| ApiError::internal("讀取已指派 IP 失敗", error))?;
+    let mut last_seen = assets::last_seen_for_assets(&state.db, &ids)
+        .await
+        .map_err(|error| ApiError::internal("讀取資產最後可見失敗", error))?;
     let items = items
         .into_iter()
         .map(|asset| AssetListRow {
             assigned_ips: assigned.remove(&asset.id).unwrap_or_default(),
+            last_seen_at: last_seen.remove(&asset.id),
             asset,
         })
         .collect();
@@ -201,10 +212,15 @@ async fn get_asset(
         .await
         .map_err(|error| ApiError::internal("讀取已指派 IP 失敗", error))?;
 
+    let last_seen_at = assets::last_seen_for_asset(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取資產最後可見失敗", error))?;
+
     Ok(Json(AssetDetail {
         asset,
         interfaces,
         assignments,
+        last_seen_at,
     }))
 }
 

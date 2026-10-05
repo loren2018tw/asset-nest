@@ -109,6 +109,15 @@
           <span v-if="props.row.assigned_ips.length === 0">—</span>
         </q-td>
       </template>
+      <!-- 最後可見（見票 08）：無命中現況顯示「—」，其餘為相對時間。 -->
+      <template #body-cell-last_seen="props">
+        <q-td :props="props">
+          <span v-if="props.row.last_seen_at">
+            {{ relativeTime(props.row.last_seen_at) }}
+          </span>
+          <span v-else class="text-grey-6">—</span>
+        </q-td>
+      </template>
       <template #body-cell-tags="props">
         <q-td :props="props">
           <q-chip
@@ -190,12 +199,14 @@ import {
   listAssets,
   type Asset,
   type AssetDetail,
-  type AssetListRow
+  type AssetListRow,
+  type AssetSortField
 } from "@/api/assets";
 import { saveBlob } from "@/api/client";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssetImportDialog from "@/components/AssetImportDialog.vue";
+import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
 
@@ -230,7 +241,7 @@ const pagination = ref<{
   page: number;
   rowsPerPage: number;
   rowsNumber: number;
-  sortBy: string | null;
+  sortBy: AssetSortField;
   descending: boolean;
 }>({
   page: 1,
@@ -267,6 +278,14 @@ const columns: QTableProps["columns"] = [
     name: "assigned_ips",
     label: "已指派 IP",
     field: "assigned_ips",
+    align: "left",
+    sortable: true
+  },
+  {
+    // 依命中的觀測現況最大值排序（NULL 固定最後；見票 08）
+    name: "last_seen",
+    label: "最後可見",
+    field: (row: AssetListRow) => row.last_seen_at ?? "",
     align: "left",
     sortable: true
   },
@@ -404,13 +423,33 @@ function reload() {
   void fetchAssets();
 }
 
+/** q-table 的排序欄位名即欄位 `name`；僅白名單欄位可送後端（見票 08）。 */
+function toSortField(value: string | null): AssetSortField {
+  switch (value) {
+    case "property_no":
+    case "description":
+    case "location":
+    case "assigned_ips":
+    case "brand":
+    case "model":
+    case "note":
+    case "tags":
+    case "expired":
+    case "last_seen":
+      return value;
+    default:
+      return "description";
+  }
+}
+
 function onRequest(request: TableRequest) {
   const { page, rowsPerPage, sortBy, descending } = request.pagination;
+  const sort = toSortField(sortBy);
   const sortChanged =
-    sortBy !== pagination.value.sortBy ||
+    sort !== pagination.value.sortBy ||
     descending !== pagination.value.descending;
 
-  pagination.value.sortBy = sortBy;
+  pagination.value.sortBy = sort;
   pagination.value.descending = descending;
   // 切換排序時回到第 1 頁（見票 11）
   pagination.value.page = sortChanged ? 1 : page;
@@ -447,7 +486,21 @@ function confirmDelete(asset: Asset) {
   void confirmDeleteWithImpact(asset);
 }
 
-/** 先讀取連動影響數量（介面、指派、其中保留）再顯示確認；讀取失敗不進入刪除流程。 */
+/** 對話框以 HTML 呈現提示資訊；資產描述為使用者輸入，需轉義。 */
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+/**
+ * 先讀取連動影響數量（介面、指派、其中保留）再顯示確認；讀取失敗不進入刪除流程。
+ * 另顯示該資產的最後可見與介面 MAC 作為回收防呆提示（僅提示、不阻擋；
+ * 見票 08、ADR-0014）。
+ */
 async function confirmDeleteWithImpact(asset: Asset) {
   let detail: AssetDetail;
   try {
@@ -463,11 +516,21 @@ async function confirmDeleteWithImpact(asset: Asset) {
     item => item.purpose === "reservation"
   ).length;
 
+  const lastSeen =
+    detail.last_seen_at === null ? "—" : relativeTime(detail.last_seen_at);
+  const macs = detail.interfaces
+    .map(item => item.mac)
+    .filter((mac): mac is string => mac !== null && mac !== "");
+  const macLabel = macs.length > 0 ? macs.join("、") : "—";
+
   $q.dialog({
     title: "刪除資產",
     message:
       `將刪除 ${interfaceCount} 個介面、${assignmentCount} 筆指派` +
-      `（含 ${reservationCount} 筆保留）。確定要刪除「${asset.description}」？`,
+      `（含 ${reservationCount} 筆保留）。<br>` +
+      `最後可見：${lastSeen}；介面 MAC：${macLabel}。<br>` +
+      `僅提示，不阻擋刪除。確定要刪除「${escapeHtml(asset.description)}」？`,
+    html: true,
     cancel: true,
     persistent: true
   }).onOk(() => {
