@@ -1,0 +1,62 @@
+name: 一鍵安裝測試（手動）
+
+# 僅手動觸發（workflow_dispatch）；不隨 push／PR 執行。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  install-test:
+    name: 安裝測試（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-26.04
+    steps:
+      - name: 取出原始碼
+        uses: actions/checkout@v5
+
+      - name: 還原 Cargo 建置快取
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            backend/target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-cargo-
+
+      - name: 執行一鍵安裝
+        run: |
+          sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+            ./deploy/install.sh \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --kea-subnet 198.51.100.0/24
+
+      - name: 驗證服務與 Kea 保留 roundtrip
+        run: |
+          systemctl is-active --quiet asset-nest
+          systemctl is-active --quiet isc-kea-dhcp4-server
+          curl -fsS http://127.0.0.1:8080/api/health
+          sudo grep '^KEA_' /etc/asset-nest/asset-nest.env > "$GITHUB_WORKSPACE/.env"
+          cd "$GITHUB_WORKSPACE"
+          sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+            PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
+            pnpm test:kea
+
+      - name: 失敗時輸出服務紀錄
+        if: failure()
+        run: |
+          sudo journalctl -u asset-nest --no-pager -n 200 || true
+          sudo journalctl -u isc-kea-dhcp4-server --no-pager -n 200 || true
