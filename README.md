@@ -6,6 +6,20 @@ Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、
 - 決策記錄：`docs/adr/`
 - Issue 追蹤：`.scratch/`（見 `AGENTS.md`）
 
+## IP 觀測
+
+每個 IPv4 網段可個別開啟「觀測」（v6 不可開）。開啟後系統在背景每 15 分鐘自動快速掃描一次：對該網段已指派與 Kea 有效租約的位址發 ARP 探測，記錄每個位址的「最後可見」時間、MAC 與來源（`arp`／`kea_lease`）；首次出現與 MAC 變更會留成事件（亦可在畫面上按「立即掃描」手動觸發）。
+
+- v1 僅支援**本機同 L2** 的網段：本機沒有介面位址落在該網段時無法觀測（網段畫面會顯示提示）。
+- ARP 探測預設 `auto`：先 raw（Linux `AF_PACKET`；systemd 單元已帶 `CAP_NET_RAW`），遇權限問題自動降級為零權限模式（UDP 觸發 kernel ARP 解析後讀 `/proc/net/arp`），降級只記一次警告。
+- 觀測事件預設保留 365 天，每日自動清理過期事件；只影響歷史深度，**現況與宣告資料（指派／保留）完全不受影響**。
+- 相關環境變數（完整說明見 `.env.example`）：
+
+| 變數 | 預設 | 說明 |
+|------|------|------|
+| `OBSERVATION_PROBE_MODE` | `auto` | ARP 探測模式：`auto`／`raw`／`unprivileged` |
+| `OBSERVATION_RETENTION_DAYS` | `365` | 事件保留天數（正整數） |
+
 ## 環境需求
 
 - Node.js >= 24、pnpm 11

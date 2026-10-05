@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use asset_nest::probe::SystemProber;
-use asset_nest::{AppState, config::Config, db, kea};
+use asset_nest::{AppState, config::Config, db, kea, observation};
 use axum::serve;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -54,13 +54,19 @@ async fn main() -> anyhow::Result<()> {
         state = state.with_kea(client);
     }
 
+    // 背景排程：快速掃描（每網段 15 分鐘）與事件保留清理（啟動＋每日；見票 04）
+    let scheduler = observation::spawn_scheduler(state.clone(), config.observation_retention_days);
+
     // 帶入連線來源資訊，供 `/api/v1/peer-mac` 反查 ARP（見票 09）
-    serve(
+    let served = serve(
         listener,
         asset_nest::app(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    .context("伺服器執行失敗")?;
+    .context("伺服器執行失敗");
+
+    scheduler.abort();
+    served?;
 
     Ok(())
 }

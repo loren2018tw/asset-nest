@@ -19,6 +19,10 @@ use crate::kea::http::{Client as KeaClient, KeaLease};
 use crate::probe::{Mac, Prober};
 use crate::subnets::Subnet;
 
+mod scheduler;
+
+pub use scheduler::spawn_scheduler;
+
 /// `ip_presence` 現況列（讀取端；見 ADR-0016）。
 #[derive(Debug, Clone, Default)]
 pub struct Presence {
@@ -161,6 +165,31 @@ pub async fn run_quick(
         seen: seen.len() as u64,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// 保留清理：刪除早於保留期的 `observation_event`，回傳刪除筆數（見票 04、
+/// ADR-0016）。
+///
+/// - 界線：`cutoff = now - retention_days`；刪除條件為 `observed_at < cutoff`
+///   （嚴格早於），**恰在 cutoff 的事件保留**。
+/// - 只動事件：`ip_presence` 現況與宣告資料（指派／保留）完全不變。
+/// - 以 `idx_observation_event_observed` 索引掃描；清理為全站、不分網段。
+pub async fn cleanup_events(
+    pool: &SqlitePool,
+    retention_days: u32,
+    now: DateTime<Utc>,
+) -> Result<u64, ApiError> {
+    let cutoff = now
+        .checked_sub_signed(chrono::Duration::days(i64::from(retention_days)))
+        .ok_or_else(|| ApiError::internal("換算觀測事件保留期限失敗", retention_days))?;
+
+    let result = sqlx::query("DELETE FROM observation_event WHERE observed_at < ?")
+        .bind(timestamp(cutoff))
+        .execute(pool)
+        .await
+        .map_err(|error| ApiError::internal("清理觀測事件失敗", error))?;
+
+    Ok(result.rows_affected())
 }
 
 /// 快速掃描前提：v4、已開觀測、本機同 L2。
@@ -547,5 +576,105 @@ mod tests {
         );
         assert_eq!(signals[1].mac, None, "MAC 格式異常視為未提供");
         assert_eq!(signals[1].observed_at, None, "缺 cltt 無最後可見時間");
+    }
+
+    /// 建立測試資料庫並套用 migrations（比照 `backend/tests/` 整合測試）。
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("建立記憶體資料庫");
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("套用 migrations");
+
+        pool
+    }
+
+    /// 植入測試網段，回傳 id。
+    async fn insert_subnet(pool: &SqlitePool, cidr: &str) -> i64 {
+        sqlx::query("INSERT INTO subnets (cidr, observed) VALUES (?, 1)")
+            .bind(cidr)
+            .execute(pool)
+            .await
+            .expect("植入網段")
+            .last_insert_rowid()
+    }
+
+    /// 植入一筆事件。
+    async fn insert_event(pool: &SqlitePool, subnet_id: i64, address: &str, observed_at: &str) {
+        sqlx::query(
+            "INSERT INTO observation_event (subnet_id, address, mac, kind, source, observed_at)
+             VALUES (?, ?, 'aa:bb:cc:dd:ee:ff', 'first_seen', 'arp', ?)",
+        )
+        .bind(subnet_id)
+        .bind(address)
+        .bind(observed_at)
+        .execute(pool)
+        .await
+        .expect("植入事件");
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_event_exactly_at_cutoff_and_deletes_older() {
+        let pool = test_pool().await;
+        let subnet_id = insert_subnet(&pool, "10.0.0.0/29").await;
+        let now = DateTime::parse_from_rfc3339("2026-10-06T00:00:00Z")
+            .expect("固定時間")
+            .with_timezone(&Utc);
+        // cutoff = 2025-10-06T00:00:00Z（365 天前；2026 非閏年）。
+        insert_event(&pool, subnet_id, "10.0.0.1", "2025-10-05T23:59:59Z").await;
+        insert_event(&pool, subnet_id, "10.0.0.2", "2025-10-06T00:00:00Z").await;
+        insert_event(&pool, subnet_id, "10.0.0.3", "2026-10-05T23:59:59Z").await;
+
+        let deleted = cleanup_events(&pool, 365, now).await.expect("清理成功");
+
+        assert_eq!(deleted, 1, "只刪嚴格早於 cutoff 者");
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT address FROM observation_event ORDER BY address")
+                .fetch_all(&pool)
+                .await
+                .expect("讀取剩餘事件");
+        assert_eq!(
+            remaining,
+            ["10.0.0.2".to_string(), "10.0.0.3".to_string()],
+            "恰在 cutoff 的事件保留（observed_at >= cutoff）"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_leaves_presence_untouched() {
+        let pool = test_pool().await;
+        let subnet_id = insert_subnet(&pool, "10.0.0.0/29").await;
+        insert_event(&pool, subnet_id, "10.0.0.1", "2020-01-01T00:00:00Z").await;
+        sqlx::query(
+            "INSERT INTO ip_presence
+                 (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source, last_checked_at)
+             VALUES (?, '10.0.0.1', '2020-01-01T00:00:00Z', 'aa:bb:cc:dd:ee:ff', 'arp',
+                     '2026-10-06T00:00:00Z')",
+        )
+        .bind(subnet_id)
+        .execute(&pool)
+        .await
+        .expect("植入現況");
+
+        let now = DateTime::parse_from_rfc3339("2026-10-06T00:00:00Z")
+            .expect("固定時間")
+            .with_timezone(&Utc);
+        let deleted = cleanup_events(&pool, 365, now).await.expect("清理成功");
+
+        assert_eq!(deleted, 1);
+        let presence: Option<String> = sqlx::query_scalar("SELECT last_seen_mac FROM ip_presence")
+            .fetch_optional(&pool)
+            .await
+            .expect("讀取現況");
+        assert_eq!(
+            presence.as_deref(),
+            Some("aa:bb:cc:dd:ee:ff"),
+            "現況列不受清理影響"
+        );
     }
 }
