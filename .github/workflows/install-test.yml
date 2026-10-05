@@ -37,12 +37,11 @@ jobs:
           restore-keys: |
             ${{ matrix.os }}-cargo-
 
-      - name: 執行一鍵安裝
+      - name: 執行一鍵安裝（模擬 curl | bash）
         run: |
           sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
-            ./deploy/install.sh \
-            --source-dir "$GITHUB_WORKSPACE" \
-            --kea-subnet 198.51.100.0/24
+            bash -s -- --source-dir "$GITHUB_WORKSPACE" --kea-subnet 198.51.100.0/24 \
+            < deploy/install.sh
 
       - name: 驗證服務與 Kea 保留 roundtrip
         run: |

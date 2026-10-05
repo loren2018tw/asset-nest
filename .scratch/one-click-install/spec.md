@@ -24,7 +24,7 @@
 ## 驗收
 
 - `./deploy/install.sh --help` 可讀；非 root 執行給出明確錯誤。
-- CI 兩版 Ubuntu：`asset-nest` 與 `isc-kea-dhcp4-server` 皆 active；`/api/health` 200；`pnpm test:kea`（version-get + 保留 roundtrip）通過。
+- CI 兩版 Ubuntu：以 stdin 執行（`bash -s -- ... < deploy/install.sh`，模擬 `curl | bash`）完成安裝；`asset-nest` 與 `isc-kea-dhcp4-server` 皆 active；`/api/health` 200；`pnpm test:kea`（version-get + 保留 roundtrip）通過。
 - README 含一鍵安裝章節。
 
 ## 實作記錄

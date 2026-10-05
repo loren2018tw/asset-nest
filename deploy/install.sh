@@ -584,7 +584,9 @@ main() {
   print_summary
 }
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+# 由 bash 執行時才跑安裝：檔案執行（BASH_SOURCE[0] = $0）或 stdin 執行
+# （如 curl | bash，BASH_SOURCE 未設定）。source 時只定義函式，不執行安裝。
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
   trap 'warn "安裝失敗（第 $LINENO 行）；請依上方訊息排除。"' ERR
   main "$@"
 fi
