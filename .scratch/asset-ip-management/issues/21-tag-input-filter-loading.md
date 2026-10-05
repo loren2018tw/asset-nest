@@ -18,3 +18,4 @@
 - `frontend/src/components/AssetFormDialog.vue`：`filterTags` 改為 `(input, update)` 並以 `update(() => {...})` 指派過濾結果（比照 `AssignmentDialog.onFilterAssets`、`AssetsPage.filterLocations` 既有寫法）。
 - 資產清單頁的標籤篩選未使用 `@filter`，不受影響。
 - 驗收：`pnpm --filter frontend typecheck`、`pnpm --filter frontend lint:check`、`pnpm --filter frontend build` 全綠。
+- 實作 commit：`8149c3b`（`21 資產編輯標籤輸入：修正 @filter 未呼叫 update 導致轉圈與建議不顯示（前端）`）
