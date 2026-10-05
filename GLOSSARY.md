@@ -83,4 +83,6 @@ _Avoid_: 序號
 ## 邊界詞彙
 
 **Kea**：ISC 的 DHCP 伺服器；本系統的 DHCP 整合（位址池、保留、租約）以 DHCPv4 為對象，IPv6 暫不整合。
+**監聽介面（listening interface）**：Kea 伺服器上 DHCPv4 服務綁定的作業系統網路介面（如 `eth0`）；與 Asset 的 Interface（網路介面）不同。空清單代表 Kea 不監聽、不主動服務 DHCP（安裝預設，見 ADR-0012）。
+_Avoid_: 界面
 **Kealight**：既有的獨立 Kea 設定工具；asset-nest 不依賴它，現階段亦不共用程式碼（見 ADR-0001）。
