@@ -126,3 +126,4 @@ pnpm lint:check                                  # 前端
 
 - 票 01（後端系統狀態端點）主實作 commit：`7a3e18e`（`config_get_dhcp4`／`status_get`／`base_url`、`GET /api/v1/kea/status`、stub＋真機唯讀測試；真機實測列於「待實測定案」）。
 - 票 02（後端租約端點）主實作 commit：`bac761a`（`lease4_get_all`、`GET /api/v1/kea/leases`、stub＋真機唯讀測試；真機未載入 `lease_cmds` 的實測列於「待實測定案」）。
+- 票 03（前端租約清單與系統狀態頁）主實作 commit：`a6362b8`（`MainLayout` 選單、`routes.ts`、`api/kea.ts`、`KeaLeasesPage.vue`、`KeaStatusPage.vue`、README；前端段依票 01／02 真機實測調整版本、uptime／reload 與 sockets 呈現）。
