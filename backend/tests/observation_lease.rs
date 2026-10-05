@@ -605,6 +605,73 @@ async fn latest_signal_wins_between_arp_and_lease() {
     );
 }
 
+/// 較舊租約的 MAC 不得每輪以回溯時間重複寫事件（複查修正）：ARP 當下
+/// （MAC A）與較舊 `cltt` 租約（MAC B）並存時，重跑同一輪不得新增事件。
+#[tokio::test]
+async fn stale_lease_mac_does_not_rewrite_events_on_repeated_sweeps() {
+    let pool = test_pool().await;
+    let prober = Arc::new(StubProber::new(&["10.0.0.0/28"]));
+    let kea = StubKea::default();
+    let url = kea.spawn().await;
+    let state = test_state(&pool, prober.clone()).with_kea(Client::new(url.parse().expect("URL")));
+
+    let subnet = create_subnet(&state, json!({ "cidr": "10.0.0.0/28", "kea_subnet_id": 1 })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+    enable_observation(&state, id).await;
+
+    // 租約較舊（cltt 10-04）且 MAC B；ARP 當下（now=10-05）回 MAC A。
+    kea.set_leases(&[default_lease(
+        "10.0.0.5",
+        "aa:bb:cc:dd:ee:05",
+        "2026-10-04T00:00:00Z",
+    )]);
+    prober.set_responses(&[("10.0.0.5", "aa:bb:cc:dd:ee:99")]);
+
+    // 第一輪：租約先寫 first_seen（回溯 cltt），ARP 後寫 mac_changed（當下）。
+    quick_sweep_at(&state, id, "2026-10-05T00:00:00Z").await;
+    let first = events(&pool).await;
+    assert_eq!(
+        first,
+        vec![
+            (
+                "10.0.0.5".to_string(),
+                "aa:bb:cc:dd:ee:05".to_string(),
+                "first_seen".to_string(),
+                "kea_lease".to_string(),
+            ),
+            (
+                "10.0.0.5".to_string(),
+                "aa:bb:cc:dd:ee:99".to_string(),
+                "mac_changed".to_string(),
+                "arp".to_string(),
+            ),
+        ],
+        "首輪＝租約 first_seen＋ARP mac_changed：{first:?}"
+    );
+
+    let page = list_ips(&state, id).await;
+    let seen = row(&page, "10.0.0.5");
+    assert_eq!(seen["last_seen_at"], "2026-10-05T00:00:00Z");
+    assert_eq!(seen["last_seen_mac"], "aa:bb:cc:dd:ee:99");
+    assert_eq!(seen["last_seen_source"], "arp", "較新的 ARP 勝出：{seen}");
+
+    // 第二輪（同一 now 與租約）：舊租約不得再寫回溯事件，ARP 同 MAC 亦不寫。
+    quick_sweep_at(&state, id, "2026-10-05T00:00:00Z").await;
+    assert_eq!(
+        events(&pool).await.len(),
+        2,
+        "重跑同一輪後事件數不變（舊租約不得每輪重寫）"
+    );
+
+    let page = list_ips(&state, id).await;
+    let seen = row(&page, "10.0.0.5");
+    assert_eq!(
+        seen["last_seen_mac"], "aa:bb:cc:dd:ee:99",
+        "現況仍為 ARP 的 MAC A"
+    );
+    assert_eq!(seen["last_seen_source"], "arp");
+}
+
 /// Kea 未設定：行為與過去相同，不讀租約、不留下租約現況。
 #[tokio::test]
 async fn without_kea_leases_are_ignored_and_no_command_is_sent() {

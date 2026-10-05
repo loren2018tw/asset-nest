@@ -539,8 +539,8 @@ struct PresenceAddressRow {
 /// - 所有目標 upsert `last_checked_at = now`；ARP 回應者寫 `last_seen_*`
 ///   （來源 `arp`、時間 `now`）、有效租約寫 `last_seen_*`（來源 `kea_lease`、
 ///   時間 `cltt`），latest-wins：較舊的觀測不覆寫較新的現況。
-/// - 事件只在變化時寫：首次看到 `first_seen`、換 MAC `mac_changed`
-///   （租約缺 MAC 時無事件；見 [`record_seen`]）。
+/// - 事件只在本輪訊號不舊於現況且 MAC 變化時寫：首次看到 `first_seen`、
+///   換 MAC `mac_changed`（租約缺 MAC 時無事件；見 [`record_seen`]）。
 /// - 探測為阻塞式，以 `tokio::task::spawn_blocking` 執行。
 pub async fn run_quick(
     pool: &SqlitePool,
@@ -602,8 +602,9 @@ pub async fn run_quick(
 /// - 前提：`observed` ＋ `discovery_enabled` ＋ v4 ＋ `prober.is_local`；
 ///   否則回 400 驗證錯誤（呼叫端仍為權威，見 ADR-0006）。
 /// - 目標＝該網段 CIDR 的全部 host 位址（沿用 [`HostRange`]）；以
-///   `rate_pps` 分批探測、批與批之間等待 1 秒（最後一批不等待、單一批次
-///   不睡眠），上限為每秒 `rate_pps` 個請求。
+///   `rate_pps` 分批探測，批與批的開始時間相距約 1 秒（只補足探測耗時後
+///   的剩餘時間；最後一批不等待），使探測起始速率接近每秒 `rate_pps` 個
+///   請求。
 /// - 寫入語意同 [`run_quick`]（Kea 租約先寫、ARP 後寫，latest-wins），另：
 ///   - 僅**已指派**目標（含未回應者）upsert `last_checked_at`；
 ///     未指派且未回應者不得建立 `ip_presence` 列。
@@ -665,8 +666,16 @@ pub async fn run_discovery(
     })
 }
 
-/// 依 `rate_pps` 分批探測：每批最多 `rate_pps` 個目標，批與批之間等待
-/// 1 秒；最後一批（含單一批次）不再等待。
+/// 批次間隔的剩餘等待（純函式；見票 05 限速）。
+///
+/// 批與批的開始時間相距約 `interval`：探測耗時 `elapsed` 後只補足剩餘的
+/// 時間；耗時已達或超過間隔時不再等待。
+fn batch_pacing_delay(elapsed: Duration, interval: Duration) -> Duration {
+    interval.saturating_sub(elapsed)
+}
+
+/// 依 `rate_pps` 分批探測：每批最多 `rate_pps` 個目標；批與批之間以
+/// [`batch_pacing_delay`] 補足約 1 秒的間隔（最後一批不再等待）。
 async fn probe_rate_limited(
     prober: Arc<dyn Prober + Send + Sync>,
     subnet: &Subnet,
@@ -678,6 +687,7 @@ async fn probe_rate_limited(
     let mut responses = Vec::with_capacity(targets.len());
 
     for (index, batch) in targets.chunks(batch_size).enumerate() {
+        let batch_started = Instant::now();
         let probe_prober = Arc::clone(&prober);
         let probe_subnet = subnet.clone();
         let batch_targets = batch.to_vec();
@@ -688,7 +698,8 @@ async fn probe_rate_limited(
         responses.append(&mut batch_responses);
 
         if index + 1 < batch_count {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            let delay = batch_pacing_delay(batch_started.elapsed(), Duration::from_secs(1));
+            tokio::time::sleep(delay).await;
         }
     }
 
@@ -946,8 +957,10 @@ pub(crate) fn transition_event(previous_mac: Option<&str>, new_mac: &str) -> Opt
 
 /// 寫入單筆「看到」：依現況轉移寫事件（append-only），latest-wins 更新現況。
 ///
-/// `observed_at` 較舊（如票 03 的 Kea `cltt`）時不覆寫較新的現況，但同值
-/// 時間（>=）仍更新來源；事件依 MAC 變化決定、與時間新舊無關（歷史事實）。
+/// `observed_at` 較舊（如票 03 的 Kea `cltt`）時不覆寫較新的現況，亦不寫
+/// 事件：事件只記錄現況（`last_seen_mac`）的實際轉移，否則舊訊號會在每輪
+/// 掃描以回溯時間重複寫入。時間相同（`>=`）視為不舊，仍更新現況與事件；
+/// 寫入順序為租約先、ARP 後，同秒由 ARP 勝出。
 ///
 /// `mac` 為 `None`（Kea 租約缺 `hw-address`）時不寫事件、亦不改寫既有
 /// `last_seen_mac`（無證據不得否定既有 MAC），只更新時間與來源。
@@ -974,7 +987,16 @@ pub(crate) async fn record_seen(
         .as_ref()
         .and_then(|(_, stored_mac)| stored_mac.as_deref());
 
-    if let Some(mac) = mac
+    // latest-wins：僅在觀測不舊於現況時視為「現在的狀態」（票 03 租約 cltt
+    // 同路徑）；較舊的訊號也不得寫事件，避免重複回溯。
+    let newer = current.as_ref().is_none_or(|(previous_at, _)| {
+        previous_at
+            .as_deref()
+            .is_none_or(|previous| observed_at >= previous)
+    });
+
+    if newer
+        && let Some(mac) = mac
         && let Some(kind) = transition_event(previous_mac, mac)
     {
         sqlx::query(
@@ -991,13 +1013,9 @@ pub(crate) async fn record_seen(
         .await?;
     }
 
-    match current {
-        Some((previous_at, previous_mac)) => {
-            // latest-wins：僅在觀測不舊於現況時覆寫（票 03 租約 cltt 同路徑）。
-            let newer = previous_at
-                .as_deref()
-                .is_none_or(|previous| observed_at >= previous);
-            if newer {
+    if newer {
+        match current {
+            Some((_, previous_mac)) => {
                 // MAC 未提供時保留既有值（無證據不得改寫）。
                 let stored_mac = mac.or(previous_mac.as_deref());
                 sqlx::query(
@@ -1013,20 +1031,20 @@ pub(crate) async fn record_seen(
                 .execute(&mut *connection)
                 .await?;
             }
-        }
-        None => {
-            sqlx::query(
-                "INSERT INTO ip_presence
-                     (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source)
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(subnet_id)
-            .bind(address)
-            .bind(observed_at)
-            .bind(mac)
-            .bind(source)
-            .execute(&mut *connection)
-            .await?;
+            None => {
+                sqlx::query(
+                    "INSERT INTO ip_presence
+                         (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source)
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(subnet_id)
+                .bind(address)
+                .bind(observed_at)
+                .bind(mac)
+                .bind(source)
+                .execute(&mut *connection)
+                .await?;
+            }
         }
     }
 
@@ -1058,6 +1076,31 @@ mod tests {
             transition_event(Some("aa:bb:cc:dd:ee:ff"), "aa:bb:cc:dd:ee:00"),
             Some("mac_changed"),
             "換 MAC 寫 mac_changed"
+        );
+    }
+
+    #[test]
+    fn batch_pacing_delay_only_sleeps_remainder_of_interval() {
+        let interval = Duration::from_secs(1);
+        assert_eq!(
+            batch_pacing_delay(Duration::ZERO, interval),
+            interval,
+            "未耗時：補足完整間隔"
+        );
+        assert_eq!(
+            batch_pacing_delay(Duration::from_millis(800), interval),
+            Duration::from_millis(200),
+            "耗時 800ms：只補 200ms"
+        );
+        assert_eq!(
+            batch_pacing_delay(interval, interval),
+            Duration::ZERO,
+            "耗時恰達間隔：不再等待"
+        );
+        assert_eq!(
+            batch_pacing_delay(Duration::from_millis(1_500), interval),
+            Duration::ZERO,
+            "耗時超過間隔：不再等待"
         );
     }
 

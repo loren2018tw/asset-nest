@@ -52,16 +52,19 @@ pub trait Prober: Send + Sync {
     /// v6 網段與列舉失敗一律回 `false`（見 ADR-0015）。
     fn is_local(&self, subnet: &Subnet) -> bool;
 
-    /// 對 `targets` 發 ARP 請求並收集回應（回覆窗約 2 秒，實作可調）。
+    /// 對 `targets` 發 ARP 請求並收集回應（回覆窗上限約 2 秒，實作可調；
+    /// 全部目標回應或一段閒置後提早結束）。
     ///
     /// 回傳（位址、正規化小寫 MAC）；未回應者不出現。阻塞式；呼叫端以
     /// `spawn_blocking` 執行（見 [`crate::observation::run_quick`]）。
     fn probe(&self, subnet: &Subnet, targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, Mac)>;
 }
 
-/// raw 模式的 ARP 回覆窗；送出全部請求後被動收集。
+/// raw 模式的 ARP 回覆窗硬上限；送出全部請求後被動收集。
 const RAW_REPLY_WINDOW: Duration = Duration::from_secs(2);
-/// raw socket 單次 `recv` 的等待上限（輪詢至回覆窗結束）。
+/// 距最後一幀超過此時間即提早結束回覆窗（無回應時不空等硬上限）。
+const RAW_IDLE_EXIT: Duration = Duration::from_millis(500);
+/// raw socket 單次 `recv` 的等待上限（輪詢以判斷是否提早結束）。
 const RAW_RECV_POLL: Duration = Duration::from_millis(200);
 /// unprivileged 模式送出 UDP 後等待 kernel ARP 解析的簡短時間。
 const UNPRIVILEGED_WAIT: Duration = Duration::from_millis(250);
@@ -461,7 +464,25 @@ fn send_frame(socket: &RawSocket, frame: &[u8]) -> Result<(), RawProbeError> {
     Ok(())
 }
 
+/// 回覆窗是否可結束（純函式；供單元測試）。
+///
+/// 任一條件成立即結束：全部目標已回應、距最後一幀已達 `idle`、已達硬上限
+/// `window`。`since_last_frame` 由呼叫端維護（尚無幀時自收集開始起算）。
+fn reply_window_done(
+    elapsed: Duration,
+    since_last_frame: Duration,
+    answered: usize,
+    target_count: usize,
+    window: Duration,
+    idle: Duration,
+) -> bool {
+    answered >= target_count || since_last_frame >= idle || elapsed >= window
+}
+
 /// 收集回覆窗內的 ARP 回覆；僅保留目標集合內、每個位址第一筆回應。
+///
+/// 全部目標回應、閒置 [`RAW_IDLE_EXIT`] 或達硬上限 [`RAW_REPLY_WINDOW`]
+/// 時結束（決策見 [`reply_window_done`]）。
 #[cfg(target_os = "linux")]
 fn collect_replies(
     socket: &RawSocket,
@@ -470,11 +491,23 @@ fn collect_replies(
 ) -> Vec<(Ipv4Addr, Mac)> {
     use std::time::Instant;
 
-    let deadline = Instant::now() + window;
+    let started = Instant::now();
+    let mut last_frame = started;
     let mut buffer = [0u8; 2048];
     let mut responses: Vec<(Ipv4Addr, Mac)> = Vec::new();
 
-    while Instant::now() < deadline {
+    loop {
+        if reply_window_done(
+            started.elapsed(),
+            last_frame.elapsed(),
+            responses.len(),
+            targets.len(),
+            window,
+            RAW_IDLE_EXIT,
+        ) {
+            break;
+        }
+
         // SAFETY: buffer 為本函式持有的可寫緩衝區；fd 有效。
         let received = unsafe {
             libc::recv(
@@ -490,13 +523,14 @@ fn collect_replies(
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ) {
-                continue; // 等待窗逾時：輪詢至回覆窗結束
+                continue; // 等待窗逾時：回到迴圈開頭判斷是否提早結束
             }
             break;
         }
         if received == 0 {
             continue;
         }
+        last_frame = Instant::now();
 
         let frame = &buffer[..received as usize];
         if let Some((address, mac)) = parse_arp_reply(frame) {
@@ -650,6 +684,25 @@ mod tests {
         );
         assert_eq!(ProbeMode::parse("pcap"), None);
         assert_eq!(ProbeMode::default(), ProbeMode::Auto);
+    }
+
+    #[test]
+    fn reply_window_exits_when_all_answered_idle_or_window_reached() {
+        let window = Duration::from_secs(2);
+        let idle = Duration::from_millis(500);
+        let ms = Duration::from_millis;
+
+        // 全部目標已回應 → 立即結束。
+        assert!(reply_window_done(ms(0), ms(0), 3, 3, window, idle));
+        assert!(!reply_window_done(ms(0), ms(0), 2, 3, window, idle));
+        // 距最後一幀達 idle → 提早結束（含自始無幀）。
+        assert!(reply_window_done(ms(500), ms(500), 1, 3, window, idle));
+        assert!(!reply_window_done(ms(499), ms(499), 1, 3, window, idle));
+        // 有新幀持續進來：未達 idle、未全回應、未達硬上限 → 繼續。
+        assert!(!reply_window_done(ms(700), ms(200), 1, 3, window, idle));
+        // 硬上限：即使幀持續進來也結束。
+        assert!(reply_window_done(window, ms(10), 0, 3, window, idle));
+        assert!(!reply_window_done(ms(1_999), ms(10), 0, 3, window, idle));
     }
 
     #[test]

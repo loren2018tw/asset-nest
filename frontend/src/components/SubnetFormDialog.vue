@@ -198,10 +198,21 @@
                 color="primary"
                 outline
                 dense
+                icon="radar"
+                label="立即快速掃描"
+                class="q-mr-sm"
+                :loading="quickSweeping"
+                :disable="sweeping"
+                @click="runQuickSweep"
+              />
+              <q-btn
+                color="primary"
+                outline
+                dense
                 icon="travel_explore"
                 label="立即探索"
                 :loading="sweeping"
-                :disable="!form.discovery_enabled"
+                :disable="!form.discovery_enabled || quickSweeping"
                 @click="runDiscovery"
               />
             </div>
@@ -228,6 +239,7 @@
 import { useQuasar } from "quasar";
 import { computed, ref, watch } from "vue";
 
+import { quickSweep } from "@/api/ips";
 import {
   createSubnet,
   discoverySweep,
@@ -303,6 +315,8 @@ const saving = ref(false);
 const loading = ref(false);
 /** 「立即探索」進行中（見票 05）。 */
 const sweeping = ref(false);
+/** 「立即快速掃描」進行中（見票 02）。 */
+const quickSweeping = ref(false);
 const errorMessage = ref("");
 
 /** 供載入詳情丟棄過期回應。 */
@@ -615,6 +629,26 @@ function toInput(): SubnetInput {
         }))
       : []
   };
+}
+
+/** 立即快速掃描：同步執行並回報結果（依已儲存的觀測設定；見票 02）。 */
+async function runQuickSweep() {
+  if (props.subnet === null) {
+    return;
+  }
+
+  quickSweeping.value = true;
+  try {
+    const report = await quickSweep(props.subnet.id);
+    $q.notify({
+      type: "positive",
+      message: `快速掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
+    });
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    quickSweeping.value = false;
+  }
 }
 
 /** 立即探索：同步執行並更新上次探索時間（依已儲存的設定；見票 05）。 */
