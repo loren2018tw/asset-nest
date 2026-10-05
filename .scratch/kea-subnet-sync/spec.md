@@ -110,6 +110,8 @@ pnpm lint:check                                  # 前端
 
 ## 實作記錄
 
-- 票 01（後端）：主實作 commit 待補。
-- 票 02（前端）：主實作 commit 待補。
-- 票 03（deploy＋文件）：主實作 commit 待補。
+- 票 01（後端）：主實作 commit `b05d616`（client `KeaSubnet`／`Ipv4Range`／`subnet4_update`／`list_commands`；sync 計畫與套用加入 pool／gateway、`settings_error`、單次 `config-write`；stub＋真機唯讀測試）。
+- 票 02（前端）：主實作 commit `169fc63`（`api/kea.ts` 型別擴充、`KeaSyncDialog.vue` 計數／明細／錯誤呈現、僅網段層差異可套用）。
+- 票 03（deploy＋文件）：主實作 commit `6903f82`（`configure_kea`／`render_kea_config` 加入 subnet_cmds、既有設定 warn；ADR-0013、GLOSSARY、README、`.scratch/kea-sync/spec.md` 指標）。
+- 驗收：`cargo test --manifest-path backend/Cargo.toml`（104 單元＋137 整合、共 241 passed、5 ignored、0 failed）；`cargo fmt --check`；`pnpm lint:check`；`pnpm --filter frontend typecheck`；`pnpm build:frontend` 全綠。
+- 真機（`10.1.0.2`）：`subnet_cmds` 尚未載入（`list-commands` 無 `subnet4-update`）；載入後跑 `pnpm test:kea` 重驗（見票 03 Comments）。
