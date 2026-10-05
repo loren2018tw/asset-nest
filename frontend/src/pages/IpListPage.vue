@@ -180,6 +180,17 @@
       </template>
       <template #body-cell-actions="props">
         <q-td :props="props" class="text-right">
+          <!-- 觀測歷史（見票 06）：開啟此位址的事件時間軸與用過的 MAC -->
+          <q-btn
+            flat
+            dense
+            round
+            icon="history"
+            aria-label="觀測歷史"
+            @click="openObservations(props.row)"
+          >
+            <q-tooltip>觀測歷史</q-tooltip>
+          </q-btn>
           <!-- 池內且未指派：不可指派（見 spec §7） -->
           <q-btn
             v-if="props.row.in_pool && !props.row.assignment"
@@ -233,6 +244,12 @@
       :entry="assignmentEntry"
       @saved="onAssignmentSaved"
     />
+
+    <observation-history-dialog
+      v-model="observationOpen"
+      :subnet-id="subnetId"
+      :address="observationEntry?.address"
+    />
   </q-page>
 </template>
 
@@ -259,6 +276,7 @@ import {
   type Subnet
 } from "@/api/subnets";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
+import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { relativeTime } from "@/utils/relativeTime";
 
@@ -296,6 +314,9 @@ const pagination = ref<{
 
 const assignmentOpen = ref(false);
 const assignmentEntry = ref<IpEntry | null>(null);
+/** 觀測歷史對話框（見票 06）：以列位址開啟。 */
+const observationOpen = ref(false);
+const observationEntry = ref<IpEntry | null>(null);
 /** 「立即掃描」進行中（見票 02）。 */
 const sweeping = ref(false);
 /** 「探索掃描」進行中（見票 05）。 */
@@ -545,6 +566,12 @@ function onRequest(request: TableRequest) {
 function openAssignment(entry: IpEntry) {
   assignmentEntry.value = entry;
   assignmentOpen.value = true;
+}
+
+/** 開啟此列的觀測歷史（現況、事件時間軸、用過的 MAC；見票 06）。 */
+function openObservations(entry: IpEntry) {
+  observationEntry.value = entry;
+  observationOpen.value = true;
 }
 
 /** v6 新增位址：無既有列，由對話框輸入位址並即指派。 */

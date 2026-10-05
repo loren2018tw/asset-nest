@@ -14,6 +14,7 @@ mod import;
 mod interfaces;
 mod ips;
 mod kea;
+mod observations;
 mod peer;
 mod subnet_import;
 mod subnets;
@@ -58,6 +59,7 @@ mod v1 {
             .merge(super::subnets::router())
             .merge(super::subnet_import::router())
             .merge(super::ips::router())
+            .merge(super::observations::router())
             .merge(super::peer::router())
     }
 }

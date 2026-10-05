@@ -26,12 +26,94 @@ mod scheduler;
 pub use scheduler::spawn_scheduler;
 
 /// `ip_presence` 現況列（讀取端；見 ADR-0016）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Presence {
     pub last_seen_at: Option<String>,
     pub last_seen_mac: Option<String>,
     pub last_seen_source: Option<String>,
     pub last_checked_at: Option<String>,
+}
+
+/// `observation_event` 一列（歷史端點與 CSV 匯出共用；見票 06）。
+///
+/// `address` 僅供 CSV 匯出使用：IP 歷史端點的路徑已含位址，JSON 回應不重複。
+#[derive(Debug, FromRow, Serialize)]
+pub struct ObservationEvent {
+    pub id: i64,
+    #[serde(skip_serializing)]
+    pub address: String,
+    pub mac: Option<String>,
+    pub kind: String,
+    pub source: String,
+    pub observed_at: String,
+}
+
+/// 觀測 MAC 連結到的資產摘要（已知 MAC 的顯示資訊；見票 06）。
+#[derive(Debug, Clone, Serialize)]
+pub struct MacAsset {
+    pub id: i64,
+    pub description: String,
+    pub location: String,
+    pub property_no: Option<String>,
+}
+
+/// 某位址用過的 MAC 彙總列（IP 歷史回應；見票 06）。
+#[derive(Debug, Serialize)]
+pub struct UsedMac {
+    pub mac: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub source: Option<String>,
+    pub known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<MacAsset>,
+}
+
+/// IP 歷史回應：有效涵蓋＋現況＋事件（新到舊）＋用過的 MAC（見票 06）。
+#[derive(Debug, Serialize)]
+pub struct IpHistory {
+    pub observed: bool,
+    pub presence: Option<Presence>,
+    pub events: Vec<ObservationEvent>,
+    pub macs: Vec<UsedMac>,
+}
+
+/// MAC 歷史中的單一位址 sightings 列：該位址首見、最後可見、來源（見 spec §讀取端）。
+#[derive(Debug, Serialize)]
+pub struct MacSighting {
+    pub address: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub source: Option<String>,
+}
+
+/// MAC 歷史回應：用過哪些位址＋是否已知（含連結資產；見票 06）。
+#[derive(Debug, Serialize)]
+pub struct MacHistory {
+    pub mac: String,
+    pub known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<MacAsset>,
+    pub sightings: Vec<MacSighting>,
+}
+
+/// [`assets_for_macs`] 的查詢列。
+#[derive(Debug, FromRow)]
+struct LinkedMacRow {
+    mac: String,
+    id: i64,
+    description: String,
+    location: String,
+    property_no: Option<String>,
+}
+
+/// [`used_macs`] 的中間訊號：同一 MAC 的首見／最後可見／來源。
+#[derive(Debug)]
+struct MacSignal {
+    mac: String,
+    first_seen_at: String,
+    last_seen_at: String,
+    source: Option<String>,
 }
 
 /// `presence_map` 的查詢列：現況＋所屬位址（map 鍵）。
@@ -102,6 +184,345 @@ pub async fn presence_map(
             )
         })
         .collect())
+}
+
+/// 讀取單一位址的觀測歷史（見票 06、spec §讀取端）：現況、事件（新到舊）與
+/// 用過的 MAC 彙總；`observed` 為該網段的有效涵蓋（比照 IP 清單）。
+///
+/// 彙總規則（MAC 非實體、由事件與現況推導；見 ADR-0016）：
+/// - 相異 MAC＝該位址事件的 MAC ∪ 現況 `last_seen_mac`（事件經保留清理後，
+///   現況仍保留目前 MAC 的痕跡）。
+/// - 首見＝該 MAC 最早的事件時間；無事件時以現況時間為準。
+/// - 最後可見＝該 MAC 最晚的事件時間；若該 MAC 即現況 `last_seen_mac` 且
+///   現況時間不舊於事件，取現況時間（現況是目前狀態、平手時勝出）。
+/// - 來源＝最後可見訊號的來源。
+/// - 已知＝MAC 存在於任一 Interface（不分大小寫）；連結資產取第一筆命中。
+pub async fn ip_history(
+    pool: &SqlitePool,
+    prober: &dyn Prober,
+    subnet: &Subnet,
+    address: &str,
+) -> Result<IpHistory, ApiError> {
+    let events = list_events_for_address(pool, subnet.id, address).await?;
+    let presence = presence_for_address(pool, subnet.id, address).await?;
+    let macs = used_macs(pool, &events, presence.as_ref()).await?;
+    let observed = !subnet.cidr.contains(':') && subnet.observed && prober.is_local(subnet);
+
+    Ok(IpHistory {
+        observed,
+        presence,
+        events,
+        macs,
+    })
+}
+
+/// 讀取某 MAC 的觀測歷史（見票 06、spec §讀取端）：用過的位址與各自
+/// 首見／最後可見／來源，另回傳是否已知與連結資產。
+///
+/// 彙總規則（跨網段；位址不重複出現於多網段，故以位址彙總）：
+/// - 相異位址＝該 MAC 的事件位址 ∪ 現況 `last_seen_mac` 命中的位址
+///   （事件經保留清理後，現況仍保留目前痕跡）。
+/// - 首見＝該位址最早的該 MAC 事件時間；無事件時以現況時間為準。
+/// - 最後可見＝該位址最晚的事件時間；若現況 MAC 相同且現況時間不舊於
+///   事件，取現況時間（現況平手時勝出）。
+/// - 來源＝最後可見訊號的來源。
+///
+/// MAC 比較不分大小寫；`mac` 由呼叫端以 [`crate::probe::normalize_mac`]
+/// 正規化後傳入（無效值於 API 層回 400）。
+pub async fn mac_history(pool: &SqlitePool, mac: &str) -> Result<MacHistory, ApiError> {
+    let normalized = mac.to_ascii_lowercase();
+
+    // 事件舊到新；同秒事件依 id（後寫者為較新）。
+    let events: Vec<ObservationEvent> = sqlx::query_as(
+        "SELECT id, address, mac, kind, source, observed_at
+           FROM observation_event
+          WHERE LOWER(mac) = ?
+          ORDER BY observed_at ASC, id ASC",
+    )
+    .bind(&normalized)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| ApiError::internal("讀取 MAC 觀測事件失敗", error))?;
+
+    let presences: Vec<PresenceAddressRow> = sqlx::query_as(
+        "SELECT address, last_seen_at, last_seen_source
+           FROM ip_presence
+          WHERE LOWER(last_seen_mac) = ?",
+    )
+    .bind(&normalized)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| ApiError::internal("讀取 MAC 觀測現況失敗", error))?;
+
+    let mut sightings: Vec<MacSighting> = Vec::new();
+    for event in &events {
+        match sightings
+            .iter_mut()
+            .find(|sighting| sighting.address == event.address)
+        {
+            Some(sighting) => {
+                sighting.last_seen_at = event.observed_at.clone();
+                sighting.source = Some(event.source.clone());
+            }
+            None => sightings.push(MacSighting {
+                address: event.address.clone(),
+                first_seen_at: event.observed_at.clone(),
+                last_seen_at: event.observed_at.clone(),
+                source: Some(event.source.clone()),
+            }),
+        }
+    }
+
+    for presence in &presences {
+        // 現況只有 last_seen_at 非空時才是「看到」的訊號。
+        let Some(seen_at) = presence.last_seen_at.as_deref() else {
+            continue;
+        };
+        match sightings
+            .iter_mut()
+            .find(|sighting| sighting.address == presence.address)
+        {
+            Some(sighting) => {
+                if seen_at >= sighting.last_seen_at.as_str() {
+                    sighting.last_seen_at = seen_at.to_string();
+                    sighting.source = presence.last_seen_source.clone();
+                }
+            }
+            None => sightings.push(MacSighting {
+                address: presence.address.clone(),
+                first_seen_at: seen_at.to_string(),
+                last_seen_at: seen_at.to_string(),
+                source: presence.last_seen_source.clone(),
+            }),
+        }
+    }
+
+    // 顯示順序：最後可見新到舊；同時間依位址文字。
+    sightings.sort_by(|a, b| {
+        b.last_seen_at
+            .cmp(&a.last_seen_at)
+            .then_with(|| a.address.cmp(&b.address))
+    });
+
+    let asset = assets_for_macs(pool, std::slice::from_ref(&normalized))
+        .await?
+        .remove(&normalized);
+
+    Ok(MacHistory {
+        mac: normalized,
+        known: asset.is_some(),
+        asset,
+        sightings,
+    })
+}
+
+/// 產生單一 IP 觀測歷史匯出 CSV（UTF-8 BOM＋標題列；見票 06、spec §HTTP API）。
+///
+/// 欄位 `address, mac, kind, source, observed_at`；資料列與 IP 歷史端點一致、
+/// 為事件新到舊（時間軸的閱讀順序）。`mac` 缺漏輸出空字串。
+pub fn history_export_csv(events: &[ObservationEvent]) -> Result<Vec<u8>, ApiError> {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    writer
+        .write_record(["address", "mac", "kind", "source", "observed_at"])
+        .map_err(history_write_error)?;
+
+    for event in events {
+        writer
+            .write_record([
+                event.address.as_str(),
+                event.mac.as_deref().unwrap_or(""),
+                event.kind.as_str(),
+                event.source.as_str(),
+                event.observed_at.as_str(),
+            ])
+            .map_err(history_write_error)?;
+    }
+
+    let body = writer
+        .into_inner()
+        .map_err(|error| ApiError::internal("產生觀測歷史 CSV 失敗", error))?;
+    let mut bytes = Vec::with_capacity(body.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
+}
+
+/// CSV 寫入錯誤一律視為內部錯誤（寫入目標為記憶體緩衝區）。
+fn history_write_error(error: csv::Error) -> ApiError {
+    ApiError::internal("產生觀測歷史 CSV 失敗", error)
+}
+
+/// 讀取該位址的事件（新到舊；同秒依 id 後寫者在前）。
+async fn list_events_for_address(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+) -> Result<Vec<ObservationEvent>, ApiError> {
+    sqlx::query_as(
+        "SELECT id, address, mac, kind, source, observed_at
+           FROM observation_event
+          WHERE subnet_id = ? AND address = ?
+          ORDER BY observed_at DESC, id DESC",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| ApiError::internal("讀取觀測事件失敗", error))
+}
+
+/// 讀取該位址的現況列；不存在回 `None`。
+async fn presence_for_address(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+) -> Result<Option<Presence>, ApiError> {
+    let row: Option<PresenceRow> = sqlx::query_as(
+        "SELECT address, last_seen_at, last_seen_mac, last_seen_source, last_checked_at
+           FROM ip_presence
+          WHERE subnet_id = ? AND address = ?",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| ApiError::internal("讀取觀測現況失敗", error))?;
+
+    Ok(row.map(|row| Presence {
+        last_seen_at: row.last_seen_at,
+        last_seen_mac: row.last_seen_mac,
+        last_seen_source: row.last_seen_source,
+        last_checked_at: row.last_checked_at,
+    }))
+}
+
+/// 彙總某位址用過的 MAC（規則見 [`ip_history`]）。
+async fn used_macs(
+    pool: &SqlitePool,
+    events: &[ObservationEvent],
+    presence: Option<&Presence>,
+) -> Result<Vec<UsedMac>, ApiError> {
+    // 事件為新到舊；反轉為舊到新逐筆推進，最後一筆即該 MAC 的最新訊號
+    // （同秒時 id 大者後寫、勝出）。
+    let mut signals: Vec<MacSignal> = Vec::new();
+    for event in events.iter().rev() {
+        let Some(mac) = event.mac.as_deref() else {
+            continue;
+        };
+        let mac = mac.to_ascii_lowercase();
+        match signals.iter_mut().find(|signal| signal.mac == mac) {
+            Some(signal) => {
+                signal.last_seen_at = event.observed_at.clone();
+                signal.source = Some(event.source.clone());
+            }
+            None => signals.push(MacSignal {
+                mac,
+                first_seen_at: event.observed_at.clone(),
+                last_seen_at: event.observed_at.clone(),
+                source: Some(event.source.clone()),
+            }),
+        }
+    }
+
+    // 現況是目前狀態：時間平手時勝出；事件已清理時仍能看到目前 MAC。
+    if let Some(presence) = presence
+        && let (Some(mac), Some(seen_at)) = (
+            presence.last_seen_mac.as_deref(),
+            presence.last_seen_at.as_deref(),
+        )
+    {
+        let mac = mac.to_ascii_lowercase();
+        match signals.iter_mut().find(|signal| signal.mac == mac) {
+            Some(signal) => {
+                if seen_at >= signal.last_seen_at.as_str() {
+                    signal.last_seen_at = seen_at.to_string();
+                    signal.source = presence.last_seen_source.clone();
+                }
+            }
+            None => signals.push(MacSignal {
+                mac,
+                first_seen_at: seen_at.to_string(),
+                last_seen_at: seen_at.to_string(),
+                source: presence.last_seen_source.clone(),
+            }),
+        }
+    }
+
+    let macs: Vec<String> = signals.iter().map(|signal| signal.mac.clone()).collect();
+    let assets = assets_for_macs(pool, &macs).await?;
+
+    let mut used: Vec<UsedMac> = signals
+        .into_iter()
+        .map(|signal| {
+            let asset = assets.get(&signal.mac).cloned();
+            UsedMac {
+                known: asset.is_some(),
+                mac: signal.mac,
+                first_seen_at: signal.first_seen_at,
+                last_seen_at: signal.last_seen_at,
+                source: signal.source,
+                asset,
+            }
+        })
+        .collect();
+
+    // 顯示順序：最後可見新到舊；同時間依 MAC 文字。
+    used.sort_by(|a, b| {
+        b.last_seen_at
+            .cmp(&a.last_seen_at)
+            .then_with(|| a.mac.cmp(&b.mac))
+    });
+    Ok(used)
+}
+
+/// 批次查詢 MAC 對應的資產（不分大小寫；同一 MAC 多筆介面取 id 最小者）。
+///
+/// 回傳以正規化小寫 MAC 為鍵；未命中（未知 MAC）者不在 map 中。
+async fn assets_for_macs(
+    pool: &SqlitePool,
+    macs: &[String],
+) -> Result<HashMap<String, MacAsset>, ApiError> {
+    if macs.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT LOWER(i.mac) AS mac, i.asset_id AS id, a.description, a.location, a.property_no
+           FROM interfaces i
+           JOIN assets a ON a.id = i.asset_id
+          WHERE LOWER(i.mac) IN (",
+    );
+    let mut separated = builder.separated(", ");
+    for mac in macs {
+        separated.push_bind(mac.to_ascii_lowercase());
+    }
+    builder.push(") ORDER BY i.id ASC");
+
+    let rows: Vec<LinkedMacRow> = builder
+        .build_query_as()
+        .fetch_all(pool)
+        .await
+        .map_err(|error| ApiError::internal("讀取 MAC 對應資產失敗", error))?;
+
+    let mut assets = HashMap::new();
+    for row in rows {
+        // `ORDER BY i.id ASC`：同 MAC 多筆介面時第一筆勝出。
+        assets.entry(row.mac).or_insert(MacAsset {
+            id: row.id,
+            description: row.description,
+            location: row.location,
+            property_no: row.property_no,
+        });
+    }
+    Ok(assets)
+}
+
+/// [`mac_history`] 的現況查詢列。
+#[derive(Debug, FromRow)]
+struct PresenceAddressRow {
+    address: String,
+    last_seen_at: Option<String>,
+    last_seen_source: Option<String>,
 }
 
 /// 快速掃描：探測該網段的已指派位址與 Kea 目前有效租約位址，更新現況並依
