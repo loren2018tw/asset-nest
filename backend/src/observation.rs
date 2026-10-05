@@ -7,14 +7,16 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use ipnet::Ipv4Net;
 use serde::Serialize;
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 use crate::api::ApiError;
 use crate::assignments;
+use crate::ips::HostRange;
 use crate::kea::http::{Client as KeaClient, KeaLease};
 use crate::probe::{Mac, Prober};
 use crate::subnets::Subnet;
@@ -59,8 +61,11 @@ pub struct SweepReport {
     pub targets: u64,
     /// 本輪有證據（ARP 回應或有效租約）的相異目標位址數。
     pub seen: u64,
-    /// 掃描耗時（毫秒；含探測回覆窗與寫入）。
+    /// 掃描耗時（毫秒；含探測回覆窗、限速等待與寫入）。
     pub duration_ms: u64,
+    /// 僅探索掃描回傳：本次寫入的 `subnets.last_discovery_at`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_discovery_at: Option<String>,
 }
 
 /// 資料庫時間格式：`YYYY-MM-DDTHH:MM:SSZ`（UTC；見 spec §資料庫）。
@@ -164,7 +169,121 @@ pub async fn run_quick(
         targets: targets.len() as u64,
         seen: seen.len() as u64,
         duration_ms: started.elapsed().as_millis() as u64,
+        last_discovery_at: None,
     })
+}
+
+/// 探索掃描：對該網段全部 host 位址限速探測（見票 05、spec §掃描服務）。
+///
+/// - 前提：`observed` ＋ `discovery_enabled` ＋ v4 ＋ `prober.is_local`；
+///   否則回 400 驗證錯誤（呼叫端仍為權威，見 ADR-0006）。
+/// - 目標＝該網段 CIDR 的全部 host 位址（沿用 [`HostRange`]）；以
+///   `rate_pps` 分批探測、批與批之間等待 1 秒（最後一批不等待、單一批次
+///   不睡眠），上限為每秒 `rate_pps` 個請求。
+/// - 寫入語意同 [`run_quick`]（Kea 租約先寫、ARP 後寫，latest-wins），另：
+///   - 僅**已指派**目標（含未回應者）upsert `last_checked_at`；
+///     未指派且未回應者不得建立 `ip_presence` 列。
+///   - 成功後更新 `subnets.last_discovery_at = now`，回報帶同一時間。
+pub async fn run_discovery(
+    pool: &SqlitePool,
+    prober: Arc<dyn Prober + Send + Sync>,
+    kea: Option<&KeaClient>,
+    subnet: &Subnet,
+    rate_pps: u32,
+    now: DateTime<Utc>,
+) -> Result<SweepReport, ApiError> {
+    validate_discovery(subnet, prober.as_ref())?;
+
+    let started = Instant::now();
+    let network: Ipv4Net = subnet
+        .cidr
+        .parse()
+        .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))?;
+    let targets: Vec<Ipv4Addr> = HostRange::of(&network).iter().collect();
+    // 只有已指派位址會被 upsert `last_checked_at`；未指派未回應者不建列。
+    let checked_targets = assigned_targets(pool, subnet).await?;
+    let lease_signals = lease_signals(kea, subnet).await;
+
+    let responses = probe_rate_limited(prober, subnet, &targets, rate_pps).await?;
+
+    apply_results(
+        pool,
+        subnet.id,
+        &checked_targets,
+        &responses,
+        &lease_signals,
+        now,
+    )
+    .await?;
+
+    let last_discovery_at = timestamp(now);
+    touch_last_discovery(pool, subnet.id, &last_discovery_at).await?;
+
+    // seen＝本輪有證據的相異位址（ARP 回應或有效租約）。
+    let mut seen: HashSet<Ipv4Addr> = responses
+        .iter()
+        .map(|(address, _)| *address)
+        .filter(|address| targets.contains(address))
+        .collect();
+    seen.extend(
+        lease_signals
+            .iter()
+            .filter(|signal| signal.observed_at.is_some())
+            .map(|signal| signal.address),
+    );
+
+    Ok(SweepReport {
+        mode: "discovery",
+        targets: targets.len() as u64,
+        seen: seen.len() as u64,
+        duration_ms: started.elapsed().as_millis() as u64,
+        last_discovery_at: Some(last_discovery_at),
+    })
+}
+
+/// 依 `rate_pps` 分批探測：每批最多 `rate_pps` 個目標，批與批之間等待
+/// 1 秒；最後一批（含單一批次）不再等待。
+async fn probe_rate_limited(
+    prober: Arc<dyn Prober + Send + Sync>,
+    subnet: &Subnet,
+    targets: &[Ipv4Addr],
+    rate_pps: u32,
+) -> Result<Vec<(Ipv4Addr, Mac)>, ApiError> {
+    let batch_size = rate_pps.max(1) as usize;
+    let batch_count = targets.len().div_ceil(batch_size);
+    let mut responses = Vec::with_capacity(targets.len());
+
+    for (index, batch) in targets.chunks(batch_size).enumerate() {
+        let probe_prober = Arc::clone(&prober);
+        let probe_subnet = subnet.clone();
+        let batch_targets = batch.to_vec();
+        let mut batch_responses =
+            tokio::task::spawn_blocking(move || probe_prober.probe(&probe_subnet, &batch_targets))
+                .await
+                .map_err(|error| ApiError::internal("探索掃描工作失敗", error))?;
+        responses.append(&mut batch_responses);
+
+        if index + 1 < batch_count {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    Ok(responses)
+}
+
+/// 更新網段的上次探索時間（僅成功路徑；排程失敗不更新，見票 05）。
+async fn touch_last_discovery(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    observed_at: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE subnets SET last_discovery_at = ? WHERE id = ?")
+        .bind(observed_at)
+        .bind(subnet_id)
+        .execute(pool)
+        .await
+        .map_err(|error| ApiError::internal("更新上次探索時間失敗", error))?;
+    Ok(())
 }
 
 /// 保留清理：刪除早於保留期的 `observation_event`，回傳刪除筆數（見票 04、
@@ -199,6 +318,23 @@ fn validate_quick(subnet: &Subnet, prober: &dyn Prober) -> Result<(), ApiError> 
     }
     if !subnet.observed {
         return Err(ApiError::validation("此網段未開啟觀測").field("observed"));
+    }
+    if !prober.is_local(subnet) {
+        return Err(ApiError::validation("本機與此網段非同 L2，無法觀測").field("local"));
+    }
+    Ok(())
+}
+
+/// 探索掃描前提：v4、已開觀測、已開探索、本機同 L2（見票 05）。
+fn validate_discovery(subnet: &Subnet, prober: &dyn Prober) -> Result<(), ApiError> {
+    if subnet.cidr.contains(':') {
+        return Err(ApiError::validation("IPv6 網段不支援觀測").field("observed"));
+    }
+    if !subnet.observed {
+        return Err(ApiError::validation("此網段未開啟觀測").field("observed"));
+    }
+    if !subnet.discovery_enabled {
+        return Err(ApiError::validation("此網段未開啟探索掃描").field("discovery_enabled"));
     }
     if !prober.is_local(subnet) {
         return Err(ApiError::validation("本機與此網段非同 L2，無法觀測").field("local"));
@@ -287,12 +423,16 @@ async fn assigned_targets(pool: &SqlitePool, subnet: &Subnet) -> Result<Vec<Ipv4
     Ok(targets)
 }
 
-/// 套用一次掃描的結果：所有目標更新 `last_checked_at`；租約先寫（其時間可能
-/// 較舊），ARP 回應後寫，讓同秒時的直接觀測（`arp`）勝出；同一交易。
+/// 套用一次掃描的結果：`checked_targets` 更新 `last_checked_at`；租約先寫
+/// （其時間可能較舊），ARP 回應後寫，讓同秒時的直接觀測（`arp`）勝出；
+/// 同一交易。
+///
+/// 快速掃描傳入全部目標（含僅有租約者）；探索掃描只傳已指派目標，
+/// 未指派未回應者因此不建立現況列（見票 05）。
 async fn apply_results(
     pool: &SqlitePool,
     subnet_id: i64,
-    targets: &[Ipv4Addr],
+    checked_targets: &[Ipv4Addr],
     responses: &[(Ipv4Addr, Mac)],
     lease_signals: &[LeaseSignal],
     now: DateTime<Utc>,
@@ -303,7 +443,7 @@ async fn apply_results(
         .await
         .map_err(|error| ApiError::internal("建立掃描交易失敗", error))?;
 
-    for target in targets {
+    for target in checked_targets {
         upsert_checked(&mut transaction, subnet_id, &target.to_string(), &now_text)
             .await
             .map_err(|error| ApiError::internal("更新現況檢查時間失敗", error))?;

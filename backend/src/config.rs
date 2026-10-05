@@ -9,6 +9,10 @@ use crate::probe::ProbeMode;
 
 /// `OBSERVATION_RETENTION_DAYS` 的預設值（一年；見 ADR-0016）。
 const DEFAULT_RETENTION_DAYS: u32 = 365;
+/// `OBSERVATION_DISCOVERY_INTERVAL_SECS` 的預設值（每日；見票 05、spec §環境設定）。
+const DEFAULT_DISCOVERY_INTERVAL_SECS: u64 = 86_400;
+/// `OBSERVATION_DISCOVERY_RATE_PPS` 的預設值（見票 05、spec §環境設定）。
+const DEFAULT_DISCOVERY_RATE_PPS: u32 = 1_000;
 
 /// 後端啟動設定（見 `.env.example`）。
 #[derive(Debug, Clone)]
@@ -31,6 +35,12 @@ pub struct Config {
     /// 觀測事件保留天數；`OBSERVATION_RETENTION_DAYS`（正整數，預設 365；
     /// 見 `docs/adr/0016`）。僅影響事件歷史，不動 `ip_presence` 現況。
     pub observation_retention_days: u32,
+    /// 探索掃描全站預設間隔秒數；`OBSERVATION_DISCOVERY_INTERVAL_SECS`
+    /// （正整數，預設 86400；網段可用 `discovery_interval_minutes` 覆寫）。
+    pub observation_discovery_interval_secs: u64,
+    /// 探索掃描每秒最多送出的探測數；`OBSERVATION_DISCOVERY_RATE_PPS`
+    /// （正整數，預設 1000）。
+    pub observation_discovery_rate_pps: u32,
 }
 
 impl Config {
@@ -72,6 +82,17 @@ impl Config {
             Err(_) => DEFAULT_RETENTION_DAYS,
         };
 
+        let observation_discovery_interval_secs =
+            match std::env::var("OBSERVATION_DISCOVERY_INTERVAL_SECS") {
+                Ok(raw) => parse_discovery_interval_secs(&raw)?,
+                Err(_) => DEFAULT_DISCOVERY_INTERVAL_SECS,
+            };
+
+        let observation_discovery_rate_pps = match std::env::var("OBSERVATION_DISCOVERY_RATE_PPS") {
+            Ok(raw) => parse_discovery_rate_pps(&raw)?,
+            Err(_) => DEFAULT_DISCOVERY_RATE_PPS,
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -81,6 +102,8 @@ impl Config {
             kea_api_password,
             observation_probe_mode,
             observation_retention_days,
+            observation_discovery_interval_secs,
+            observation_discovery_rate_pps,
         })
     }
 }
@@ -94,6 +117,30 @@ fn parse_retention_days(raw: &str) -> anyhow::Result<u32> {
         anyhow::bail!("OBSERVATION_RETENTION_DAYS 須為正整數天數（收到 0）");
     }
     Ok(days)
+}
+
+/// 解析 `OBSERVATION_DISCOVERY_INTERVAL_SECS`：須為正整數秒，缺值由呼叫端套用預設。
+fn parse_discovery_interval_secs(raw: &str) -> anyhow::Result<u64> {
+    let seconds: u64 = raw.trim().parse().map_err(|_| {
+        anyhow::anyhow!(
+            "OBSERVATION_DISCOVERY_INTERVAL_SECS 格式錯誤：{raw}（須為正整數秒數，例：86400）"
+        )
+    })?;
+    if seconds == 0 {
+        anyhow::bail!("OBSERVATION_DISCOVERY_INTERVAL_SECS 須為正整數秒數（收到 0）");
+    }
+    Ok(seconds)
+}
+
+/// 解析 `OBSERVATION_DISCOVERY_RATE_PPS`：須為正整數（每秒探測數），缺值由呼叫端套用預設。
+fn parse_discovery_rate_pps(raw: &str) -> anyhow::Result<u32> {
+    let rate: u32 = raw.trim().parse().map_err(|_| {
+        anyhow::anyhow!("OBSERVATION_DISCOVERY_RATE_PPS 格式錯誤：{raw}（須為正整數，例：1000）")
+    })?;
+    if rate == 0 {
+        anyhow::bail!("OBSERVATION_DISCOVERY_RATE_PPS 須為正整數（收到 0）");
+    }
+    Ok(rate)
 }
 
 #[cfg(test)]
@@ -124,5 +171,41 @@ mod tests {
     #[test]
     fn retention_days_default_is_one_year() {
         assert_eq!(DEFAULT_RETENTION_DAYS, 365);
+    }
+
+    #[test]
+    fn discovery_settings_accept_positive_integers_and_reject_invalid() {
+        assert_eq!(
+            parse_discovery_interval_secs("86400").expect("合法秒數"),
+            86_400
+        );
+        assert_eq!(parse_discovery_interval_secs(" 60 ").expect("容許空白"), 60);
+        for invalid in ["0", "-1", "abc", "1.5", ""] {
+            let error = parse_discovery_interval_secs(invalid)
+                .expect_err(&format!("應拒絕 {invalid:?}"))
+                .to_string();
+            assert!(
+                error.contains("OBSERVATION_DISCOVERY_INTERVAL_SECS"),
+                "錯誤訊息須指明變數（{invalid:?}）：{error}"
+            );
+        }
+
+        assert_eq!(parse_discovery_rate_pps("1000").expect("合法速率"), 1_000);
+        assert_eq!(parse_discovery_rate_pps(" 1 ").expect("容許空白"), 1);
+        for invalid in ["0", "-1", "abc", "1.5", ""] {
+            let error = parse_discovery_rate_pps(invalid)
+                .expect_err(&format!("應拒絕 {invalid:?}"))
+                .to_string();
+            assert!(
+                error.contains("OBSERVATION_DISCOVERY_RATE_PPS"),
+                "錯誤訊息須指明變數（{invalid:?}）：{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_defaults_are_daily_and_1000_pps() {
+        assert_eq!(DEFAULT_DISCOVERY_INTERVAL_SECS, 86_400);
+        assert_eq!(DEFAULT_DISCOVERY_RATE_PPS, 1_000);
     }
 }

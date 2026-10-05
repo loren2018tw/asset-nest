@@ -42,9 +42,11 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("無法綁定 {}", config.bind_addr))?;
     tracing::info!("asset-nest 後端：http://{}", listener.local_addr()?);
 
-    let mut state = AppState::new(pool, config.web_dist_dir.clone()).with_prober(Arc::new(
-        SystemProber::with_mode(config.observation_probe_mode),
-    ));
+    let mut state = AppState::new(pool, config.web_dist_dir.clone())
+        .with_prober(Arc::new(SystemProber::with_mode(
+            config.observation_probe_mode,
+        )))
+        .with_discovery_rate_pps(config.observation_discovery_rate_pps);
     if let Some(url) = config.kea_api_url.clone() {
         let mut client = kea::http::Client::new(url);
         if let Some(username) = config.kea_api_username.clone() {
@@ -54,8 +56,13 @@ async fn main() -> anyhow::Result<()> {
         state = state.with_kea(client);
     }
 
-    // 背景排程：快速掃描（每網段 15 分鐘）與事件保留清理（啟動＋每日；見票 04）
-    let scheduler = observation::spawn_scheduler(state.clone(), config.observation_retention_days);
+    // 背景排程：快速掃描（每網段 15 分鐘）／探索掃描（網段或全站間隔）
+    // 與事件保留清理（啟動＋每日；見票 04、票 05）
+    let scheduler = observation::spawn_scheduler(
+        state.clone(),
+        config.observation_retention_days,
+        config.observation_discovery_interval_secs,
+    );
 
     // 帶入連線來源資訊，供 `/api/v1/peer-mac` 反查 ARP（見票 09）
     let served = serve(

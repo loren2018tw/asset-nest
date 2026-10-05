@@ -38,6 +38,9 @@ pub struct AppState {
     pub kea: Option<kea::http::Client>,
     /// 觀測探測邊界；測試以 [`AppState::with_prober`] 注入 stub（見 ADR-0015）。
     pub prober: Arc<dyn Prober + Send + Sync>,
+    /// 探索掃描每秒最多送出的探測數（`OBSERVATION_DISCOVERY_RATE_PPS`；
+    /// 手動探索路徑用，預設 1000；見票 05）。
+    pub discovery_rate_pps: u32,
 }
 
 impl AppState {
@@ -47,6 +50,7 @@ impl AppState {
             web_dist_dir: web_dist_dir.into(),
             kea: None,
             prober: Arc::new(SystemProber::new()),
+            discovery_rate_pps: 1_000,
         }
     }
 
@@ -59,6 +63,12 @@ impl AppState {
     /// 附掛探測邊界（整合測試注入 stub 用；正式啟動維持預設 [`SystemProber`]）。
     pub fn with_prober(mut self, prober: Arc<dyn Prober + Send + Sync>) -> Self {
         self.prober = prober;
+        self
+    }
+
+    /// 設定探索掃描速率上限（正式啟動帶入設定；測試可覆寫，見票 05）。
+    pub fn with_discovery_rate_pps(mut self, rate_pps: u32) -> Self {
+        self.discovery_rate_pps = rate_pps;
         self
     }
 }

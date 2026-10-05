@@ -163,16 +163,18 @@ async fn delete_subnet(
     }
 }
 
-/// 掃描輸入；`mode` 目前僅支援 `quick`（`discovery` 為票 05）。
+/// 掃描輸入；`mode` 支援 `quick`（快速）與 `discovery`（探索；見票 05）。
 #[derive(Debug, Deserialize)]
 struct SweepInput {
     mode: Option<String>,
 }
 
-/// `POST /subnets/{id}/sweeps`：同步執行掃描並回摘要（見票 02、spec §HTTP API）。
+/// `POST /subnets/{id}/sweeps`：同步執行掃描並回摘要（見票 02、票 05、
+/// spec §HTTP API）。
 ///
-/// 前提由 [`observation::run_quick`] 驗證：v4、已開觀測、本機同 L2，
-/// 否則回 400 明確訊息；未知模式與尚未實作的 `discovery` 亦回 400。
+/// 前提由服務驗證：v4、已開觀測、本機同 L2（`discovery` 另需已開探索），
+/// 否則回 400 明確訊息；未知模式亦回 400。探索速率上限取自
+/// `state.discovery_rate_pps`（`OBSERVATION_DISCOVERY_RATE_PPS`）。
 async fn sweep_subnet(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
@@ -181,19 +183,17 @@ async fn sweep_subnet(
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
     let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
 
-    match input.mode.as_deref().map(str::trim).unwrap_or_default() {
-        "quick" => {}
-        "discovery" => {
-            return Err(ApiError::validation("探索掃描尚未支援（見票 05）").field("mode"));
-        }
+    let mode = input.mode.as_deref().map(str::trim).unwrap_or_default();
+    match mode {
+        "quick" | "discovery" => {}
         "" => {
-            return Err(ApiError::validation("mode 為必填（目前僅支援 quick）").field("mode"));
+            return Err(ApiError::validation("mode 為必填（quick／discovery）").field("mode"));
         }
         other => {
-            return Err(
-                ApiError::validation(format!("不支援的掃描模式：{other}（僅支援 quick）"))
-                    .field("mode"),
-            );
+            return Err(ApiError::validation(format!(
+                "不支援的掃描模式：{other}（僅支援 quick／discovery）"
+            ))
+            .field("mode"));
         }
     }
 
@@ -202,13 +202,28 @@ async fn sweep_subnet(
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到網段"))?;
 
-    let report = observation::run_quick(
-        &state.db,
-        state.prober.clone(),
-        state.kea.as_ref(),
-        &subnet,
-        Utc::now(),
-    )
-    .await?;
+    let report = match mode {
+        "quick" => {
+            observation::run_quick(
+                &state.db,
+                state.prober.clone(),
+                state.kea.as_ref(),
+                &subnet,
+                Utc::now(),
+            )
+            .await?
+        }
+        _ => {
+            observation::run_discovery(
+                &state.db,
+                state.prober.clone(),
+                state.kea.as_ref(),
+                &subnet,
+                state.discovery_rate_pps,
+                Utc::now(),
+            )
+            .await?
+        }
+    };
     Ok(Json(report))
 }

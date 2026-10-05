@@ -46,7 +46,8 @@
           @update:model-value="reload"
         />
       </div>
-      <!-- 立即快速掃描（見票 02）；v6 無觀測，v4 未開觀測／非同 L2 時停用 -->
+      <!-- 立即快速掃描（見票 02）；v6 無觀測，v4 未開觀測／非同 L2 時停用。
+           探索掃描開啟時另提供「探索掃描」（見票 05）。 -->
       <div v-if="!isV6" class="col-12 col-sm-6 col-md-3 text-right">
         <span>
           <q-btn
@@ -57,6 +58,20 @@
             :loading="sweeping"
             :disable="sweepDisabledReason !== null"
             @click="runQuickSweep"
+          />
+          <q-tooltip v-if="sweepDisabledReason">{{
+            sweepDisabledReason
+          }}</q-tooltip>
+        </span>
+        <span v-if="subnet?.discovery_enabled" class="q-ml-sm">
+          <q-btn
+            color="primary"
+            outline
+            icon="travel_explore"
+            label="探索掃描"
+            :loading="discovering"
+            :disable="sweepDisabledReason !== null"
+            @click="runDiscoverySweep"
           />
           <q-tooltip v-if="sweepDisabledReason">{{
             sweepDisabledReason
@@ -237,7 +252,12 @@ import {
   type IpSortField,
   type IpStatus
 } from "@/api/ips";
-import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
+import {
+  fetchSubnet,
+  discoverySweep,
+  type AddressFamily,
+  type Subnet
+} from "@/api/subnets";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { relativeTime } from "@/utils/relativeTime";
@@ -278,6 +298,8 @@ const assignmentOpen = ref(false);
 const assignmentEntry = ref<IpEntry | null>(null);
 /** 「立即掃描」進行中（見票 02）。 */
 const sweeping = ref(false);
+/** 「探索掃描」進行中（見票 05）。 */
+const discovering = ref(false);
 
 /** v6 為登錄制（見票 06）：僅列登錄位址、用途固定 static、無 pool。 */
 const isV6 = computed(() => subnet.value?.cidr.includes(":") ?? false);
@@ -549,6 +571,29 @@ async function runQuickSweep() {
     $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
     sweeping.value = false;
+  }
+}
+
+/** 立即探索掃描：整段限速探測、回報結果後重載清單（見票 05）。 */
+async function runDiscoverySweep() {
+  discovering.value = true;
+  try {
+    const report = await discoverySweep(subnetId);
+    $q.notify({
+      type: "positive",
+      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
+    });
+    if (subnet.value !== null && report.last_discovery_at !== undefined) {
+      subnet.value = {
+        ...subnet.value,
+        last_discovery_at: report.last_discovery_at
+      };
+    }
+    await fetchIps();
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    discovering.value = false;
   }
 }
 

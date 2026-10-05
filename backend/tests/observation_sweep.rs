@@ -416,10 +416,11 @@ async fn sweep_rejects_unknown_mode_v6_unobserved_and_non_local() {
     let subnet = create_subnet(&state, json!({ "cidr": "10.0.0.0/29" })).await;
     let id = subnet["id"].as_i64().expect("回應含 id");
 
-    // 未知模式與未實作的 discovery → 400（mode 先於網段前提驗證）。
+    // 未知模式與缺漏 mode → 400（mode 先於網段前提驗證）；
+    // discovery 已於票 05 實作，此處未開觀測 → 400「未開啟觀測」。
     for (body, fragment) in [
         (json!({ "mode": "nope" }), "模式"),
-        (json!({ "mode": "discovery" }), "探索"),
+        (json!({ "mode": "discovery" }), "觀測"),
         (json!({}), "mode"),
     ] {
         let (status, json) = send(
@@ -622,6 +623,9 @@ async fn system_prober_probes_live_lan_read_only() {
         gateway: None,
         kea_subnet_id: None,
         observed: true,
+        discovery_enabled: false,
+        discovery_interval_minutes: None,
+        last_discovery_at: None,
         pools: Vec::new(),
         created_at: String::new(),
         updated_at: String::new(),

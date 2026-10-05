@@ -164,12 +164,51 @@
           >
             v1 無法觀測（本機非同 L2）
           </q-banner>
-          <div
-            v-else-if="form.observed"
-            class="text-caption text-positive q-mt-xs"
-          >
-            本機與該網段同 L2，可觀測。
-          </div>
+          <template v-else-if="form.observed">
+            <div class="text-caption text-positive q-mt-xs">
+              本機與該網段同 L2，可觀測。
+            </div>
+
+            <q-separator class="q-my-md" />
+            <div class="text-subtitle2 q-mb-sm"> 探索掃描（尋找未知設備） </div>
+            <q-toggle v-model="form.discovery_enabled" label="開啟探索掃描" />
+            <div class="text-caption text-grey-7 q-mt-xs">
+              定期限速探測網段全部位址，找出未指派但有主的位址與未登錄 MAC。
+            </div>
+
+            <q-input
+              v-if="form.discovery_enabled"
+              v-model="form.discovery_interval"
+              outlined
+              dense
+              type="number"
+              label="探索間隔（分鐘）"
+              class="q-mt-sm"
+              :rules="[discoveryIntervalRule]"
+              lazy-rules
+              hint="留空＝使用全站預設（OBSERVATION_DISCOVERY_INTERVAL_SECS）"
+            />
+
+            <div class="row items-center q-mt-sm">
+              <div class="text-caption text-grey-7">
+                上次探索：{{ lastDiscoveryLabel }}
+              </div>
+              <q-space />
+              <q-btn
+                color="primary"
+                outline
+                dense
+                icon="travel_explore"
+                label="立即探索"
+                :loading="sweeping"
+                :disable="!form.discovery_enabled"
+                @click="runDiscovery"
+              />
+            </div>
+            <div class="text-caption text-grey-6 q-mt-xs">
+              立即探索依已儲存的設定執行；未儲存的變更請先按「儲存」。
+            </div>
+          </template>
           <div v-else class="text-caption text-grey-7 q-mt-xs">
             開啟後將定期探測已指派與有租約位址；v1 僅支援本機同 L2 的 IPv4
             網段。
@@ -186,10 +225,12 @@
 </template>
 
 <script setup lang="ts">
+import { useQuasar } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import {
   createSubnet,
+  discoverySweep,
   fetchSubnet,
   updateSubnet,
   type AddressFamily,
@@ -203,6 +244,9 @@ import {
   parseCidr,
   type ParsedCidr
 } from "@/utils/cidr";
+import { relativeTime } from "@/utils/relativeTime";
+
+const $q = useQuasar();
 
 const props = defineProps<{
   modelValue: boolean;
@@ -224,6 +268,9 @@ interface FormState {
   kea_subnet_id: string;
   note: string;
   observed: boolean;
+  discovery_enabled: boolean;
+  /** 探索間隔（分鐘）；空字串＝全站預設（見票 05）。 */
+  discovery_interval: string;
 }
 
 /** 對話框中的 pool 編輯列。 */
@@ -240,7 +287,9 @@ function emptyForm(): FormState {
     gateway: "",
     kea_subnet_id: "",
     note: "",
-    observed: false
+    observed: false,
+    discovery_enabled: false,
+    discovery_interval: ""
   };
 }
 
@@ -248,8 +297,12 @@ const form = ref<FormState>(emptyForm());
 const pools = ref<PoolDraft[]>([]);
 /** 本機是否與該網段同 L2（由詳情載入；見 ADR-0015）。 */
 const local = ref(false);
+/** 上次探索時間（UTC；由詳情載入，立即探索後更新；見票 05）。 */
+const lastDiscoveryAt = ref<string | null>(null);
 const saving = ref(false);
 const loading = ref(false);
+/** 「立即探索」進行中（見票 05）。 */
+const sweeping = ref(false);
 const errorMessage = ref("");
 
 /** 供載入詳情丟棄過期回應。 */
@@ -266,6 +319,15 @@ const open = computed({
 const family = computed<AddressFamily>(() =>
   form.value.cidr.includes(":") ? "ipv6" : "ipv4"
 );
+
+/** 上次探索的顯示文字（相對時間；從未探索為「尚未探索」；見票 05）。 */
+const lastDiscoveryLabel = computed(() => {
+  if (lastDiscoveryAt.value === null) {
+    return "尚未探索";
+  }
+  const label = relativeTime(lastDiscoveryAt.value);
+  return label === "剛看到" ? "剛剛" : label;
+});
 
 /** 表單內容的即時結構問題（見 spec §4.2）；後端仍為權威。 */
 interface LiveIssue {
@@ -419,6 +481,8 @@ async function prepare() {
   form.value = emptyForm();
   pools.value = [];
   local.value = false;
+  lastDiscoveryAt.value = null;
+  sweeping.value = false;
   loading.value = false;
 
   if (props.subnet === null) {
@@ -431,7 +495,9 @@ async function prepare() {
     gateway: "",
     kea_subnet_id: "",
     note: "",
-    observed: props.subnet.observed
+    observed: props.subnet.observed,
+    discovery_enabled: false,
+    discovery_interval: ""
   };
   local.value = props.subnet.local;
 
@@ -448,9 +514,15 @@ async function prepare() {
       kea_subnet_id:
         detail.kea_subnet_id === null ? "" : String(detail.kea_subnet_id),
       note: detail.note ?? "",
-      observed: detail.observed
+      observed: detail.observed,
+      discovery_enabled: detail.discovery_enabled,
+      discovery_interval:
+        detail.discovery_interval_minutes === null
+          ? ""
+          : String(detail.discovery_interval_minutes)
     };
     local.value = detail.local;
+    lastDiscoveryAt.value = detail.last_discovery_at;
     pools.value = detail.pools.map(pool => ({
       key: ++poolKey,
       start_ip: pool.start_ip,
@@ -491,6 +563,19 @@ function keaSubnetIdRule(value: string | null) {
   return Number.isInteger(Number(text)) || "Kea subnet-id 須為整數";
 }
 
+/** 探索間隔：留空＝全站預設；否則須為正整數分鐘（見票 05）。 */
+function discoveryIntervalRule(value: string | null) {
+  const text = (value ?? "").trim();
+  if (text === "") {
+    return true;
+  }
+  const minutes = Number(text);
+  return (
+    (Number.isInteger(minutes) && minutes > 0) ||
+    "探索間隔須為正整數分鐘（留空＝全站預設）"
+  );
+}
+
 function poolAddressRule(label: string) {
   return (value: string | null) =>
     (value ?? "").trim() !== "" || `${label}為必填`;
@@ -508,6 +593,9 @@ function messageOf(cause: unknown): string {
 function toInput(): SubnetInput {
   const kea = form.value.kea_subnet_id.trim();
   const isV4 = family.value === "ipv4";
+  const isExisting = props.subnet !== null;
+  const observed = isV4 && isExisting ? form.value.observed : false;
+  const interval = form.value.discovery_interval.trim();
 
   return {
     cidr: form.value.cidr.trim(),
@@ -516,7 +604,10 @@ function toInput(): SubnetInput {
     gateway: textOrNull(form.value.gateway),
     kea_subnet_id: isV4 && kea !== "" ? Number(kea) : null,
     // 新增時後端一律預設關閉；v6 不得開啟（見票 01）。
-    observed: isV4 && props.subnet !== null ? form.value.observed : false,
+    observed,
+    // 關閉觀測時一併關閉探索（後端要求探索需已開觀測，見票 05）。
+    discovery_enabled: observed && form.value.discovery_enabled,
+    discovery_interval_minutes: interval === "" ? null : Number(interval),
     pools: isV4
       ? pools.value.map(row => ({
           start_ip: row.start_ip.trim(),
@@ -524,6 +615,27 @@ function toInput(): SubnetInput {
         }))
       : []
   };
+}
+
+/** 立即探索：同步執行並更新上次探索時間（依已儲存的設定；見票 05）。 */
+async function runDiscovery() {
+  if (props.subnet === null) {
+    return;
+  }
+
+  sweeping.value = true;
+  try {
+    const report = await discoverySweep(props.subnet.id);
+    lastDiscoveryAt.value = report.last_discovery_at ?? lastDiscoveryAt.value;
+    $q.notify({
+      type: "positive",
+      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
+    });
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    sweeping.value = false;
+  }
 }
 
 async function submit() {
