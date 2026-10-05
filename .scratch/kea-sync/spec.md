@@ -13,6 +13,7 @@
 - 僅 IPv4、僅「保留（reservation）」用途；static 不經 Kea。
 - 不做雙向同步、不做租約讀取（後續階段）。
 - 同步狀態不落庫；失敗即時警示，修復靠完整同步。
+- 網段層設定（pool、gateway）同步為後續延伸，見 `.scratch/kea-subnet-sync/spec.md`（ADR-0013）。
 
 ## 後端
 
