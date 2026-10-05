@@ -1,5 +1,5 @@
-//! Kea 真機連線測試：對 `KEA_API_URL` 送 `version-get` 與保留 roundtrip
-//!（見 `docs/adr/0010`、`docs/adr/0011`）。
+//! Kea 真機連線測試：對 `KEA_API_URL` 送 `version-get`、狀態唯讀命令與保留
+//! roundtrip（見 `docs/adr/0010`、`docs/adr/0011`）。
 //!
 //! 預設忽略（需真機伺服器）；執行：`pnpm test:kea`。
 //! roundtrip 會新增後刪除同一筆測試保留（不呼叫 config-write，不留持久變更）。
@@ -115,4 +115,34 @@ async fn reservation_roundtrip_against_live_server() {
     );
 
     println!("Kea 保留 roundtrip 成功：subnet-id {subnet_id}、測試位址 {test_ip}");
+}
+
+/// 唯讀實測系統狀態相關命令：`version-get`、`config-get`（interfaces／subnet4）
+/// 與 `status-get`；印出實測欄位供定案（見 `.scratch/kea-pages/spec.md`）。
+/// 只呼叫讀取命令，不 `config-write`、不留任何變更。
+#[tokio::test]
+#[ignore = "需要真機 Kea（KEA_API_URL）"]
+async fn status_commands_against_live_server() {
+    dotenvy::dotenv().ok();
+
+    let config = Config::from_env().expect("讀取環境設定失敗");
+    let (client, url) = live_client(&config);
+
+    println!("顯示用連線位址（base_url）：{}", client.base_url());
+
+    let version = client.version_get().await.expect("version-get 失敗");
+    println!(
+        "version-get：version={:?}、text={:?}",
+        version.version, version.text
+    );
+
+    let dhcp4 = client.config_get_dhcp4().await.expect("config-get 失敗");
+    println!("config-get 監聽介面：{:?}", dhcp4.interfaces);
+    println!("config-get 租約庫類型：{:?}", dhcp4.lease_backend);
+    println!("config-get 網段：{:?}", dhcp4.subnets);
+
+    let status = client.status_get().await.expect("status-get 失敗");
+    println!("status-get：{status:#?}");
+
+    println!("唯讀狀態實測完成（{url}）");
 }

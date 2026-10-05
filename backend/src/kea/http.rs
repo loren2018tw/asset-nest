@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::KeaError;
@@ -38,6 +39,40 @@ impl std::fmt::Display for VersionInfo {
             (None, None) => write!(f, "（未提供版本資訊）"),
         }
     }
+}
+
+/// `config-get` 的 DHCPv4 設定摘要。
+///
+/// 取 `Dhcp4.interfaces-config.interfaces`（Kea 實際監聽的作業系統介面；
+/// 空清單＝不主動服務 DHCP）、`Dhcp4.lease-database.type`（租約庫類型）與
+/// `Dhcp4.subnet4`（subnet-id → CIDR）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Dhcp4Config {
+    pub interfaces: Vec<String>,
+    pub lease_backend: Option<String>,
+    pub subnets: HashMap<i64, String>,
+}
+
+/// `status-get` 的 socket 狀態；Kea 3.2.1 實測回物件（如 `{"status":"ready"}`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SocketStatus {
+    /// 控制通道 socket 狀態（如 `ready`）；未提供為 `None`。
+    pub status: Option<String>,
+}
+
+/// `status-get` 的伺服器運行資訊。
+///
+/// 真機 3.2.1 實測：`uptime`／`reload` 為相對秒數（非 epoch 時間）、
+/// `sockets` 為狀態物件而非綁定清單；缺欄位一律 `None`。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct StatusInfo {
+    pub pid: Option<i64>,
+    /// 伺服器啟動後經過秒數（相對值）。
+    pub uptime: Option<i64>,
+    /// 距上次設定重載秒數（相對值）。
+    pub reload: Option<i64>,
+    /// socket 狀態；伺服端未提供為 `None`。
+    pub sockets: Option<SocketStatus>,
 }
 
 /// `reservation-get-all` 的一筆主機保留；只取本系統可比對的欄位。
@@ -95,6 +130,14 @@ impl Client {
         self
     }
 
+    /// 顯示用連線位址：去掉 userinfo（認證資訊）與結尾斜線。
+    pub fn base_url(&self) -> String {
+        let mut url = self.base_url.clone();
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.as_str().trim_end_matches('/').to_string()
+    }
+
     /// 送 `version-get`：確認連得上並取得 Kea 版本資訊。
     pub async fn version_get(&self) -> Result<VersionInfo, KeaError> {
         let outcome = self.command("version-get", None).await?;
@@ -106,6 +149,94 @@ impl Client {
                 .get("version")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+        })
+    }
+
+    /// 讀取 Kea 的 DHCPv4 設定摘要（`config-get` → `Dhcp4`）。
+    ///
+    /// 取監聽介面、租約庫類型與 `subnet4`（subnet-id → CIDR）；皆為唯讀。
+    pub async fn config_get_dhcp4(&self) -> Result<Dhcp4Config, KeaError> {
+        let outcome = self.command("config-get", None).await?;
+        let outcome = expect_success(outcome)?;
+        let dhcp4 = outcome
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("Dhcp4"));
+
+        let interfaces = dhcp4
+            .and_then(|dhcp4| dhcp4.get("interfaces-config"))
+            .and_then(|interfaces_config| interfaces_config.get("interfaces"))
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let lease_backend = dhcp4
+            .and_then(|dhcp4| dhcp4.get("lease-database"))
+            .and_then(|lease_database| lease_database.get("type"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        let mut subnets = HashMap::new();
+        if let Some(entries) = dhcp4
+            .and_then(|dhcp4| dhcp4.get("subnet4"))
+            .and_then(Value::as_array)
+        {
+            for entry in entries {
+                if let Some(id) = entry.get("id").and_then(Value::as_i64) {
+                    let cidr = entry
+                        .get("subnet")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    subnets.insert(id, cidr);
+                }
+            }
+        }
+
+        Ok(Dhcp4Config {
+            interfaces,
+            lease_backend,
+            subnets,
+        })
+    }
+
+    /// 讀取 Kea 運行狀態（`status-get`）：pid／uptime／reload／sockets。
+    ///
+    /// 欄位以 Kea 3.2.1 真機實測為準（見 `.scratch/kea-pages/spec.md`）：
+    /// `uptime`／`reload` 為相對秒數，`sockets` 為狀態物件（如
+    /// `{"status":"ready"}`）而非綁定清單；缺欄位為 `None`。
+    pub async fn status_get(&self) -> Result<StatusInfo, KeaError> {
+        let outcome = self.command("status-get", None).await?;
+        let outcome = expect_success(outcome)?;
+        let arguments = outcome.arguments.as_ref();
+
+        let number = |key: &str| {
+            arguments
+                .and_then(|arguments| arguments.get(key))
+                .and_then(Value::as_i64)
+        };
+
+        let sockets = arguments
+            .and_then(|arguments| arguments.get("sockets"))
+            .and_then(Value::as_object)
+            .map(|sockets| SocketStatus {
+                status: sockets
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            });
+
+        Ok(StatusInfo {
+            pid: number("pid"),
+            uptime: number("uptime"),
+            reload: number("reload"),
+            sockets,
         })
     }
 
@@ -182,35 +313,12 @@ impl Client {
         expect_success(outcome).map(|_| ())
     }
 
-    /// 讀取 Kea 設定的 IPv4 網段（`config-get` → `Dhcp4.subnet4`）。
+    /// 讀取 Kea 設定的 IPv4 網段（重用 [`Client::config_get_dhcp4`] 的 `subnet4`）。
     ///
     /// 回傳 `subnet-id → CIDR`；供完整同步檢查受管網段是否存在、CIDR 是否相符。
+    /// 行為與過往 `config-get` 直取一致。
     pub async fn kea_subnets(&self) -> Result<HashMap<i64, String>, KeaError> {
-        let outcome = self.command("config-get", None).await?;
-        let outcome = expect_success(outcome)?;
-
-        let mut subnets = HashMap::new();
-        let entries = outcome
-            .arguments
-            .as_ref()
-            .and_then(|arguments| arguments.get("Dhcp4"))
-            .and_then(|dhcp4| dhcp4.get("subnet4"))
-            .and_then(Value::as_array);
-
-        if let Some(entries) = entries {
-            for entry in entries {
-                if let Some(id) = entry.get("id").and_then(Value::as_i64) {
-                    let cidr = entry
-                        .get("subnet")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    subnets.insert(id, cidr);
-                }
-            }
-        }
-
-        Ok(subnets)
+        Ok(self.config_get_dhcp4().await?.subnets)
     }
 
     /// 送一個命令並解析回應（陣列取首元素；認證失敗等單一物件直接使用）。
@@ -319,5 +427,22 @@ fn parse_host(host: &Value) -> KeaHost {
         ip_address: text("ip-address"),
         hw_address: text("hw-address"),
         hostname: text("hostname"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_url_strips_userinfo_and_trailing_slashes() {
+        let client = Client::new("http://admin:secret@127.0.0.1:8000/".parse().expect("URL"));
+        assert_eq!(client.base_url(), "http://127.0.0.1:8000");
+
+        let client = Client::new("http://127.0.0.1:8000".parse().expect("URL"));
+        assert_eq!(client.base_url(), "http://127.0.0.1:8000");
+
+        let client = Client::new("http://127.0.0.1:8000/kea///".parse().expect("URL"));
+        assert_eq!(client.base_url(), "http://127.0.0.1:8000/kea");
     }
 }
