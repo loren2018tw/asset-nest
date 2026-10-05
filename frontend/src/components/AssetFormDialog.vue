@@ -133,6 +133,7 @@
           />
 
           <q-select
+            ref="tagSelect"
             v-model="form.tags"
             :options="tagOptions"
             multiple
@@ -144,6 +145,7 @@
             label="標籤"
             hint="自由文字、可多個；輸入後按 Enter 新增"
             @filter="filterTags"
+            @add="onTagAdded"
           />
         </q-card-section>
 
@@ -327,8 +329,8 @@
 </template>
 
 <script setup lang="ts">
-import { useQuasar } from "quasar";
-import { computed, ref, watch } from "vue";
+import { useQuasar, type QSelect } from "quasar";
+import { computed, nextTick, ref, watch } from "vue";
 
 import {
   createAsset,
@@ -419,6 +421,8 @@ const tagOptions = ref<string[]>([]);
 const locationMenuOpen = ref(false);
 const duplicateSerial = ref(false);
 const locationField = ref<HTMLElement | null>(null);
+/** 標籤欄位：點選既有標籤後需以公開方法清空輸入文字（見票 22）。 */
+const tagSelect = ref<QSelect | null>(null);
 
 const interfaceDrafts = ref<InterfaceDraft[]>([]);
 /** 對話框開啟時載入的既有介面，供儲存時找出已刪除者。 */
@@ -542,6 +546,14 @@ function filterTags(input: string, update: (callback: () => void) => void) {
       tag =>
         !selected.has(tag.toLowerCase()) && tag.toLowerCase().includes(needle)
     );
+  });
+}
+
+/** 點選既有標籤後清空輸入文字（Quasar 滑鼠點選路徑不會自動清空，見票 22）；
+ *  待 model 更新後再重跑過濾，讓剛選取的標籤自建議清單移除。 */
+function onTagAdded() {
+  void nextTick(() => {
+    tagSelect.value?.updateInputValue("", false);
   });
 }
 
