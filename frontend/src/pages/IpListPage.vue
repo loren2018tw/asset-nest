@@ -46,7 +46,7 @@
           @update:model-value="reload"
         />
       </div>
-      <!-- 觀測篩選（見票 07）：未指派但有主／有未登錄 MAC；伺服器端過濾。 -->
+      <!-- 觀測篩選（見票 07）：非法佔用 IP／有未登錄 MAC；伺服器端過濾。 -->
       <div v-if="!isV6" class="col-12 col-sm-6 col-md-3">
         <q-select
           v-model="filters.observed"
@@ -388,9 +388,9 @@ const statusOptions = computed<{ label: string; value: IpStatus }[]>(() =>
       ]
 );
 
-/** 觀測篩選選項（見票 07）：未指派但有主／有未登錄 MAC。 */
+/** 觀測篩選選項（見票 07）：非法佔用 IP／有未登錄 MAC。 */
 const observedOptions: { label: string; value: IpObservedFilter }[] = [
-  { label: "未指派但有主", value: "unassigned_seen" },
+  { label: "非法佔用 IP", value: "unassigned_seen" },
   { label: "有未登錄 MAC", value: "unknown_mac" }
 ];
 
@@ -454,8 +454,8 @@ const conflictInfo: Record<string, { label: string; hint: string }> = {
     hint: "已指派位址被觀測到由非宣告 MAC 使用（僅提示，不阻擋、不修改指派）"
   },
   ObservedOnUnassigned: {
-    label: "未指派有主",
-    hint: "未指派且非池內位址被觀測到有主（僅提示，不阻擋、不自動回收）"
+    label: "非法佔用 IP",
+    hint: "未指派且非池內位址被觀測到有主（非法佔用；僅提示，不阻擋、不自動回收）"
   }
 };
 

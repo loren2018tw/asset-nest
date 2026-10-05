@@ -99,7 +99,7 @@ export type IpSortField =
   | "assignment"
   | "last_seen";
 
-/** 觀測篩選：未指派但有主／有未登錄 MAC（伺服器端；見票 07）。 */
+/** 觀測篩選：非法佔用 IP／有未登錄 MAC（伺服器端；見票 07）。 */
 export type IpObservedFilter = "unassigned_seen" | "unknown_mac";
 
 /** IP 清單搜尋、排序與分頁參數（皆為伺服器端）。 */

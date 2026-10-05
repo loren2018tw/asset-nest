@@ -179,7 +179,7 @@ impl IpStatusFilter {
 /// 觀測篩選值（見 spec §讀取端、票 07）；未知值由 API 層回 400。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpObservedFilter {
-    /// 無指派、非池內，但有 `last_seen_mac`（未指派但有主）。
+    /// 無指派、非池內，但有 `last_seen_mac`（UI 顯示「非法佔用 IP」）。
     UnassignedSeen,
     /// `last_seen_mac` 非空且不在任何 Interface 的 MAC 集合（不分大小寫）。
     UnknownMac,
@@ -2037,7 +2037,7 @@ mod tests {
 
     #[test]
     fn list_merges_observation_codes_after_existing_codes_and_filters() {
-        // /29、pool .5–.6；.5 指派且落 pool＋現況不同 MAC；.3 未指派有主；.4 無現況。
+        // /29、pool .5–.6；.5 指派且落 pool＋現況不同 MAC；.3 非法佔用 IP；.4 無現況。
         let subnet = subnet("10.0.0.0/29", None, &[("10.0.0.5", "10.0.0.6")]);
         let assignments = [listed(
             "10.0.0.5",

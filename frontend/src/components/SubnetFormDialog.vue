@@ -173,7 +173,7 @@
             <div class="text-subtitle2 q-mb-sm"> 探索掃描（尋找未知設備） </div>
             <q-toggle v-model="form.discovery_enabled" label="開啟探索掃描" />
             <div class="text-caption text-grey-7 q-mt-xs">
-              定期限速探測網段全部位址，找出未指派但有主的位址與未登錄 MAC。
+              定期限速探測網段全部位址，找出非法佔用的 IP 與未登錄 MAC。
             </div>
 
             <q-input

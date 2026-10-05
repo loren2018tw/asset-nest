@@ -61,7 +61,7 @@ _Avoid_: 序號
 觀測衍生（新增，見 ADR-0014）：
 
 - **ObservedMacMismatch**：已指派的位址被觀測到由非宣告 MAC 使用。
-- **ObservedOnUnassigned**：未指派且非池內的位址被觀測到有主。
+- **ObservedOnUnassigned**：未指派且非池內的位址被觀測到有主；UI 顯示為「非法佔用 IP」。
 
 ## 同步詞彙
 

@@ -1,6 +1,6 @@
 # 07: 衝突標記與篩選
 
-**What to build:** IP 清單出現兩個新標記——已指派位址的宣告 MAC 與觀測 MAC 不符（`ObservedMacMismatch`）、未指派且非池內位址有主（`ObservedOnUnassigned`）；並可篩選「未指派但有主」「有未登錄 MAC」。池內位址被 DHCP 正常使用時不標記。
+**What to build:** IP 清單出現兩個新標記——已指派位址的宣告 MAC 與觀測 MAC 不符（`ObservedMacMismatch`）、未指派且非池內位址有主（`ObservedOnUnassigned`）；並可篩選「非法佔用 IP」「有未登錄 MAC」。池內位址被 DHCP 正常使用時不標記。
 
 **Blocked by:** 02 快速掃描與「最後可見」欄（核心）
 

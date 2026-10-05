@@ -26,7 +26,8 @@ pub const IP_OUT_OF_SUBNET: &str = "IpOutOfSubnet";
 pub const DUPLICATE_HW_ADDRESS: &str = "DuplicateHwAddress";
 /// ObservedMacMismatch：已指派位址被觀測到由非宣告 MAC 使用（見 ADR-0014）。
 pub const OBSERVED_MAC_MISMATCH: &str = "ObservedMacMismatch";
-/// ObservedOnUnassigned：未指派且非池內位址被觀測到有主（見 ADR-0014）。
+/// ObservedOnUnassigned：未指派且非池內位址被觀測到有主
+/// （UI 顯示「非法佔用 IP」；見 ADR-0014）。
 pub const OBSERVED_ON_UNASSIGNED: &str = "ObservedOnUnassigned";
 
 /// 一筆指派命中的衝突；`codes` 僅含命中者，依固定順序排列
