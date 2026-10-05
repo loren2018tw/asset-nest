@@ -1,5 +1,6 @@
 import { apiDelete, apiGet, apiPost, apiPut } from "@/api/client";
 import type { Warning } from "@/api/interfaces";
+import type { KeaSyncState } from "@/api/kea";
 
 /** IP 狀態：可用、池內、手動設定（static）或保留（reservation）。 */
 export type IpStatus = "available" | "in_pool" | "static" | "reservation";
@@ -50,9 +51,16 @@ export interface Assignment {
   updated_at: string;
 }
 
-/** 指派儲存結果：指派欄位＋不阻擋的語意警示（見 ADR-0006，沿用票 02 機制）。 */
+/** 指派儲存結果：指派欄位＋不阻擋的語意警示（見 ADR-0006）＋Kea 推送結果
+ *  （僅在應同步時出現，見 ADR-0011）。 */
 export interface AssignmentSaved extends Assignment {
   warnings: Warning[];
+  kea_sync?: KeaSyncState;
+}
+
+/** 取消指派結果：`kea_sync` 僅在應同步時出現（見 ADR-0011）。 */
+export interface AssignmentDeleted {
+  kea_sync?: KeaSyncState;
 }
 
 /** 指派／改用途的輸入。 */
@@ -132,12 +140,12 @@ export function assignIp(
   );
 }
 
-/** 取消指派；位址回到「可用」。 */
+/** 取消指派；位址回到「可用」。回應含 Kea 推送結果（如適用，見 ADR-0011）。 */
 export function cancelAssignment(
   subnetId: number,
   address: string
-): Promise<void> {
-  return apiDelete(
+): Promise<AssignmentDeleted> {
+  return apiDelete<AssignmentDeleted>(
     `/api/v1/subnets/${subnetId}/ips/${encodeURIComponent(address)}/assignment`
   );
 }

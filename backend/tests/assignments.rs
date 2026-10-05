@@ -324,10 +324,10 @@ async fn static_assignment_and_cancel_round_trip() {
     assert_eq!(status, StatusCode::OK);
     assert!(updated["hostname"].is_null());
 
-    // 取消指派：位址回到「可用」
+    // 取消指派：位址回到「可用」（回應 200；未涉及 Kea 時 body 為空物件）
     let (status, body) = delete_assignment(&pool, subnet_id, "10.0.0.1").await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({}));
     assert_eq!(assignment_count(&pool).await, 0);
 
     let page = list_ips(&pool, subnet_id, "").await;

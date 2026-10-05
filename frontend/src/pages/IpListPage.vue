@@ -195,6 +195,7 @@ import {
 } from "@/api/ips";
 import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
+import { notifyKeaSync } from "@/utils/keaSync";
 
 const $q = useQuasar();
 const route = useRoute();
@@ -446,7 +447,8 @@ function confirmCancel(entry: IpEntry) {
 
 async function cancel(entry: IpEntry) {
   try {
-    await cancelAssignment(subnetId, entry.address);
+    const result = await cancelAssignment(subnetId, entry.address);
+    notifyKeaSync($q, result.kea_sync);
     $q.notify({ type: "positive", message: "已取消指派" });
     await fetchIps();
   } catch (cause) {

@@ -37,3 +37,4 @@ pnpm build        # quasar build → cargo build --release
 | `pnpm build` | 建置前端與後端（release） |
 | `pnpm lint:check` | 前端 lint / format 檢查 |
 | `pnpm test` | 後端測試（cargo test） |
+| `pnpm test:kea` | Kea 真機連線測試（version-get；讀 `.env` 的 `KEA_API_URL`） |

@@ -497,8 +497,8 @@ async fn duplicate_hw_address_flagged_and_cleared_on_cancel() {
 
     // 取消第二筆：第一筆的衝突隨之消失（刪除後重算）
     let (status, body) = delete_assignment(&pool, subnet_id, "10.0.0.2").await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({}));
     let page = list_ips(&pool, subnet_id, "").await;
     assert_eq!(row(&page, "10.0.0.1")["conflicts"], json!([]));
     assert_eq!(subnet_summary(&pool, subnet_id).await["conflicts"], 0);

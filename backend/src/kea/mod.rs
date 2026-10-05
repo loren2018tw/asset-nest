@@ -1,7 +1,10 @@
-//! Kea 整合邊界：本階段只定型別與介面，不實作任何連線（見 `docs/adr/0001`）。
+//! Kea 整合邊界：整合機制為伺服器內建 HTTP 控制通道（見 `docs/adr/0010`）。
 //!
-//! 整合機制未定（設定檔＋control-socket 或 REST Control Agent），
-//! 留待功能階段決策；此處僅以使用案例定義介面，讓兩種機制皆可替換實作。
+//! 控制通道 client 見 [`http`]；保留推送與完整同步見 [`sync`]（決策見
+//! `docs/adr/0011`）。保留推送與租約讀取以 [`KeaGateway`] 定義，待後續階段實作。
+
+pub mod http;
+pub mod sync;
 
 use std::net::Ipv4Addr;
 
@@ -24,11 +27,19 @@ pub struct Lease {
     pub hostname: Option<String>,
 }
 
-/// Kea 整合錯誤（功能階段擴充）。
+/// Kea 整合錯誤。
 #[derive(Debug, thiserror::Error)]
 pub enum KeaError {
     #[error("Kea 整合尚未實作")]
     NotImplemented,
+    #[error("HTTP 請求失敗：{0}")]
+    Http(#[from] reqwest::Error),
+    #[error("Kea 回應錯誤（result={result}）：{text}")]
+    Response { result: i64, text: String },
+    #[error("Kea 回應格式不符：{0}")]
+    Malformed(String),
+    #[error("Kea 推送資料異常：{0}")]
+    Data(String),
 }
 
 /// Kea 整合介面：以使用案例定義；實作於功能階段。

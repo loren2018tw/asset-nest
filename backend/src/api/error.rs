@@ -62,6 +62,11 @@ impl ApiError {
         Self::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", message)
     }
 
+    /// 502：Kea 控制通道連線或命令失敗（如完整同步計畫無法產生）。
+    pub fn kea(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "kea_error", message)
+    }
+
     /// 500：記錄原始錯誤（含堆疊追蹤），對外僅回覆籠統訊息。
     pub fn internal(context: &'static str, source: impl std::fmt::Display) -> Self {
         tracing::error!(error = %source, "{context}");

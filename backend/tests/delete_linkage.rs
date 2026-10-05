@@ -451,11 +451,11 @@ async fn subnet_with_assignments_cannot_be_deleted() {
     let message = body["message"].as_str().expect("訊息為字串");
     assert!(message.contains('1'), "訊息含指派數量：{message}");
 
-    // 取消 v4 所有指派 → 可刪
+    // 取消 v4 所有指派 → 可刪（取消指派回應 200；未涉及 Kea）
     let (status, _) = delete_assignment(&pool, v4, "10.0.0.1").await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (status, _) = delete_assignment(&pool, v4, "10.0.0.2").await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &pool,
         Method::DELETE,
@@ -465,9 +465,9 @@ async fn subnet_with_assignments_cannot_be_deleted() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // 取消 v6 登錄 → 可刪
+    // 取消 v6 登錄 → 可刪（取消指派回應 200）
     let (status, _) = delete_assignment(&pool, v6, "fd00::1").await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &pool,
         Method::DELETE,

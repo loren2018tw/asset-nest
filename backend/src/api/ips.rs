@@ -3,6 +3,7 @@
 //! v4 提供清單與指派／改用途、取消指派；v6（票 06）為登錄制：
 //! `POST /subnets/{id}/ips` 新增即指派，清單僅列登錄位址，指派端點限 static。
 //! 衝突標記（票 07）由 `GET` 列徽章與儲存回應的 `warnings` 呈現（見 ADR-0006）。
+//! 受管網段的保留指派／取消會即時推送 Kea，回應附 `kea_sync`（見 ADR-0011）。
 
 use std::net::IpAddr;
 
@@ -19,6 +20,8 @@ use crate::assignments::{self, Assignment, AssignmentInput, RegisterInput};
 use crate::conflicts;
 use crate::interfaces::Warning;
 use crate::ips::{self, IpEntry, IpFilter, IpSortDir, IpSortField, IpStatusFilter};
+use crate::kea::sync as kea_sync;
+use crate::kea::sync::KeaSync;
 use crate::subnets;
 
 /// 清單預設每頁筆數（見 spec §6）；上限比照 `/assets`。
@@ -59,12 +62,22 @@ struct IpPage {
     per_page: i64,
 }
 
-/// 指派儲存回應：指派欄位攤平，加上不阻擋的語意警示（見 ADR-0006）。
+/// 指派儲存回應：指派欄位攤平，加上不阻擋的語意警示（見 ADR-0006）與 Kea 推送結果。
 #[derive(Debug, Serialize)]
 struct AssignmentResponse {
     #[serde(flatten)]
     assignment: Assignment,
     warnings: Vec<Warning>,
+    /// Kea 單筆推送結果；僅在應同步時出現（見 `docs/adr/0011`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kea_sync: Option<KeaSync>,
+}
+
+/// 取消指派回應：`kea_sync` 僅在應同步時出現。
+#[derive(Debug, Serialize)]
+struct AssignmentDeleted {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kea_sync: Option<KeaSync>,
 }
 
 /// 建立指派儲存回應：重新偵測該網段衝突並附上警示（僅提示、不阻擋）。
@@ -75,11 +88,13 @@ async fn respond_with_warnings(
     state: &AppState,
     subnet: &subnets::Subnet,
     assignment: Assignment,
+    kea_sync: Option<KeaSync>,
 ) -> Result<Json<AssignmentResponse>, ApiError> {
     let warnings = warnings_for_address(state, subnet, &assignment.address).await?;
     Ok(Json(AssignmentResponse {
         assignment,
         warnings,
+        kea_sync,
     }))
 }
 
@@ -194,12 +209,14 @@ async fn post_subnet_ip(
 
     let (address, interface_id) = input.validate()?;
     let assignment = assignments::register(&state.db, &subnet, address, interface_id).await?;
-    let response = respond_with_warnings(&state, &subnet, assignment).await?;
+    let response = respond_with_warnings(&state, &subnet, assignment, None).await?;
 
     Ok((StatusCode::CREATED, response))
 }
 
 /// 指派或改用途（含 hostname）；結構錯誤回 400＋明確 `details`。
+///
+/// 受管網段的保留指派即時推送 Kea（見 ADR-0011）。
 async fn put_assignment(
     State(state): State<AppState>,
     path: Result<Path<(i64, String)>, PathRejection>,
@@ -216,40 +233,63 @@ async fn put_assignment(
     let address = parse_address(&address)?;
     let valid = input.validate()?;
 
-    let assignment = assignments::assign(&state.db, &subnet, address, valid).await?;
+    // 同步判斷需要異動前狀態（保留→static 時刪除 Kea 保留）。
+    let before = assignments::find(&state.db, subnet.id, &address.to_string())
+        .await
+        .map_err(|error| ApiError::internal("讀取指派失敗", error))?;
 
-    respond_with_warnings(&state, &subnet, assignment).await
+    let assignment = assignments::assign(&state.db, &subnet, address, valid).await?;
+    let kea_sync = kea_sync::after_assignment_change(
+        &state.db,
+        state.kea.as_ref(),
+        &subnet,
+        before.as_ref(),
+        Some(&assignment),
+    )
+    .await?;
+
+    respond_with_warnings(&state, &subnet, assignment, kea_sync).await
 }
 
-/// 取消指派；不存在回 404。
+/// 取消指派；不存在回 404。回應 200；`kea_sync` 僅在應同步時出現（見 ADR-0011）。
 ///
-/// 回應維持 204；其他列的衝突（如 DuplicateHwAddress）於下一次讀取時
-/// 即時重算、自然消失（見票 07）。
+/// 其他列的衝突（如 DuplicateHwAddress）於下一次讀取時即時重算、自然消失（見票 07）。
 async fn delete_assignment(
     State(state): State<AppState>,
     path: Result<Path<(i64, String)>, PathRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<AssignmentDeleted>, ApiError> {
     let Path((id, address)) = path.map_err(|_| ApiError::validation("路徑參數格式錯誤"))?;
 
-    if subnets::get(&state.db, id)
+    let subnet = subnets::get(&state.db, id)
         .await
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
-        .is_none()
-    {
-        return Err(ApiError::not_found("找不到網段"));
-    }
+        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
 
     let address = parse_address(&address)?;
+
+    // 同步判斷需要異動前狀態（取消保留時刪除 Kea 保留）。
+    let before = assignments::find(&state.db, subnet.id, &address.to_string())
+        .await
+        .map_err(|error| ApiError::internal("讀取指派失敗", error))?;
 
     let cancelled = assignments::cancel(&state.db, id, address)
         .await
         .map_err(|error| ApiError::internal("取消指派失敗", error))?;
 
-    if cancelled {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("找不到指派"))
+    if !cancelled {
+        return Err(ApiError::not_found("找不到指派"));
     }
+
+    let kea_sync = kea_sync::after_assignment_change(
+        &state.db,
+        state.kea.as_ref(),
+        &subnet,
+        before.as_ref(),
+        None,
+    )
+    .await?;
+
+    Ok(Json(AssignmentDeleted { kea_sync }))
 }
 
 /// 解析路徑中的位址（v4／v6 皆可）；與網段的地址族是否相符由領域層檢查。

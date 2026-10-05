@@ -101,8 +101,9 @@ export function apiPut<T>(path: string, body: unknown): Promise<T> {
   return request<T>("PUT", path, body);
 }
 
-export function apiDelete(path: string): Promise<void> {
-  return request<void>("DELETE", path);
+/** DELETE 通常回 204（`T`＝`void`），少數端點回 JSON（如取消指派附 `kea_sync`）。 */
+export function apiDelete<T = void>(path: string): Promise<T> {
+  return request<T>("DELETE", path);
 }
 
 /** 下載端點回傳的內容與後端建議檔名。 */

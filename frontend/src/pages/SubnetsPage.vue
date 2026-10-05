@@ -18,6 +18,13 @@
         label="匯入"
         @click="importOpen = true"
       />
+      <q-btn
+        color="primary"
+        outline
+        icon="sync"
+        label="Kea 同步"
+        @click="syncOpen = true"
+      />
       <q-btn color="primary" icon="add" label="新增網段" @click="openCreate" />
     </div>
 
@@ -112,6 +119,8 @@
     />
 
     <subnet-import-dialog v-model="importOpen" @saved="onSaved" />
+
+    <kea-sync-dialog v-model="syncOpen" />
   </q-page>
 </template>
 
@@ -127,6 +136,7 @@ import {
   type SubnetSummary
 } from "@/api/subnets";
 import { saveBlob } from "@/api/client";
+import KeaSyncDialog from "@/components/KeaSyncDialog.vue";
 import SubnetFormDialog from "@/components/SubnetFormDialog.vue";
 import SubnetImportDialog from "@/components/SubnetImportDialog.vue";
 
@@ -137,6 +147,7 @@ const loading = ref(false);
 const exporting = ref(false);
 const dialogOpen = ref(false);
 const importOpen = ref(false);
+const syncOpen = ref(false);
 const editing = ref<SubnetSummary | null>(null);
 
 const columns: QTableProps["columns"] = [

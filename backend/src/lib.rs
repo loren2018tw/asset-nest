@@ -29,6 +29,8 @@ use tower_http::trace::TraceLayer;
 pub struct AppState {
     pub db: SqlitePool,
     pub web_dist_dir: PathBuf,
+    /// Kea 控制通道 client；`KEA_API_URL` 未設定時為 `None`（見 `docs/adr/0010`）。
+    pub kea: Option<kea::http::Client>,
 }
 
 impl AppState {
@@ -36,7 +38,14 @@ impl AppState {
         Self {
             db,
             web_dist_dir: web_dist_dir.into(),
+            kea: None,
         }
+    }
+
+    /// 附掛 Kea client（正式啟動與 Kea 同步整合測試用）。
+    pub fn with_kea(mut self, client: kea::http::Client) -> Self {
+        self.kea = Some(client);
+        self
     }
 }
 

@@ -13,6 +13,7 @@ mod error;
 mod import;
 mod interfaces;
 mod ips;
+mod kea;
 mod peer;
 mod subnet_import;
 mod subnets;
@@ -53,6 +54,7 @@ mod v1 {
             .merge(super::assets::router())
             .merge(super::import::router())
             .merge(super::interfaces::router())
+            .merge(super::kea::router())
             .merge(super::subnets::router())
             .merge(super::subnet_import::router())
             .merge(super::ips::router())

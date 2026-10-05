@@ -244,6 +244,7 @@ import {
 import type { AddressFamily } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { assetLabel } from "@/utils/assetLabel";
+import { notifyKeaSync } from "@/utils/keaSync";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -515,7 +516,8 @@ async function cancel() {
   cancelling.value = true;
   errorMessage.value = "";
   try {
-    await cancelAssignment(props.subnetId, address.value);
+    const result = await cancelAssignment(props.subnetId, address.value);
+    notifyKeaSync($q, result.kea_sync);
     $q.notify({ type: "positive", message: "已取消指派" });
     emit("saved");
     open.value = false;
@@ -569,6 +571,7 @@ async function submit() {
     for (const warning of saved.warnings) {
       $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
     }
+    notifyKeaSync($q, saved.kea_sync);
     $q.notify({
       type: "positive",
       message: isEdit.value ? "已更新指派" : "已指派"

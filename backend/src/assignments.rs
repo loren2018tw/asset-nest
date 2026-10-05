@@ -535,6 +535,17 @@ pub async fn cancel(pool: &SqlitePool, subnet_id: i64, address: IpAddr) -> sqlx:
     Ok(result.rows_affected() > 0)
 }
 
+/// 依網段＋位址讀取指派；供 Kea 同步判斷異動前狀態（見 `docs/adr/0011`）。
+pub async fn find(
+    pool: &SqlitePool,
+    subnet_id: i64,
+    address: &str,
+) -> sqlx::Result<Option<Assignment>> {
+    Ok(fetch_by_address(pool, subnet_id, address)
+        .await?
+        .map(AssignmentRow::into_assignment))
+}
+
 /// 位址結構驗證：地址族須與網段相符、落在 CIDR 內（v4 另扣 network/broadcast
 /// 與 pool）；v6 用途固定 static（見 spec §2.4、§7）。
 ///

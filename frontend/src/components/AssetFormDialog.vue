@@ -354,6 +354,7 @@ import { cancelAssignment, type IpPurpose } from "@/api/ips";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { parseAddress } from "@/utils/cidr";
+import { notifyKeaSync } from "@/utils/keaSync";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -712,7 +713,8 @@ function confirmCancelAssignment(item: AssetAssignment) {
 async function cancelAssignmentItem(item: AssetAssignment) {
   cancellingAssignmentId.value = item.id;
   try {
-    await cancelAssignment(item.subnet_id, item.address);
+    const result = await cancelAssignment(item.subnet_id, item.address);
+    notifyKeaSync($q, result.kea_sync);
     $q.notify({ type: "positive", message: "已取消指派" });
     emit("saved");
     await refreshAssignments();

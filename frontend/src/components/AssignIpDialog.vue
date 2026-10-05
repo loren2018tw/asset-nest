@@ -207,6 +207,7 @@ import { cancelAssignment, type IpPurpose } from "@/api/ips";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { parseAddress } from "@/utils/cidr";
 import { assetLabel } from "@/utils/assetLabel";
+import { notifyKeaSync } from "@/utils/keaSync";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -482,6 +483,7 @@ function onSaved(saved: AssetAssignmentSaved) {
   for (const warning of saved.warnings) {
     $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
   }
+  notifyKeaSync($q, saved.kea_sync);
   $q.notify({
     type: "positive",
     message: saved.transferred ? "已移轉並指派" : "已指派"
@@ -520,7 +522,8 @@ function confirmCancelAssignment(item: AssetAssignment) {
 async function cancelAssignmentItem(item: AssetAssignment) {
   cancellingId.value = item.id;
   try {
-    await cancelAssignment(item.subnet_id, item.address);
+    const result = await cancelAssignment(item.subnet_id, item.address);
+    notifyKeaSync($q, result.kea_sync);
     $q.notify({ type: "positive", message: "已取消指派" });
     emit("saved");
     await refreshAssignments();

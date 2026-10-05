@@ -515,10 +515,10 @@ async fn put_and_cancel_v6_registry_entry() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list_ips(&pool, subnet_id, "").await["total"], 2);
 
-    // 取消指派＝刪除登錄；非壓縮寫法經正規化後刪除
+    // 取消指派＝刪除登錄；非壓縮寫法經正規化後刪除（回應 200；未涉及 Kea）
     let (status, body) = delete_assignment(&pool, subnet_id, "fd00:0:0:0:0:0:0:10").await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({}));
     let page = list_ips(&pool, subnet_id, "").await;
     assert_eq!(page["total"], 1);
     assert_eq!(addresses(&page), ["fd00::20"]);

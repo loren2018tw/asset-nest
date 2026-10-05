@@ -14,6 +14,12 @@ pub struct Config {
     pub database_url: String,
     /// Quasar 建置產物目錄；`WEB_DIST_DIR`，預設 `frontend/dist/spa`。
     pub web_dist_dir: PathBuf,
+    /// Kea HTTP 控制通道位址；`KEA_API_URL`，未設定為 `None`（見 `docs/adr/0010`）。
+    pub kea_api_url: Option<reqwest::Url>,
+    /// Kea 控制通道 Basic 認證帳號；`KEA_API_USERNAME`，未設定為 `None`。
+    pub kea_api_username: Option<String>,
+    /// Kea 控制通道 Basic 認證密碼；`KEA_API_PASSWORD`（搭配帳號使用）。
+    pub kea_api_password: Option<String>,
 }
 
 impl Config {
@@ -30,10 +36,24 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("frontend/dist/spa"));
 
+        let kea_api_url = std::env::var("KEA_API_URL")
+            .ok()
+            .map(|raw| raw.parse().context("KEA_API_URL 格式錯誤"))
+            .transpose()?;
+
+        let kea_api_username = std::env::var("KEA_API_USERNAME").ok();
+        let kea_api_password = std::env::var("KEA_API_PASSWORD").ok();
+        if kea_api_username.is_none() && kea_api_password.is_some() {
+            anyhow::bail!("KEA_API_PASSWORD 已設定但缺少 KEA_API_USERNAME");
+        }
+
         Ok(Self {
             bind_addr,
             database_url,
             web_dist_dir,
+            kea_api_url,
+            kea_api_username,
+            kea_api_password,
         })
     }
 }

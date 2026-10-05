@@ -16,7 +16,8 @@
     "build:backend": "cargo build --release --manifest-path backend/Cargo.toml",
     "lint": "pnpm --filter frontend lint",
     "lint:check": "pnpm --filter frontend lint:check",
-    "test": "cargo test --manifest-path backend/Cargo.toml"
+    "test": "cargo test --manifest-path backend/Cargo.toml",
+    "test:kea": "cargo test --manifest-path backend/Cargo.toml --test kea_connectivity -- --ignored --nocapture"
   },
   "devDependencies": {
     "concurrently": "^10.0.5"

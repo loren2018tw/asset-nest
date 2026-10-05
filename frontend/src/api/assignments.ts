@@ -1,6 +1,7 @@
 import { apiPut } from "@/api/client";
 import type { Warning } from "@/api/interfaces";
 import type { Assignment, IpPurpose } from "@/api/ips";
+import type { KeaSyncState } from "@/api/kea";
 
 /** 資產端指派輸入（見票 10、ADR-0007）。 */
 export interface AssetAssignmentInput {
@@ -14,11 +15,13 @@ export interface AssetAssignmentInput {
   transfer: boolean;
 }
 
-/** 資產端指派結果：指派欄位＋不阻擋的警示＋是否發生移轉。 */
+/** 資產端指派結果：指派欄位＋不阻擋的警示＋是否發生移轉＋Kea 推送結果。 */
 export interface AssetAssignmentSaved extends Assignment {
   warnings: Warning[];
   /** 是否發生移轉（原指派已取消、位址改派給目前介面）。 */
   transferred: boolean;
+  /** Kea 推送結果；僅在應同步時出現（見 ADR-0011）。 */
+  kea_sync?: KeaSyncState;
 }
 
 /** 從資產端指派 IP；已指派給其他介面時先以 `transfer: false` 取得提示，
