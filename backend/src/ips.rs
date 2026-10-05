@@ -7,7 +7,7 @@
 //! （偵測集中於 [`crate::conflicts`]）；標頭排序為票 14。
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net};
@@ -90,6 +90,8 @@ pub struct IpFilter {
     pub q: Option<String>,
     /// 狀態／用途篩選；未提供即全部。
     pub status: Option<IpStatusFilter>,
+    /// 觀測篩選；未提供即全部（見票 07）。
+    pub observed: Option<IpObservedFilter>,
     /// 排序欄位；預設位址（數值升冪）。
     pub sort: IpSortField,
     /// 排序方向；預設升冪。
@@ -174,6 +176,26 @@ impl IpStatusFilter {
     }
 }
 
+/// 觀測篩選值（見 spec §讀取端、票 07）；未知值由 API 層回 400。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpObservedFilter {
+    /// 無指派、非池內，但有 `last_seen_mac`（未指派但有主）。
+    UnassignedSeen,
+    /// `last_seen_mac` 非空且不在任何 Interface 的 MAC 集合（不分大小寫）。
+    UnknownMac,
+}
+
+impl IpObservedFilter {
+    /// 解析查詢參數；不在白名單回傳 `None`（由 API 層回 400）。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "unassigned_seen" => Some(Self::UnassignedSeen),
+            "unknown_mac" => Some(Self::UnknownMac),
+            _ => None,
+        }
+    }
+}
+
 /// API 回傳的 IP 列。
 #[derive(Debug, Serialize)]
 pub struct IpEntry {
@@ -188,8 +210,9 @@ pub struct IpEntry {
     pub purpose: Option<&'static str>,
     /// 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 `null`。
     pub assignment: Option<IpAssignment>,
-    /// 衝突標記：命中的語意規則代碼（見 [`crate::conflicts`]；
-    /// 依固定順序排列，僅標記、不阻擋）。
+    /// 衝突標記：命中的語意規則代碼，依固定順序排列（僅標記、不阻擋）——
+    /// 先既有指派碼（[`crate::conflicts::detect`]），再觀測衍生碼
+    /// （[`crate::conflicts::observed_codes`]；見票 07、ADR-0014）。
     pub conflicts: Vec<&'static str>,
     /// 最後可見時間（UTC `YYYY-MM-DDTHH:MM:SSZ`）；從未上線為 `null`。
     pub last_seen_at: Option<String>,
@@ -238,7 +261,8 @@ fn list_v4(
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
     let pools = parse_pools(subnet)?;
     let range = HostRange::of(network);
-    let conflicts = conflicts::by_address(subnet, assignments)?;
+    // 語意衝突＋觀測衍生衝突（即時計算；觀測碼僅在 IP 清單列呈現，見票 07）。
+    let conflicts = merged_conflicts(subnet, assignments, &observation.presence)?;
 
     // 指派資料以位址文字索引；用途經資料庫 CHECK 驗證，異常視為內部錯誤。
     let mut by_address: HashMap<&str, &ListedAssignment> =
@@ -268,7 +292,9 @@ fn list_v4(
         assignments: &by_address,
         conflicts: &conflicts,
         presence: &observation.presence,
+        known_macs: &observation.known_macs,
         observed: observation.observed,
+        observed_filter: filter.observed,
     };
 
     let per_page = u64::try_from(filter.per_page).unwrap_or(1).max(1);
@@ -279,8 +305,8 @@ fn list_v4(
 
     // 預設排序（address 升冪）：維持既有快速路徑與串流掃描（見票 14）。
     if filter.sort == IpSortField::Address && filter.dir == IpSortDir::Asc {
-        // 完整位址且無狀態篩選：精確比對，最多一筆（不掃描整個網段）。
-        if filter.status.is_none() {
+        // 完整位址且無狀態／觀測篩選：精確比對，最多一筆（不掃描整個網段）。
+        if filter.status.is_none() && filter.observed.is_none() {
             if let Some(q) = query {
                 if let Ok(exact) = q.parse::<Ipv4Addr>() {
                     let total =
@@ -296,7 +322,11 @@ fn list_v4(
         }
 
         // 無條件且無出界列：以算術位移取得當頁（比照票 04）。
-        if query.is_none() && filter.status.is_none() && extras.is_empty() {
+        if query.is_none()
+            && filter.status.is_none()
+            && filter.observed.is_none()
+            && extras.is_empty()
+        {
             let total = range.count();
             let end = offset.saturating_add(per_page).min(total);
             let items = (offset..end)
@@ -385,7 +415,7 @@ fn list_v4(
     Ok((items, total))
 }
 
-/// 建立 v4 排序鍵並加入清單；未通過關鍵字／狀態篩選即略過。
+/// 建立 v4 排序鍵並加入清單；未通過關鍵字／狀態／觀測篩選即略過。
 fn push_sort_key_v4(
     keys: &mut Vec<SortKey>,
     address: Ipv4Addr,
@@ -395,14 +425,7 @@ fn push_sort_key_v4(
 ) {
     let text = address.to_string();
     let assignment = context.assignments.get(text.as_str()).copied();
-    if !matches_v4_filters(
-        context.pools,
-        address,
-        assignment,
-        &text,
-        status,
-        query_lower,
-    ) {
+    if !matches_v4_filters(context, address, assignment, &text, status, query_lower) {
         return;
     }
 
@@ -418,9 +441,13 @@ fn push_sort_key_v4(
     ));
 }
 
-/// v4 位址是否符合狀態／關鍵字篩選；供串流掃描與排序路徑共用。
+/// v4 位址是否符合狀態／關鍵字／觀測篩選；供串流掃描與排序路徑共用。
+///
+/// 觀測篩選規則（見票 07、ADR-0014）：
+/// - `unassigned_seen`：無指派、非池內，且現況 `last_seen_mac` 非空。
+/// - `unknown_mac`：現況 `last_seen_mac` 非空且不在已登錄 MAC 集合（不分大小寫）。
 fn matches_v4_filters(
-    pools: &[PoolRange],
+    context: &V4Context,
     address: Ipv4Addr,
     assignment: Option<&ListedAssignment>,
     address_text: &str,
@@ -428,7 +455,7 @@ fn matches_v4_filters(
     query_lower: Option<&str>,
 ) -> bool {
     if let Some(status) = status {
-        if status_of(pools, address, assignment) != status.as_str() {
+        if status_of(context.pools, address, assignment) != status.as_str() {
             return false;
         }
     }
@@ -437,16 +464,40 @@ fn matches_v4_filters(
             return false;
         }
     }
+    if let Some(observed) = context.observed_filter {
+        let seen_mac = context
+            .presence
+            .get(address_text)
+            .and_then(|presence| presence.last_seen_mac.as_deref());
+        let matched = match observed {
+            IpObservedFilter::UnassignedSeen => {
+                assignment.is_none()
+                    && !context.pools.iter().any(|pool| pool.contains(address))
+                    && seen_mac.is_some()
+            }
+            IpObservedFilter::UnknownMac => seen_mac.is_some_and(|mac| {
+                let normalized = mac.to_ascii_lowercase();
+                !context.known_macs.contains(normalized.as_str())
+            }),
+        };
+        if !matched {
+            return false;
+        }
+    }
     true
 }
 
-/// v4 清單的共用輸入：指派索引、衝突、觀測現況與有效涵蓋（見票 02、票 07）。
+/// v4 清單的共用輸入：指派索引、衝突、觀測現況、已登錄 MAC 與觀測篩選
+/// （見票 02、票 07）。
 struct V4Context<'a> {
     pools: &'a [PoolRange],
     assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
     conflicts: &'a HashMap<String, Vec<&'static str>>,
     presence: &'a HashMap<String, Presence>,
+    /// 全系統 Interface MAC（小寫）；`unknown_mac` 篩選用。
+    known_macs: &'a HashSet<String>,
     observed: bool,
+    observed_filter: Option<IpObservedFilter>,
 }
 
 /// v4 清單掃描：合併 host 範圍與出界指派列，依序套用篩選與分頁。
@@ -467,7 +518,7 @@ impl V4Scanner<'_> {
         let assignment = self.context.assignments.get(text.as_str()).copied();
 
         if !matches_v4_filters(
-            self.context.pools,
+            self.context,
             address,
             assignment,
             &text,
@@ -486,7 +537,8 @@ impl V4Scanner<'_> {
 }
 
 /// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool 內為「可用」；
-/// 觀測現況由 `(subnet_id, address)` 左併（見票 02）。
+/// 觀測現況由 `(subnet_id, address)` 左併（見票 02）；
+/// `conflicts` 為指派語意碼＋觀測衍生碼（見票 07）。
 fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
     let in_pool = context.pools.iter().any(|pool| pool.contains(address));
     let text = address.to_string();
@@ -498,8 +550,10 @@ fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
         status: status_of(context.pools, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
-        conflicts: assignment
-            .and_then(|item| context.conflicts.get(&item.address))
+        // 未指派列亦可能有觀測碼（ObservedOnUnassigned），故以位址取衝突。
+        conflicts: context
+            .conflicts
+            .get(text.as_str())
             .cloned()
             .unwrap_or_default(),
         last_seen_at: presence.and_then(|presence| presence.last_seen_at.clone()),
@@ -510,6 +564,23 @@ fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
     }
 }
 
+/// 合併既有指派語意衝突與觀測衍生衝突（以位址索引）。
+///
+/// 既有語意碼先（依 [`conflicts::detect`] 的固定序），觀測碼接續附加，
+/// 使列標記順序穩定（見票 07）。[`conflicts::observed_codes`] 與
+/// [`conflicts::detect`] 皆即時計算、不落地。
+fn merged_conflicts(
+    subnet: &Subnet,
+    assignments: &[ListedAssignment],
+    presence: &HashMap<String, Presence>,
+) -> Result<HashMap<String, Vec<&'static str>>, ApiError> {
+    let mut merged = conflicts::by_address(subnet, assignments)?;
+    for (address, codes) in conflicts::observed_codes(subnet, assignments, presence)? {
+        merged.entry(address).or_default().extend(codes);
+    }
+    Ok(merged)
+}
+
 /// v6：登錄制，僅列出該網段已登錄（有指派）的位址；無 pool、無空閒列。
 ///
 /// 預設排序為位址數值（u128）升冪；其餘欄位排序與 v4 共用比較語意（見票 14）。
@@ -517,11 +588,16 @@ fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
 /// 狀態恆為 `static`（v6 用途固定手動）；`available`、`in_pool`、
 /// `reservation` 篩選皆回空集合。登錄位址即使因網段縮小而出界仍會列出，
 /// 並以 IpOutOfSubnet 衝突標記呈現（見票 06、07）。
+/// v6 恆無觀測：`observed` 篩選一律回空集合（見 spec §讀取端）。
 fn list_v6(
     subnet: &Subnet,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
+    if filter.observed.is_some() {
+        return Ok((Vec::new(), 0));
+    }
+
     let conflicts = conflicts::by_address(subnet, assignments)?;
 
     // 指派資料即登錄清單；用途經資料庫 CHECK 驗證，v6 恆為 static，
@@ -1919,5 +1995,108 @@ mod tests {
         )
         .expect("推導成功");
         assert_eq!(addresses(&items), ["fd00::10", "fd00::1", "fd00::2"]);
+    }
+
+    /// 建立測試用觀測視圖：現況（位址、MAC、最後可見時間）＋已登錄 MAC。
+    fn observation(
+        presence: &[(&str, Option<&str>, Option<&str>)],
+        known_macs: &[&str],
+    ) -> ObservationView {
+        ObservationView {
+            observed: true,
+            presence: presence
+                .iter()
+                .map(|(address, mac, seen_at)| {
+                    (
+                        address.to_string(),
+                        Presence {
+                            last_seen_at: seen_at.map(str::to_string),
+                            last_seen_mac: mac.map(str::to_string),
+                            last_seen_source: mac.map(|_| "arp".to_string()),
+                            last_checked_at: Some("2026-10-06T10:00:00Z".to_string()),
+                        },
+                    )
+                })
+                .collect(),
+            known_macs: known_macs.iter().map(|mac| mac.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn observed_filter_parse_accepts_whitelisted_values_only() {
+        assert_eq!(
+            IpObservedFilter::parse("unassigned_seen"),
+            Some(IpObservedFilter::UnassignedSeen)
+        );
+        assert_eq!(
+            IpObservedFilter::parse("unknown_mac"),
+            Some(IpObservedFilter::UnknownMac)
+        );
+        assert_eq!(IpObservedFilter::parse("seen"), None);
+    }
+
+    #[test]
+    fn list_merges_observation_codes_after_existing_codes_and_filters() {
+        // /29、pool .5–.6；.5 指派且落 pool＋現況不同 MAC；.3 未指派有主；.4 無現況。
+        let subnet = subnet("10.0.0.0/29", None, &[("10.0.0.5", "10.0.0.6")]);
+        let assignments = [listed(
+            "10.0.0.5",
+            "static",
+            "池內主機",
+            Some("eth0"),
+            Some("aa:bb:cc:dd:ee:01"),
+        )];
+        let view = observation(
+            &[
+                (
+                    "10.0.0.5",
+                    Some("aa:bb:cc:dd:ee:99"),
+                    Some("2026-10-06T10:00:00Z"),
+                ),
+                (
+                    "10.0.0.3",
+                    Some("AA:BB:CC:DD:EE:03"),
+                    Some("2026-10-06T10:00:00Z"),
+                ),
+                ("10.0.0.4", None, None),
+            ],
+            &["aa:bb:cc:dd:ee:03"],
+        );
+
+        let (items, total) =
+            list(&subnet, &filter(None, 1, 50), &assignments, &view).expect("推導成功");
+        assert_eq!(total, 6);
+        let entry = |address: &str| {
+            items
+                .iter()
+                .find(|entry| entry.address == addr(address))
+                .expect("列存在")
+        };
+        assert_eq!(
+            entry("10.0.0.5").conflicts,
+            vec![conflicts::IP_IN_POOL, conflicts::OBSERVED_MAC_MISMATCH],
+            "既有語意碼在前、觀測碼接續附加"
+        );
+        assert_eq!(
+            entry("10.0.0.3").conflicts,
+            vec![conflicts::OBSERVED_ON_UNASSIGNED],
+            "未指派列亦有觀測碼"
+        );
+        assert!(entry("10.0.0.4").conflicts.is_empty(), "無現況不標記");
+
+        // unassigned_seen：僅 .3（未指派、非池內、有 last_seen_mac）。
+        let mut observed_filter = filter(None, 1, 50);
+        observed_filter.observed = Some(IpObservedFilter::UnassignedSeen);
+        let (items, total) =
+            list(&subnet, &observed_filter, &assignments, &view).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.3"]);
+
+        // unknown_mac：.5 的 MAC 未登錄；.3 的 MAC 已登錄（大小寫不同仍視為已知）→ 僅 .5。
+        let mut unknown = sort_filter(IpSortField::Address, IpSortDir::Desc);
+        unknown.observed = Some(IpObservedFilter::UnknownMac);
+        let (items, total) = list(&subnet, &unknown, &assignments, &view).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.5"]);
     }
 }

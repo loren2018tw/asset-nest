@@ -5,6 +5,7 @@
 //! 衝突標記（票 07）由 `GET` 列徽章與儲存回應的 `warnings` 呈現（見 ADR-0006）。
 //! 受管網段的保留指派／取消會即時推送 Kea，回應附 `kea_sync`（見 ADR-0011）。
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -18,8 +19,10 @@ use crate::AppState;
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment, AssignmentInput, RegisterInput};
 use crate::conflicts;
-use crate::interfaces::Warning;
-use crate::ips::{self, IpEntry, IpFilter, IpSortDir, IpSortField, IpStatusFilter};
+use crate::interfaces::{self, Warning};
+use crate::ips::{
+    self, IpEntry, IpFilter, IpObservedFilter, IpSortDir, IpSortField, IpStatusFilter,
+};
 use crate::kea::sync as kea_sync;
 use crate::kea::sync::KeaSync;
 use crate::observation::{self, ObservationView};
@@ -45,6 +48,8 @@ pub fn router() -> Router<AppState> {
 struct ListQuery {
     q: Option<String>,
     status: Option<String>,
+    /// 觀測篩選白名單（`unassigned_seen`／`unknown_mac`）；無效值回 400（見票 07）。
+    observed: Option<String>,
     /// 排序欄位白名單（`address`／`status`／`location`／`assignment`／`last_seen`）；
     /// 無效值回 400（見票 14、票 02）。
     sort: Option<String>,
@@ -138,6 +143,18 @@ async fn list_subnet_ips(
         })?),
         None => None,
     };
+    // 觀測篩選同樣經白名單驗證（見票 07）。
+    let observed_filter = match query
+        .observed
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(value) => Some(IpObservedFilter::parse(value).ok_or_else(|| {
+            ApiError::validation("觀測篩選須為 unassigned_seen 或 unknown_mac").field("observed")
+        })?),
+        None => None,
+    };
 
     // 排序欄位與方向經白名單驗證，無效值回 400（比照 `/assets`，見票 14）。
     let sort = match query
@@ -173,6 +190,7 @@ async fn list_subnet_ips(
     let filter = IpFilter {
         q: query.q,
         status,
+        observed: observed_filter,
         sort,
         dir,
         page,
@@ -185,8 +203,21 @@ async fn list_subnet_ips(
 
     // 觀測現況批次讀取（單一查詢、無 N+1）；有效涵蓋＝observed ∧ 同 L2 ∧ v4。
     let presence = observation::presence_map(&state.db, id).await?;
-    let observed = !subnet.cidr.contains(':') && subnet.observed && state.prober.is_local(&subnet);
-    let view = ObservationView { observed, presence };
+    // `unknown_mac` 需要全系統已登錄 MAC 集合；其他查詢不需多讀（見票 07）。
+    let known_macs = if observed_filter == Some(IpObservedFilter::UnknownMac) {
+        interfaces::macs(&state.db)
+            .await
+            .map_err(|error| ApiError::internal("讀取介面 MAC 失敗", error))?
+    } else {
+        HashSet::new()
+    };
+    let observed_coverage =
+        !subnet.cidr.contains(':') && subnet.observed && state.prober.is_local(&subnet);
+    let view = ObservationView {
+        observed: observed_coverage,
+        presence,
+        known_macs,
+    };
 
     // v4 枚舉全部 host；v6 僅列出已登錄（有指派）位址（見票 06）。
     let (items, total) = ips::list(&subnet, &filter, &assignments, &view)?;

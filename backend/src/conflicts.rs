@@ -1,9 +1,11 @@
 //! 語意衝突（semantic conflict）領域模組：IpInPool、IpOutOfSubnet、
-//! DuplicateHwAddress 的偵測、列標記與儲存警示。
+//! DuplicateHwAddress 的偵測、列標記與儲存警示；另提供 IP 清單列專用的
+//! 觀測衍生衝突（ObservedMacMismatch、ObservedOnUnassigned；見 ADR-0014）。
 //!
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §3.2，
 //! 決策見 ADR-0006：衝突是標記、不是狀態——僅提示、不阻擋儲存。
 //! IpInUse 已由「同網段不重複指派」的結構規則涵蓋，不在此偵測。
+//! 觀測碼即時計算、不落地，且不計入網段衝突數與指派儲存警示（見票 07）。
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -13,6 +15,7 @@ use ipnet::IpNet;
 use crate::api::ApiError;
 use crate::assignments::ListedAssignment;
 use crate::interfaces::Warning;
+use crate::observation::Presence;
 use crate::subnets::Subnet;
 
 /// IpInPool：指派位址落在該網段任一 DHCP 位址池內（僅 v4；pool 僅 v4 有）。
@@ -21,6 +24,10 @@ pub const IP_IN_POOL: &str = "IpInPool";
 pub const IP_OUT_OF_SUBNET: &str = "IpOutOfSubnet";
 /// DuplicateHwAddress：同一網段同 MAC 出現多筆保留（purpose=reservation）。
 pub const DUPLICATE_HW_ADDRESS: &str = "DuplicateHwAddress";
+/// ObservedMacMismatch：已指派位址被觀測到由非宣告 MAC 使用（見 ADR-0014）。
+pub const OBSERVED_MAC_MISMATCH: &str = "ObservedMacMismatch";
+/// ObservedOnUnassigned：未指派且非池內位址被觀測到有主（見 ADR-0014）。
+pub const OBSERVED_ON_UNASSIGNED: &str = "ObservedOnUnassigned";
 
 /// 一筆指派命中的衝突；`codes` 僅含命中者，依固定順序排列
 /// （IpOutOfSubnet、IpInPool、DuplicateHwAddress），確保列標記與警示穩定。
@@ -100,6 +107,63 @@ pub fn by_address(
         .into_iter()
         .map(|conflict| (conflict.address, conflict.codes))
         .collect())
+}
+
+/// 偵測某網段位址的觀測衍生衝突，以位址文字索引（即時計算、不落地；見票 07）。
+///
+/// 僅供 [`crate::ips::list`] 的列標記合併使用；[`detect`]（網段衝突數）與
+/// [`warnings_for`]（指派儲存警示）不含觀測碼，語意分別維持不變。
+///
+/// 規則（`presence` 以位址文字索引）：
+/// - [`OBSERVED_MAC_MISMATCH`]：位址已指派、宣告介面 MAC 非空，且現況
+///   `last_seen_mac` 與其不同（不分大小寫）。
+/// - [`OBSERVED_ON_UNASSIGNED`]：位址未指派、不在該網段任一 pool 內，
+///   且現況 `last_seen_mac` 非空；池內位址可能由 DHCP 正常使用，不標記。
+///
+/// 回傳僅含命中者；呼叫端先放既有語意碼、再附加觀測碼（固定順序）。
+pub fn observed_codes(
+    subnet: &Subnet,
+    assignments: &[ListedAssignment],
+    presence: &HashMap<String, Presence>,
+) -> Result<HashMap<String, Vec<&'static str>>, ApiError> {
+    let pools = parse_pools(subnet)?;
+    let mut by_address: HashMap<&str, &ListedAssignment> =
+        HashMap::with_capacity(assignments.len());
+    for assignment in assignments {
+        by_address.insert(assignment.address.as_str(), assignment);
+    }
+
+    let mut result = HashMap::new();
+    for (address, presence) in presence {
+        let Some(seen_mac) = presence.last_seen_mac.as_deref() else {
+            continue;
+        };
+
+        match by_address.get(address.as_str()) {
+            Some(assignment) => {
+                // 宣告介面無 MAC 時不比對（無從判定不符）。
+                let Some(declared_mac) = assignment.mac.as_deref() else {
+                    continue;
+                };
+                if !declared_mac.eq_ignore_ascii_case(seen_mac) {
+                    result.insert(address.clone(), vec![OBSERVED_MAC_MISMATCH]);
+                }
+            }
+            None => {
+                let parsed: Ipv4Addr = address
+                    .parse()
+                    .map_err(|error| ApiError::internal("觀測現況位址格式錯誤", error))?;
+                let in_pool = pools
+                    .iter()
+                    .any(|(start, end)| *start <= parsed && parsed <= *end);
+                if !in_pool {
+                    result.insert(address.clone(), vec![OBSERVED_ON_UNASSIGNED]);
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// 建立／更新指派後的警示訊息：該位址命中的衝突（僅提示、不阻擋儲存）。
@@ -303,6 +367,40 @@ mod tests {
             vec![IP_OUT_OF_SUBNET, DUPLICATE_HW_ADDRESS],
             "出界與 MAC 重複可並存，依固定順序"
         );
+    }
+
+    #[test]
+    fn observed_codes_flag_mismatch_and_unassigned_but_never_pool() {
+        let subnet = subnet("10.0.0.0/24", &[("10.0.0.10", "10.0.0.20")]);
+        let assignments = [
+            listed("10.0.0.1", "static", Some("aa:bb:cc:dd:ee:01")),
+            listed("10.0.0.2", "static", None),
+        ];
+        let presence: HashMap<String, Presence> = [
+            ("10.0.0.1", Some("AA:BB:CC:DD:EE:FF")), // 宣告與觀測不符（大小寫不影響）
+            ("10.0.0.2", Some("aa:bb:cc:dd:ee:02")), // 宣告介面無 MAC
+            ("10.0.0.3", Some("aa:bb:cc:dd:ee:03")), // 未指派且非池內
+            ("10.0.0.10", Some("aa:bb:cc:dd:ee:10")), // 池內
+            ("10.0.0.4", None),                      // 僅 last_checked_at
+        ]
+        .into_iter()
+        .map(|(address, mac)| {
+            (
+                address.to_string(),
+                Presence {
+                    last_seen_mac: mac.map(str::to_string),
+                    ..Presence::default()
+                },
+            )
+        })
+        .collect();
+
+        let codes = observed_codes(&subnet, &assignments, &presence).expect("偵測成功");
+        assert_eq!(codes.get("10.0.0.1"), Some(&vec![OBSERVED_MAC_MISMATCH]));
+        assert_eq!(codes.get("10.0.0.2"), None, "宣告 MAC 為空不比對");
+        assert_eq!(codes.get("10.0.0.3"), Some(&vec![OBSERVED_ON_UNASSIGNED]));
+        assert_eq!(codes.get("10.0.0.10"), None, "池內位址不標記");
+        assert_eq!(codes.get("10.0.0.4"), None, "無 last_seen_mac 不標記");
     }
 
     #[test]

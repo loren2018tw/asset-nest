@@ -126,13 +126,16 @@ struct PresenceRow {
     last_checked_at: Option<String>,
 }
 
-/// IP 清單的觀測視圖：有效涵蓋＋各列現況（以位址文字索引）。
+/// IP 清單的觀測視圖：有效涵蓋＋各列現況（以位址文字索引）＋已登錄 MAC 集合。
 ///
 /// 有效涵蓋＝網段 `observed` ∧ 本機同 L2 ∧ v4（由呼叫端計算；v6 恆 false）。
+/// `known_macs` 為全系統 Interface MAC（小寫；見 [`crate::interfaces::macs`]），
+/// 供 `unknown_mac` 篩選；不以該篩選查詢時可留空集合。
 #[derive(Debug, Default)]
 pub struct ObservationView {
     pub observed: bool,
     pub presence: HashMap<String, Presence>,
+    pub known_macs: HashSet<String>,
 }
 
 /// 掃描摘要（HTTP 回應；見 spec §HTTP API）。

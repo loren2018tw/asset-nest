@@ -37,8 +37,8 @@ export interface IpEntry {
   purpose: IpPurpose | null;
   /** 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 null。 */
   assignment: IpAssignmentTarget | null;
-  /** 衝突標記：命中的語意規則代碼（IpInPool／IpOutOfSubnet／DuplicateHwAddress；
-   *  僅標記、不阻擋，見 ADR-0006）。 */
+  /** 衝突標記：命中的語意規則代碼（IpInPool／IpOutOfSubnet／DuplicateHwAddress／
+   *  ObservedMacMismatch／ObservedOnUnassigned；僅標記、不阻擋，見 ADR-0006、0014）。 */
   conflicts: string[];
   /** 最後可見時間（UTC）；從未上線為 null（見票 02）。 */
   last_seen_at: string | null;
@@ -99,12 +99,17 @@ export type IpSortField =
   | "assignment"
   | "last_seen";
 
+/** 觀測篩選：未指派但有主／有未登錄 MAC（伺服器端；見票 07）。 */
+export type IpObservedFilter = "unassigned_seen" | "unknown_mac";
+
 /** IP 清單搜尋、排序與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
   /** 完整位址精確比對；否則對位址文字、資產描述、位置、介面名稱與 MAC 做子字串比對。 */
   q?: string | undefined;
   /** 狀態／用途篩選。 */
   status?: IpStatus | undefined;
+  /** 觀測篩選（`unassigned_seen`／`unknown_mac`）。 */
+  observed?: IpObservedFilter | undefined;
   /** 排序欄位；預設 address。 */
   sort?: IpSortField | undefined;
   /** 排序方向；預設 asc。 */

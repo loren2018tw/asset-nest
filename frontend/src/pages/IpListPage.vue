@@ -18,7 +18,7 @@
     </div>
 
     <div class="row q-col-gutter-sm q-mb-md">
-      <div class="col-12 col-md-6">
+      <div class="col-12 col-md-3">
         <q-input
           v-model="filters.q"
           outlined
@@ -43,6 +43,20 @@
           emit-value
           map-options
           label="狀態／用途"
+          @update:model-value="reload"
+        />
+      </div>
+      <!-- 觀測篩選（見票 07）：未指派但有主／有未登錄 MAC；伺服器端過濾。 -->
+      <div v-if="!isV6" class="col-12 col-sm-6 col-md-3">
+        <q-select
+          v-model="filters.observed"
+          :options="observedOptions"
+          outlined
+          dense
+          clearable
+          emit-value
+          map-options
+          label="觀測"
           @update:model-value="reload"
         />
       </div>
@@ -79,7 +93,7 @@
         </span>
       </div>
       <!-- v6 登錄制：僅已指派位址存在，由「新增位址」輸入並即指派（見票 06） -->
-      <div v-if="isV6" class="col-12 col-sm-6 col-md-3 text-right">
+      <div v-if="isV6" class="col-12 col-sm-6 col-md-6 text-right">
         <q-btn
           color="primary"
           icon="add"
@@ -265,6 +279,7 @@ import {
   quickSweep,
   type IpAssignmentTarget,
   type IpEntry,
+  type IpObservedFilter,
   type IpSeenSource,
   type IpSortField,
   type IpStatus
@@ -287,9 +302,14 @@ const subnetId = Number(route.params.id);
 const subnet = ref<Subnet | null>(null);
 const ips = ref<IpEntry[]>([]);
 const loading = ref(false);
-const filters = ref<{ q: string | null; status: IpStatus | null }>({
+const filters = ref<{
+  q: string | null;
+  status: IpStatus | null;
+  observed: IpObservedFilter | null;
+}>({
   q: "",
-  status: null
+  status: null,
+  observed: null
 });
 
 /**
@@ -367,6 +387,12 @@ const statusOptions = computed<{ label: string; value: IpStatus }[]>(() =>
       ]
 );
 
+/** 觀測篩選選項（見票 07）：未指派但有主／有未登錄 MAC。 */
+const observedOptions: { label: string; value: IpObservedFilter }[] = [
+  { label: "未指派但有主", value: "unassigned_seen" },
+  { label: "有未登錄 MAC", value: "unknown_mac" }
+];
+
 const columns: QTableProps["columns"] = [
   {
     name: "address",
@@ -408,7 +434,7 @@ const columns: QTableProps["columns"] = [
   { name: "actions", label: "操作", field: "address", align: "right" }
 ];
 
-/** 衝突規則代碼的中文標籤與說明（僅提示、不阻擋，見 ADR-0006）。 */
+/** 衝突規則代碼的中文標籤與說明（僅提示、不阻擋，見 ADR-0006、0014）。 */
 const conflictInfo: Record<string, { label: string; hint: string }> = {
   IpInPool: {
     label: "池內",
@@ -421,6 +447,14 @@ const conflictInfo: Record<string, { label: string; hint: string }> = {
   DuplicateHwAddress: {
     label: "MAC 重複",
     hint: "同一 MAC 在同一網段出現多筆保留（僅提示，不阻擋）"
+  },
+  ObservedMacMismatch: {
+    label: "觀測 MAC 不符",
+    hint: "已指派位址被觀測到由非宣告 MAC 使用（僅提示，不阻擋、不修改指派）"
+  },
+  ObservedOnUnassigned: {
+    label: "未指派有主",
+    hint: "未指派且非池內位址被觀測到有主（僅提示，不阻擋、不自動回收）"
   }
 };
 
@@ -505,6 +539,7 @@ async function fetchIps() {
     const page = await listSubnetIps(subnetId, {
       q: filters.value.q?.trim() || undefined,
       status: filters.value.status ?? undefined,
+      observed: filters.value.observed ?? undefined,
       sort: pagination.value.sortBy,
       dir: pagination.value.descending ? "desc" : "asc",
       page: pagination.value.page,

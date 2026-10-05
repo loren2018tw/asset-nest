@@ -1121,3 +1121,370 @@ async fn default_sort_stays_numeric_ascending_and_other_sorts_paginate() {
     assert_eq!(page["total"], 30);
     assert!(addresses(&page).is_empty());
 }
+
+// ---- 觀測衝突標記與篩選（見票 07）----
+
+/// 直接植入觀測現況列（讀取端測試用；有 `last_seen_mac` 者視為已看見）。
+async fn insert_presence(pool: &SqlitePool, subnet_id: i64, address: &str, mac: &str) {
+    sqlx::query(
+        "INSERT INTO ip_presence
+             (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source, last_checked_at)
+         VALUES (?, ?, '2026-10-06T10:00:00Z', ?, 'arp', '2026-10-06T10:00:00Z')",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .bind(mac)
+    .execute(pool)
+    .await
+    .expect("植入觀測現況");
+}
+
+#[tokio::test]
+async fn observed_mac_mismatch_flags_assigned_rows_with_different_seen_mac() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let declared_asset = create_asset(&pool, "宣告主機", "機房 A").await;
+    let declared_interface = create_interface(
+        &pool,
+        declared_asset,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+    let no_mac_asset = create_asset(&pool, "無 MAC 主機", "機房 B").await;
+    let no_mac_interface = create_interface(&pool, no_mac_asset, json!({ "name": "eth1" })).await;
+    let same_asset = create_asset(&pool, "同 MAC 主機", "機房 C").await;
+    let same_interface = create_interface(
+        &pool,
+        same_asset,
+        json!({ "name": "eth2", "mac": "aa:bb:cc:dd:ee:03" }),
+    )
+    .await;
+
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.1",
+        json!({ "interface_id": declared_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.2",
+        json!({ "interface_id": no_mac_interface, "purpose": "static" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.3",
+        json!({ "interface_id": same_interface, "purpose": "static" }),
+    )
+    .await;
+
+    // .1：宣告 MAC 與觀測 MAC 不同（大小寫不影響判別）→ ObservedMacMismatch。
+    insert_presence(&pool, id, "10.0.0.1", "AA:BB:CC:DD:EE:FF").await;
+    // .2：宣告介面無 MAC → 不比對。
+    insert_presence(&pool, id, "10.0.0.2", "aa:bb:cc:dd:ee:02").await;
+    // .3：宣告與觀測同 MAC、大小寫不同 → 不算不符。
+    insert_presence(&pool, id, "10.0.0.3", "AA:BB:CC:DD:EE:03").await;
+    // .4：未指派且非池內但有現況 → ObservedOnUnassigned（不可指派位址）。
+    insert_presence(&pool, id, "10.0.0.4", "aa:bb:cc:dd:ee:04").await;
+
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(
+        row(&page, "10.0.0.1")["conflicts"],
+        json!(["ObservedMacMismatch"]),
+        "已指派且宣告 MAC 與觀測不符"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.2")["conflicts"],
+        json!([]),
+        "宣告介面無 MAC 不比對"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.3")["conflicts"],
+        json!([]),
+        "同 MAC（大小寫不同）不算不符"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.4")["conflicts"],
+        json!(["ObservedOnUnassigned"]),
+        "未指派且非池內有主"
+    );
+}
+
+#[tokio::test]
+async fn observed_on_unassigned_does_not_flag_pool_or_assigned_addresses() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/29",
+            "pools": [{ "start_ip": "10.0.0.5", "end_ip": "10.0.0.6" }]
+        }),
+    )
+    .await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let asset = create_asset(&pool, "指派主機", "機房 A").await;
+    let interface = create_interface(
+        &pool,
+        asset,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.1",
+        json!({ "interface_id": interface, "purpose": "static" }),
+    )
+    .await;
+
+    // .1：已指派、宣告與觀測同 MAC（不比對、也不標未指派）。
+    insert_presence(&pool, id, "10.0.0.1", "aa:bb:cc:dd:ee:01").await;
+    // .3：未指派且非池內 → 標記。
+    insert_presence(&pool, id, "10.0.0.3", "aa:bb:cc:dd:ee:03").await;
+    // .5／.6：池內位址由 DHCP 正常使用 → 不標記。
+    insert_presence(&pool, id, "10.0.0.5", "aa:bb:cc:dd:ee:05").await;
+    insert_presence(&pool, id, "10.0.0.6", "aa:bb:cc:dd:ee:06").await;
+
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(row(&page, "10.0.0.1")["conflicts"], json!([]));
+    assert_eq!(
+        row(&page, "10.0.0.3")["conflicts"],
+        json!(["ObservedOnUnassigned"])
+    );
+    assert_eq!(
+        row(&page, "10.0.0.5")["conflicts"],
+        json!([]),
+        "池內位址不標 ObservedOnUnassigned"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.6")["conflicts"],
+        json!([]),
+        "池內位址不標 ObservedOnUnassigned"
+    );
+}
+
+#[tokio::test]
+async fn observation_codes_are_appended_after_assignment_conflicts() {
+    // /24 指派 .200，縮小為 /25 → IpOutOfSubnet；再植入不同 MAC 現況。
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/24" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let asset = create_asset(&pool, "出界主機", "機房 A").await;
+    let interface = create_interface(
+        &pool,
+        asset,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.200",
+        json!({ "interface_id": interface, "purpose": "static" }),
+    )
+    .await;
+    insert_presence(&pool, id, "10.0.0.200", "aa:bb:cc:dd:ee:99").await;
+
+    let (status, updated) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{id}"),
+        Some(json!({ "cidr": "10.0.0.0/25" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "縮小 CIDR 不阻擋：{updated}");
+
+    let page = list_ips(&pool, id, "?per_page=200").await;
+    assert_eq!(
+        row(&page, "10.0.0.200")["conflicts"],
+        json!(["IpOutOfSubnet", "ObservedMacMismatch"]),
+        "觀測碼固定接在既有指派語意碼之後"
+    );
+}
+
+#[tokio::test]
+async fn observed_filters_are_server_side_and_case_insensitive() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/29",
+            "pools": [{ "start_ip": "10.0.0.5", "end_ip": "10.0.0.6" }]
+        }),
+    )
+    .await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    // 已登錄 MAC（未指派）：供 unknown_mac 的大小寫比對。
+    let known_asset = create_asset(&pool, "登錄主機", "機房 A").await;
+    create_interface(
+        &pool,
+        known_asset,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+
+    // .1 已指派，宣告 MAC 與觀測不同 → 兩個篩選的邊界（已指派不屬 unassigned_seen）。
+    let assigned_asset = create_asset(&pool, "指派主機", "機房 B").await;
+    let assigned_interface = create_interface(
+        &pool,
+        assigned_asset,
+        json!({ "name": "eth1", "mac": "aa:bb:cc:dd:ee:02" }),
+    )
+    .await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.1",
+        json!({ "interface_id": assigned_interface, "purpose": "static" }),
+    )
+    .await;
+
+    insert_presence(&pool, id, "10.0.0.1", "00:00:00:00:00:97").await;
+    // .2 未指派、MAC 為已登錄（大寫輸入）→ unassigned_seen 命中、unknown_mac 排除。
+    insert_presence(&pool, id, "10.0.0.2", "AA:BB:CC:DD:EE:01").await;
+    // .3 未指派且未登錄 → 兩個篩選皆命中。
+    insert_presence(&pool, id, "10.0.0.3", "00:00:00:00:00:99").await;
+    // .5 池內且未登錄 → unassigned_seen 排除、unknown_mac 命中。
+    insert_presence(&pool, id, "10.0.0.5", "00:00:00:00:00:98").await;
+
+    // 預設快速路徑（address 升冪、無排序參數）：伺服器端篩選。
+    let page = list_ips(&pool, id, "?observed=unassigned_seen").await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.2", "10.0.0.3"]);
+
+    let page = list_ips(&pool, id, "?observed=unknown_mac").await;
+    assert_eq!(page["total"], 3);
+    assert_eq!(addresses(&page), ["10.0.0.1", "10.0.0.3", "10.0.0.5"]);
+
+    // 排序（非預設路徑）與分頁：當頁取自排序後結果。
+    let page = list_ips(
+        &pool,
+        id,
+        "?observed=unknown_mac&sort=address&dir=desc&page=1&per_page=2",
+    )
+    .await;
+    assert_eq!(page["total"], 3);
+    assert_eq!(addresses(&page), ["10.0.0.5", "10.0.0.3"]);
+
+    let page = list_ips(
+        &pool,
+        id,
+        "?observed=unknown_mac&sort=address&dir=desc&page=2&per_page=2",
+    )
+    .await;
+    assert_eq!(addresses(&page), ["10.0.0.1"]);
+
+    // last_seen 排序亦套用篩選（NULL 位於符合者之後）。
+    let page = list_ips(
+        &pool,
+        id,
+        "?observed=unassigned_seen&sort=last_seen&dir=asc",
+    )
+    .await;
+    assert_eq!(addresses(&page), ["10.0.0.2", "10.0.0.3"]);
+
+    // 與既有 status／q 篩選並用（AND）。
+    let page = list_ips(&pool, id, "?observed=unknown_mac&status=static").await;
+    assert_eq!(addresses(&page), ["10.0.0.1"]);
+
+    let page = list_ips(
+        &pool,
+        id,
+        &format!("?observed=unknown_mac&q={}", encode("10.0.0.3")),
+    )
+    .await;
+    assert_eq!(addresses(&page), ["10.0.0.3"]);
+
+    let page = list_ips(
+        &pool,
+        id,
+        &format!("?observed=unassigned_seen&q={}", encode("10.0.0.4")),
+    )
+    .await;
+    assert_eq!(page["total"], 0, "無現況的位址不符篩選");
+
+    // v6 恆無觀測：篩選回空集合。
+    let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_id = v6["id"].as_i64().expect("回應含 id");
+    let page = list_ips(&pool, v6_id, "?observed=unassigned_seen").await;
+    assert_eq!(page["total"], 0);
+    assert!(addresses(&page).is_empty());
+
+    // 無效值 → 400，指出 `observed` 欄位。
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?observed=bogus"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "observed");
+}
+
+#[tokio::test]
+async fn observation_codes_do_not_change_conflict_count_or_assignment_warnings() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+    let asset = create_asset(&pool, "主機", "機房 A").await;
+    let interface = create_interface(
+        &pool,
+        asset,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+
+    // 指派前先植入不符現況：儲存回應的 warnings 不得含觀測碼。
+    insert_presence(&pool, id, "10.0.0.1", "aa:bb:cc:dd:ee:99").await;
+    insert_presence(&pool, id, "10.0.0.3", "aa:bb:cc:dd:ee:98").await;
+
+    let (status, json) = send(
+        &pool,
+        Method::PUT,
+        &format!("/api/v1/subnets/{id}/ips/10.0.0.1/assignment"),
+        Some(json!({ "interface_id": interface, "purpose": "static" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "指派應成功：{json}");
+    let warnings = json["warnings"].as_array().expect("warnings 為陣列");
+    assert!(
+        warnings.iter().all(|warning| !warning["code"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Observed")),
+        "指派儲存警示不含觀測衍生碼：{warnings:?}"
+    );
+
+    // 網段列表的衝突數語意不變（僅指派語意衝突）：觀測標記不算。
+    let (status, subnets) = send(&pool, Method::GET, "/api/v1/subnets", None).await;
+    assert_eq!(status, StatusCode::OK, "讀取網段列表應成功");
+    let summary = subnets["items"]
+        .as_array()
+        .expect("網段列表為陣列")
+        .iter()
+        .find(|summary| summary["id"] == id)
+        .expect("列表含此網段");
+    assert_eq!(summary["conflicts"], 0, "觀測碼不得計入網段衝突數");
+
+    // IP 列仍呈現觀測碼（即時計算、不落地）。
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(
+        row(&page, "10.0.0.1")["conflicts"],
+        json!(["ObservedMacMismatch"])
+    );
+    assert_eq!(
+        row(&page, "10.0.0.3")["conflicts"],
+        json!(["ObservedOnUnassigned"])
+    );
+}

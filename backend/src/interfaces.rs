@@ -2,6 +2,8 @@
 //!
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.2、§3.1。
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
@@ -135,6 +137,22 @@ pub async fn list_for_asset(pool: &SqlitePool, asset_id: i64) -> sqlx::Result<Ve
 /// 讀取單一介面；不存在回傳 `None`。
 pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Interface>> {
     Ok(fetch_row(pool, id).await?.map(InterfaceRow::into_interface))
+}
+
+/// 全系統已登錄的 Interface MAC（trim＋小寫；排除空值）。
+///
+/// 供 IP 清單的觀測 `unknown_mac` 篩選比對（見票 07）：位址的現況
+/// `last_seen_mac` 不在此集合即視為未登錄；比較不分大小寫。
+pub async fn macs(pool: &SqlitePool) -> sqlx::Result<HashSet<String>> {
+    let values: Vec<String> =
+        sqlx::query_scalar("SELECT mac FROM interfaces WHERE mac IS NOT NULL AND trim(mac) <> ''")
+            .fetch_all(pool)
+            .await?;
+
+    Ok(values
+        .into_iter()
+        .map(|mac| mac.trim().to_ascii_lowercase())
+        .collect())
 }
 
 /// 於既有連線（可為交易）內新增介面，回傳新列 id；不讀回完整資料。
