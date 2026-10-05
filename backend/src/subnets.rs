@@ -55,7 +55,10 @@ struct PoolJoinRow {
 }
 
 /// API 回傳的 DHCP 位址池（僅 IPv4；見 spec §2.3）。
-#[derive(Debug, Serialize)]
+///
+/// `Clone`：掃描服務以 [`crate::observation::run_quick`] 複製網段至
+/// `spawn_blocking` 的探測工作。
+#[derive(Debug, Clone, Serialize)]
 pub struct Pool {
     pub id: i64,
     pub start_ip: String,
@@ -63,7 +66,7 @@ pub struct Pool {
 }
 
 /// API 回傳的網段（含 pools）。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Subnet {
     pub id: i64,
     /// 正規化 CIDR：host bits 收斂為網路地址。

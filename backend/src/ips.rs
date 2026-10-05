@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::api::ApiError;
 use crate::assignments::{IpAssignment, ListedAssignment};
 use crate::conflicts;
+use crate::observation::{ObservationView, Presence};
 use crate::subnets::Subnet;
 
 /// v4 網段的 host 位址範圍；端點皆含。
@@ -97,7 +98,7 @@ pub struct IpFilter {
     pub per_page: i64,
 }
 
-/// IP 清單可排序欄位白名單（見 spec §5、票 14）。
+/// IP 清單可排序欄位白名單（見 spec §5、票 14、票 02 擴充）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpSortField {
     #[default]
@@ -105,6 +106,8 @@ pub enum IpSortField {
     Status,
     Location,
     Assignment,
+    /// 最後可見；NULL（未觀測的從未上線與未指派）固定排最後。
+    LastSeen,
 }
 
 impl IpSortField {
@@ -115,6 +118,7 @@ impl IpSortField {
             "status" => Some(Self::Status),
             "location" => Some(Self::Location),
             "assignment" => Some(Self::Assignment),
+            "last_seen" => Some(Self::LastSeen),
             _ => None,
         }
     }
@@ -187,6 +191,17 @@ pub struct IpEntry {
     /// 衝突標記：命中的語意規則代碼（見 [`crate::conflicts`]；
     /// 依固定順序排列，僅標記、不阻擋）。
     pub conflicts: Vec<&'static str>,
+    /// 最後可見時間（UTC `YYYY-MM-DDTHH:MM:SSZ`）；從未上線為 `null`。
+    pub last_seen_at: Option<String>,
+    /// 最後可見 MAC（正規化小寫冒號格式）；從未上線為 `null`。
+    pub last_seen_mac: Option<String>,
+    /// 最後可見來源：`arp`／`kea_lease`；從未上線為 `null`。
+    pub last_seen_source: Option<String>,
+    /// 最後檢查時間；尚未掃描為 `null`。
+    pub last_checked_at: Option<String>,
+    /// 有效觀測涵蓋＝網段 `observed` ∧ 本機同 L2 ∧ v4；據此區分
+    /// 「未觀測」與「從未上線」（見 spec §讀取端）。
+    pub observed: bool,
 }
 
 /// 由網段推導一頁 IP 列；回傳（當頁列、符合總數）。
@@ -194,14 +209,16 @@ pub struct IpEntry {
 /// v4 枚舉全部 host 位址，並聯集出界指派列（網段縮小造成；見票 07）；
 /// v6 為登錄制，僅列出已指派（登錄）位址。
 /// 搜尋、狀態篩選與分頁皆為伺服器端。`assignments` 為該網段的指派列（見票 05）；
+/// `observation` 帶入有效涵蓋與現況列（批次讀取、不落地；見票 02）。
 /// 每列 `conflicts` 由 [`crate::conflicts`] 即時偵測填入。
 pub fn list(
     subnet: &Subnet,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
+    observation: &ObservationView,
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
     match parse_network(&subnet.cidr)? {
-        IpNet::V4(network) => list_v4(subnet, &network, filter, assignments),
+        IpNet::V4(network) => list_v4(subnet, &network, filter, assignments, observation),
         IpNet::V6(_) => list_v6(subnet, filter, assignments),
     }
 }
@@ -217,6 +234,7 @@ fn list_v4(
     network: &Ipv4Net,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
+    observation: &ObservationView,
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
     let pools = parse_pools(subnet)?;
     let range = HostRange::of(network);
@@ -244,6 +262,15 @@ fn list_v4(
     }
     extras.sort_unstable();
 
+    // v4 清單共用輸入：指派、衝突與觀測現況（見票 02、票 07）。
+    let context = V4Context {
+        pools: &pools,
+        assignments: &by_address,
+        conflicts: &conflicts,
+        presence: &observation.presence,
+        observed: observation.observed,
+    };
+
     let per_page = u64::try_from(filter.per_page).unwrap_or(1).max(1);
     let offset = u64::try_from(filter.page.max(1) - 1)
         .unwrap_or(0)
@@ -259,7 +286,7 @@ fn list_v4(
                     let total =
                         u64::from(range.contains(exact) || extras.binary_search(&exact).is_ok());
                     let items = if offset == 0 && total == 1 {
-                        vec![entry_v4(exact, &pools, &by_address, &conflicts)]
+                        vec![entry_v4(exact, &context)]
                     } else {
                         Vec::new()
                     };
@@ -274,7 +301,7 @@ fn list_v4(
             let end = offset.saturating_add(per_page).min(total);
             let items = (offset..end)
                 .filter_map(|index| range.nth(index))
-                .map(|address| entry_v4(address, &pools, &by_address, &conflicts))
+                .map(|address| entry_v4(address, &context))
                 .collect();
             return Ok((items, total));
         }
@@ -282,9 +309,7 @@ fn list_v4(
         // 一般情況：線性掃描位址並依關鍵字／狀態過濾，出界指派列以數值順序合併；
         // 極大前綴成本較高，實務網段規模（/16–/32）可忽略（見票 04 註記）。
         let mut scanner = V4Scanner {
-            pools: &pools,
-            assignments: &by_address,
-            conflicts: &conflicts,
+            context: &context,
             status: filter.status,
             query_lower: query.map(str::to_lowercase),
             offset,
@@ -319,8 +344,7 @@ fn list_v4(
                 push_sort_key_v4(
                     &mut keys,
                     *extra,
-                    &pools,
-                    &by_address,
+                    &context,
                     filter.status,
                     query_lower.as_deref(),
                 );
@@ -329,8 +353,7 @@ fn list_v4(
         push_sort_key_v4(
             &mut keys,
             address,
-            &pools,
-            &by_address,
+            &context,
             filter.status,
             query_lower.as_deref(),
         );
@@ -339,8 +362,7 @@ fn list_v4(
         push_sort_key_v4(
             &mut keys,
             *extra,
-            &pools,
-            &by_address,
+            &context,
             filter.status,
             query_lower.as_deref(),
         );
@@ -356,7 +378,7 @@ fn list_v4(
         .map(|key| {
             // 鍵的位址由 v4 u32 值轉存 u128，還原必為合法 v4 位址。
             let address = Ipv4Addr::from(key.address as u32);
-            entry_v4(address, &pools, &by_address, &conflicts)
+            entry_v4(address, &context)
         })
         .collect();
 
@@ -367,21 +389,32 @@ fn list_v4(
 fn push_sort_key_v4(
     keys: &mut Vec<SortKey>,
     address: Ipv4Addr,
-    pools: &[PoolRange],
-    assignments: &HashMap<&str, &ListedAssignment>,
+    context: &V4Context,
     status: Option<IpStatusFilter>,
     query_lower: Option<&str>,
 ) {
     let text = address.to_string();
-    let assignment = assignments.get(text.as_str()).copied();
-    if !matches_v4_filters(pools, address, assignment, &text, status, query_lower) {
+    let assignment = context.assignments.get(text.as_str()).copied();
+    if !matches_v4_filters(
+        context.pools,
+        address,
+        assignment,
+        &text,
+        status,
+        query_lower,
+    ) {
         return;
     }
 
+    let last_seen = context
+        .presence
+        .get(text.as_str())
+        .and_then(|presence| presence.last_seen_at.as_deref());
     keys.push(SortKey::new(
         u128::from(address.to_bits()),
-        status_of(pools, address, assignment),
+        status_of(context.pools, address, assignment),
         assignment,
+        last_seen,
     ));
 }
 
@@ -407,11 +440,18 @@ fn matches_v4_filters(
     true
 }
 
-/// v4 清單掃描：合併 host 範圍與出界指派列，依序套用篩選與分頁。
-struct V4Scanner<'a> {
+/// v4 清單的共用輸入：指派索引、衝突、觀測現況與有效涵蓋（見票 02、票 07）。
+struct V4Context<'a> {
     pools: &'a [PoolRange],
     assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
     conflicts: &'a HashMap<String, Vec<&'static str>>,
+    presence: &'a HashMap<String, Presence>,
+    observed: bool,
+}
+
+/// v4 清單掃描：合併 host 範圍與出界指派列，依序套用篩選與分頁。
+struct V4Scanner<'a> {
+    context: &'a V4Context<'a>,
     status: Option<IpStatusFilter>,
     query_lower: Option<String>,
     offset: u64,
@@ -424,10 +464,10 @@ impl V4Scanner<'_> {
     /// 考慮一個位址：符合篩選時計入總數，並在當頁範圍內收列。
     fn consider(&mut self, address: Ipv4Addr) {
         let text = address.to_string();
-        let assignment = self.assignments.get(text.as_str()).copied();
+        let assignment = self.context.assignments.get(text.as_str()).copied();
 
         if !matches_v4_filters(
-            self.pools,
+            self.context.pools,
             address,
             assignment,
             &text,
@@ -438,37 +478,35 @@ impl V4Scanner<'_> {
         }
 
         if self.total >= self.offset && (self.items.len() as u64) < self.per_page {
-            self.items.push(entry_v4(
-                address,
-                self.pools,
-                self.assignments,
-                self.conflicts,
-            ));
+            let entry = entry_v4(address, self.context);
+            self.items.push(entry);
         }
         self.total += 1;
     }
 }
 
-/// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool 內為「可用」。
-fn entry_v4(
-    address: Ipv4Addr,
-    pools: &[PoolRange],
-    assignments: &HashMap<&str, &ListedAssignment>,
-    conflicts: &HashMap<String, Vec<&'static str>>,
-) -> IpEntry {
-    let in_pool = pools.iter().any(|pool| pool.contains(address));
+/// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool 內為「可用」；
+/// 觀測現況由 `(subnet_id, address)` 左併（見票 02）。
+fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
+    let in_pool = context.pools.iter().any(|pool| pool.contains(address));
     let text = address.to_string();
-    let assignment = assignments.get(text.as_str()).copied();
+    let assignment = context.assignments.get(text.as_str()).copied();
+    let presence = context.presence.get(text.as_str());
     IpEntry {
         address: IpAddr::V4(address),
         in_pool,
-        status: status_of(pools, address, assignment),
+        status: status_of(context.pools, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
         conflicts: assignment
-            .and_then(|item| conflicts.get(&item.address))
+            .and_then(|item| context.conflicts.get(&item.address))
             .cloned()
             .unwrap_or_default(),
+        last_seen_at: presence.and_then(|presence| presence.last_seen_at.clone()),
+        last_seen_mac: presence.and_then(|presence| presence.last_seen_mac.clone()),
+        last_seen_source: presence.and_then(|presence| presence.last_seen_source.clone()),
+        last_checked_at: presence.and_then(|presence| presence.last_checked_at.clone()),
+        observed: context.observed,
     }
 }
 
@@ -532,8 +570,9 @@ fn list_v6(
                 continue;
             }
         }
+        // v6 恆為未觀測：排序鍵不帶最後可見（見 spec §讀取端）。
         matched.push((
-            SortKey::new(u128::from(address), "static", Some(assignment)),
+            SortKey::new(u128::from(address), "static", Some(assignment), None),
             assignment,
             address,
         ));
@@ -553,6 +592,8 @@ fn list_v6(
 }
 
 /// 建立一列 v6 登錄位址；狀態恆為「手動設定」。
+///
+/// v6 恆為未觀測（有效涵蓋 false、無現況；見 spec §讀取端）。
 fn entry_v6(
     address: Ipv6Addr,
     assignment: &ListedAssignment,
@@ -568,6 +609,11 @@ fn entry_v6(
             .get(&assignment.address)
             .cloned()
             .unwrap_or_default(),
+        last_seen_at: None,
+        last_seen_mac: None,
+        last_seen_source: None,
+        last_checked_at: None,
+        observed: false,
     }
 }
 
@@ -616,24 +662,33 @@ struct SortKey {
     location_lower: Option<String>,
     /// 指派資產描述（小寫）；未指派為 `None`（固定排最後）。
     assignment_lower: Option<String>,
+    /// 最後可見時間（UTC 固定格式，字串即時間序）；從未上線為 `None`（固定排最後）。
+    last_seen_at: Option<String>,
 }
 
 impl SortKey {
     /// 建立列鍵；`assignment` 為 `None` 代表未指派。
-    fn new(address: u128, status: &str, assignment: Option<&ListedAssignment>) -> Self {
+    fn new(
+        address: u128,
+        status: &str,
+        assignment: Option<&ListedAssignment>,
+        last_seen_at: Option<&str>,
+    ) -> Self {
         Self {
             address,
             status_rank: status_rank(status),
             location_lower: assignment.map(|item| item.asset_location.to_lowercase()),
             assignment_lower: assignment.map(|item| item.asset_description.to_lowercase()),
+            last_seen_at: last_seen_at.map(str::to_string),
         }
     }
 }
 
-/// 比較列鍵；回傳排序順序（見 spec §4.3、§7、票 14）。
+/// 比較列鍵；回傳排序順序（見 spec §4.3、§7、票 14、票 02）。
 ///
 /// - `dir` 只反轉所選欄位本身；同鍵一律以位址數值升冪決勝。
 /// - 位置／指派對象欄的未指派（空白）列在 asc、desc 皆固定排最後。
+/// - 最後可見欄的 NULL（從未上線＋未指派）在 asc、desc 皆固定排最後。
 fn compare_sort_keys(a: &SortKey, b: &SortKey, sort: IpSortField, dir: IpSortDir) -> Ordering {
     let primary = match sort {
         IpSortField::Address => a.address.cmp(&b.address),
@@ -648,11 +703,15 @@ fn compare_sort_keys(a: &SortKey, b: &SortKey, sort: IpSortField, dir: IpSortDir
             b.assignment_lower.as_deref(),
             dir,
         ),
+        // 時間為 `YYYY-MM-DDTHH:MM:SSZ` 固定格式，字串序即時間序。
+        IpSortField::LastSeen => {
+            compare_optional_text(a.last_seen_at.as_deref(), b.last_seen_at.as_deref(), dir)
+        }
     };
 
     let primary = match (sort, dir) {
-        // 未指派固定排最後：空值方向不隨 dir 反轉（見 spec §7）。
-        (IpSortField::Location | IpSortField::Assignment, _) => primary,
+        // 空值固定排最後：方向已於比較函式內處理，不隨 dir 反轉（見 spec §7）。
+        (IpSortField::Location | IpSortField::Assignment | IpSortField::LastSeen, _) => primary,
         (_, IpSortDir::Desc) => primary.reverse(),
         (_, IpSortDir::Asc) => primary,
     };
@@ -798,9 +857,14 @@ mod tests {
         }
     }
 
+    /// 無觀測視圖：多數既有測試不涉觀測欄（見票 02）。
+    fn no_observation() -> ObservationView {
+        ObservationView::default()
+    }
+
     /// 無指派資料的呼叫捷徑（比照票 04 測試）。
     fn list_entries(subnet: &Subnet, filter: &IpFilter) -> Result<(Vec<IpEntry>, u64), ApiError> {
-        list(subnet, filter, &[])
+        list(subnet, filter, &[], &no_observation())
     }
 
     /// 測試用指派列（資產位置固定「機房 A」）。
@@ -978,7 +1042,13 @@ mod tests {
             listed("10.0.0.6", "static", "舊設備", Some("eth1"), None),
         ];
 
-        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 6);
 
         let entry = |address: &str| {
@@ -1037,7 +1107,13 @@ mod tests {
         let mut assignment = listed("10.0.0.1", "static", "資料庫主機", Some("eth0"), None);
         assignment.asset_property_no = Some("P-001".to_string());
 
-        let (items, _) = list(&subnet, &filter(None, 1, 50), &[assignment]).expect("推導成功");
+        let (items, _) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &[assignment],
+            &no_observation(),
+        )
+        .expect("推導成功");
         let target = items[0].assignment.as_ref().expect("含指派對象");
         assert_eq!(target.asset_property_no.as_deref(), Some("P-001"));
     }
@@ -1055,7 +1131,13 @@ mod tests {
         model_only.asset_model = Some("LaserJet".to_string());
 
         let assignments = [both, brand_only, model_only];
-        let (items, _) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        let (items, _) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
 
         let target = |index: usize| items[index].assignment.as_ref().expect("含指派對象");
         assert_eq!(target(0).asset_brand.as_deref(), Some("Dell"));
@@ -1078,6 +1160,7 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::Static),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 1);
@@ -1087,6 +1170,7 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::Reservation),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 1);
@@ -1096,6 +1180,7 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::InPool),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 1);
@@ -1105,6 +1190,7 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::Available),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 3);
@@ -1127,43 +1213,78 @@ mod tests {
         ];
 
         // 資產描述（不分大小寫）。
-        let (items, total) =
-            list(&subnet, &filter(Some("資料庫"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("資料庫"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.1"]);
 
         // 介面名稱。
-        let (items, total) =
-            list(&subnet, &filter(Some("ETH0"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("ETH0"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.1"]);
 
         // MAC 子字串（不分大小寫）。
-        let (items, total) =
-            list(&subnet, &filter(Some("bb:cc"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("bb:cc"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.2"]);
 
         // 資產位置（子字串、不分大小寫）。
-        let (items, total) =
-            list(&subnet, &filter(Some("機房"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("機房"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.1"]);
 
-        let (items, total) =
-            list(&subnet, &filter(Some("SERVER ROOM"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("SERVER ROOM"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.2"]);
 
         // 位址子字串與指派對象比對並存，維持數值排序與分頁。
-        let (items, total) =
-            list(&subnet, &filter(Some("10.0.0."), 2, 3), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("10.0.0."), 2, 3),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 6);
         assert_eq!(addresses(&items), ["10.0.0.4", "10.0.0.5", "10.0.0.6"]);
 
         // 無符合：空結果。
-        let (items, total) =
-            list(&subnet, &filter(Some("不存在"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("不存在"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 0);
         assert!(items.is_empty());
     }
@@ -1198,7 +1319,13 @@ mod tests {
             listed("fd00::1", "static", "閘道", Some("eth2"), None),
         ];
 
-        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 3, "僅列出已登錄位址");
         assert_eq!(
             addresses(&items),
@@ -1221,7 +1348,8 @@ mod tests {
         assert!(first.conflicts.is_empty(), "網段內登錄位址無衝突");
 
         // 無登錄：空清單（不枚舉空閒位址）
-        let (items, total) = list(&subnet, &filter(None, 1, 50), &[]).expect("推導成功");
+        let (items, total) =
+            list(&subnet, &filter(None, 1, 50), &[], &no_observation()).expect("推導成功");
         assert_eq!(total, 0);
         assert!(items.is_empty());
     }
@@ -1242,7 +1370,13 @@ mod tests {
         ];
 
         // 伺服器端分頁（數值排序）
-        let (items, total) = list(&subnet, &filter(None, 2, 1), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(None, 2, 1),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 2);
         assert_eq!(addresses(&items), ["fd00::10"]);
 
@@ -1251,6 +1385,7 @@ mod tests {
             &subnet,
             &filter(Some("fd00:0:0:0:0:0:0:10"), 1, 50),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 1);
@@ -1265,8 +1400,13 @@ mod tests {
             ("SERVER ROOM", "fd00::2"),
             ("bb:cc", "fd00::2"),
         ] {
-            let (items, total) =
-                list(&subnet, &filter(Some(query), 1, 50), &assignments).expect("推導成功");
+            let (items, total) = list(
+                &subnet,
+                &filter(Some(query), 1, 50),
+                &assignments,
+                &no_observation(),
+            )
+            .expect("推導成功");
             assert_eq!(total, 1, "q={query}");
             assert_eq!(addresses(&items), [address], "q={query}");
         }
@@ -1276,6 +1416,7 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::Static),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 2);
@@ -1286,8 +1427,13 @@ mod tests {
             IpStatusFilter::InPool,
             IpStatusFilter::Reservation,
         ] {
-            let (items, total) =
-                list(&subnet, &status_filter(status), &assignments).expect("推導成功");
+            let (items, total) = list(
+                &subnet,
+                &status_filter(status),
+                &assignments,
+                &no_observation(),
+            )
+            .expect("推導成功");
             assert_eq!(total, 0, "{status:?} 篩選應為空");
             assert!(items.is_empty());
         }
@@ -1302,7 +1448,13 @@ mod tests {
             listed("fd00::5", "static", "出界主機", Some("eth1"), None),
         ];
 
-        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 2);
         assert_eq!(addresses(&items), ["fd00::5", "fd00:0:0:1::5"]);
         assert_eq!(
@@ -1326,7 +1478,13 @@ mod tests {
         )];
 
         // 無條件：出界列排在數值順序位置（第 127 筆）
-        let (items, total) = list(&subnet, &filter(None, 3, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(None, 3, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 127);
         assert_eq!(items.len(), 27, "第 3 頁：host 101–126 與出界列");
         assert_eq!(items[26].address, addr("10.0.0.200"));
@@ -1342,8 +1500,13 @@ mod tests {
         );
 
         // 完整位址精確比對涵蓋出界列
-        let (items, total) =
-            list(&subnet, &filter(Some("10.0.0.200"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("10.0.0.200"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.200"]);
 
@@ -1352,6 +1515,7 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::Static),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 1);
@@ -1361,13 +1525,19 @@ mod tests {
             &subnet,
             &status_filter(IpStatusFilter::Available),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 126, "可用列仍為 host 數");
 
         // 關鍵字子字串比對涵蓋出界列
-        let (items, total) =
-            list(&subnet, &filter(Some("出界"), 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(Some("出界"), 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.200"]);
     }
@@ -1381,7 +1551,13 @@ mod tests {
             listed("10.0.0.150", "static", "池內主機", Some("eth1"), None),
         ];
 
-        let (items, total) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        let (items, total) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(total, 127, "126 個 host 加 1 筆出界列");
 
         let entry = |address: &str| {
@@ -1415,7 +1591,13 @@ mod tests {
         )];
 
         assert!(
-            list(&subnet, &filter(None, 1, 50), &assignments).is_err(),
+            list(
+                &subnet,
+                &filter(None, 1, 50),
+                &assignments,
+                &no_observation()
+            )
+            .is_err(),
             "v6 出現非 static 用途視為資料異常"
         );
     }
@@ -1480,6 +1662,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Status, IpSortDir::Asc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 6);
@@ -1495,6 +1678,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Status, IpSortDir::Desc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(
@@ -1520,6 +1704,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Location, IpSortDir::Asc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(
@@ -1534,6 +1719,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Location, IpSortDir::Desc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(
@@ -1548,6 +1734,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Assignment, IpSortDir::Asc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(
@@ -1562,6 +1749,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Assignment, IpSortDir::Desc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(
@@ -1608,6 +1796,7 @@ mod tests {
                 &subnet,
                 &sort_filter(IpSortField::Location, dir),
                 &assignments,
+                &no_observation(),
             )
             .expect("推導成功");
             assert_eq!(
@@ -1629,7 +1818,8 @@ mod tests {
 
         let mut filter = sort_filter(IpSortField::Assignment, IpSortDir::Desc);
         filter.status = Some(IpStatusFilter::Static);
-        let (items, total) = list(&subnet, &filter, &assignments).expect("推導成功");
+        let (items, total) =
+            list(&subnet, &filter, &assignments, &no_observation()).expect("推導成功");
         assert_eq!(total, 2, "僅手動設定列");
         assert_eq!(addresses(&items), ["10.0.0.1", "10.0.0.2"], "Zulu > alpha");
     }
@@ -1656,6 +1846,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Address, IpSortDir::Desc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 127);
@@ -1667,6 +1858,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Location, IpSortDir::Asc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(total, 127);
@@ -1686,7 +1878,13 @@ mod tests {
         ];
 
         // 預設：位址數值升冪
-        let (items, _) = list(&subnet, &filter(None, 1, 50), &assignments).expect("推導成功");
+        let (items, _) = list(
+            &subnet,
+            &filter(None, 1, 50),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
         assert_eq!(addresses(&items), ["fd00::1", "fd00::2", "fd00::10"]);
 
         // 位址 desc：數值反序（非文字序）
@@ -1694,6 +1892,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Address, IpSortDir::Desc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(addresses(&items), ["fd00::10", "fd00::2", "fd00::1"]);
@@ -1703,6 +1902,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Location, IpSortDir::Asc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(addresses(&items), ["fd00::1", "fd00::2", "fd00::10"]);
@@ -1712,6 +1912,7 @@ mod tests {
             &subnet,
             &sort_filter(IpSortField::Assignment, IpSortDir::Desc),
             &assignments,
+            &no_observation(),
         )
         .expect("推導成功");
         assert_eq!(addresses(&items), ["fd00::10", "fd00::1", "fd00::2"]);

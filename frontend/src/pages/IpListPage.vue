@@ -46,6 +46,23 @@
           @update:model-value="reload"
         />
       </div>
+      <!-- 立即快速掃描（見票 02）；v6 無觀測，v4 未開觀測／非同 L2 時停用 -->
+      <div v-if="!isV6" class="col-12 col-sm-6 col-md-3 text-right">
+        <span>
+          <q-btn
+            color="primary"
+            outline
+            icon="radar"
+            label="立即掃描"
+            :loading="sweeping"
+            :disable="sweepDisabledReason !== null"
+            @click="runQuickSweep"
+          />
+          <q-tooltip v-if="sweepDisabledReason">{{
+            sweepDisabledReason
+          }}</q-tooltip>
+        </span>
+      </div>
       <!-- v6 登錄制：僅已指派位址存在，由「新增位址」輸入並即指派（見票 06） -->
       <div v-if="isV6" class="col-12 col-sm-6 col-md-3 text-right">
         <q-btn
@@ -102,6 +119,31 @@
             </div>
           </template>
           <span v-else class="text-grey-6">—</span>
+        </q-td>
+      </template>
+      <!-- 最後可見（見票 02）：未觀測／從未上線／相對時間三態 -->
+      <template #body-cell-last_seen="props">
+        <q-td :props="props">
+          <template v-if="!props.row.observed">
+            <span class="text-grey-6">未觀測</span>
+            <q-tooltip>{{ unobservedHint }}</q-tooltip>
+          </template>
+          <template v-else-if="!props.row.last_seen_at">
+            <span class="text-grey-7">從未上線</span>
+            <q-tooltip>
+              已開啟觀測並持續檢查；尚未看到此位址
+              <template v-if="props.row.last_checked_at">
+                <br />最後檢查：{{ checkedLabel(props.row.last_checked_at) }}
+              </template>
+            </q-tooltip>
+          </template>
+          <template v-else>
+            <span>{{ relativeTime(props.row.last_seen_at) }}</span>
+            <q-tooltip>
+              來源：{{ sourceLabel(props.row.last_seen_source) }}<br />
+              最後檢查：{{ checkedLabel(props.row.last_checked_at) }}
+            </q-tooltip>
+          </template>
         </q-td>
       </template>
       <template #body-cell-conflicts="props">
@@ -188,14 +230,17 @@ import { useRoute } from "vue-router";
 import {
   cancelAssignment,
   listSubnetIps,
+  quickSweep,
   type IpAssignmentTarget,
   type IpEntry,
+  type IpSeenSource,
   type IpSortField,
   type IpStatus
 } from "@/api/ips";
 import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
 const route = useRoute();
@@ -231,9 +276,39 @@ const pagination = ref<{
 
 const assignmentOpen = ref(false);
 const assignmentEntry = ref<IpEntry | null>(null);
+/** 「立即掃描」進行中（見票 02）。 */
+const sweeping = ref(false);
 
 /** v6 為登錄制（見票 06）：僅列登錄位址、用途固定 static、無 pool。 */
 const isV6 = computed(() => subnet.value?.cidr.includes(":") ?? false);
+
+/** 立即掃描停用原因（null＝可掃描；見票 02 前提）。 */
+const sweepDisabledReason = computed<string | null>(() => {
+  if (!subnet.value) {
+    return "網段載入中";
+  }
+  if (!subnet.value.observed) {
+    return "此網段未開啟觀測";
+  }
+  if (!subnet.value.local) {
+    return "本機與此網段非同 L2，無法觀測";
+  }
+  return null;
+});
+
+/** 「未觀測」列的提示（三態定義見 spec §Further Notes）。 */
+const unobservedHint = computed(() => {
+  if (isV6.value) {
+    return "IPv6 網段不支援觀測";
+  }
+  if (!subnet.value?.observed) {
+    return "此網段未開啟觀測";
+  }
+  if (!subnet.value.local) {
+    return "本機與此網段非同 L2，無法觀測";
+  }
+  return "位址未被已啟用的觀測涵蓋";
+});
 
 const family = computed<AddressFamily>(() => (isV6.value ? "ipv6" : "ipv4"));
 
@@ -275,6 +350,13 @@ const columns: QTableProps["columns"] = [
     name: "assignment",
     label: "指派對象",
     field: "address",
+    align: "left",
+    sortable: true
+  },
+  {
+    name: "last_seen",
+    label: "最後可見",
+    field: (row: IpEntry) => row.last_seen_at ?? "",
     align: "left",
     sortable: true
   },
@@ -353,6 +435,27 @@ function assignmentTargetLabel(target: IpAssignmentTarget): string {
     : `${target.asset_description}(${spec})`;
 }
 
+/** 觀測來源標籤（見票 02；未知或缺少顯示「—」）。 */
+function sourceLabel(source: IpSeenSource | null): string {
+  switch (source) {
+    case "arp":
+      return "ARP";
+    case "kea_lease":
+      return "Kea 租約";
+    default:
+      return "—";
+  }
+}
+
+/** 最後檢查時間：顯示瀏覽器本地時間；缺值為「尚未檢查」。 */
+function checkedLabel(value: string | null): string {
+  if (value === null) {
+    return "尚未檢查";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 async function fetchIps() {
   loading.value = true;
   try {
@@ -395,6 +498,7 @@ function toSortField(value: string | null): IpSortField {
     case "status":
     case "location":
     case "assignment":
+    case "last_seen":
       return value;
     default:
       return "address";
@@ -429,6 +533,23 @@ function openRegistryCreate() {
 
 function onAssignmentSaved() {
   void fetchIps();
+}
+
+/** 立即快速掃描：同步執行、回報結果後重載清單（見票 02）。 */
+async function runQuickSweep() {
+  sweeping.value = true;
+  try {
+    const report = await quickSweep(subnetId);
+    $q.notify({
+      type: "positive",
+      message: `快速掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
+    });
+    await fetchIps();
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    sweeping.value = false;
+  }
 }
 
 function confirmCancel(entry: IpEntry) {

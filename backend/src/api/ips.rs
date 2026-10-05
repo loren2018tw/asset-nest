@@ -22,6 +22,7 @@ use crate::interfaces::Warning;
 use crate::ips::{self, IpEntry, IpFilter, IpSortDir, IpSortField, IpStatusFilter};
 use crate::kea::sync as kea_sync;
 use crate::kea::sync::KeaSync;
+use crate::observation::{self, ObservationView};
 use crate::subnets;
 
 /// 清單預設每頁筆數（見 spec §6）；上限比照 `/assets`。
@@ -44,8 +45,8 @@ pub fn router() -> Router<AppState> {
 struct ListQuery {
     q: Option<String>,
     status: Option<String>,
-    /// 排序欄位白名單（`address`／`status`／`location`／`assignment`）；
-    /// 無效值回 400（見票 14）。
+    /// 排序欄位白名單（`address`／`status`／`location`／`assignment`／`last_seen`）；
+    /// 無效值回 400（見票 14、票 02）。
     sort: Option<String>,
     /// 排序方向 `asc`／`desc`；無效值回 400。
     dir: Option<String>,
@@ -182,8 +183,13 @@ async fn list_subnet_ips(
         .await
         .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
 
+    // 觀測現況批次讀取（單一查詢、無 N+1）；有效涵蓋＝observed ∧ 同 L2 ∧ v4。
+    let presence = observation::presence_map(&state.db, id).await?;
+    let observed = !subnet.cidr.contains(':') && subnet.observed && state.prober.is_local(&subnet);
+    let view = ObservationView { observed, presence };
+
     // v4 枚舉全部 host；v6 僅列出已登錄（有指派）位址（見票 06）。
-    let (items, total) = ips::list(&subnet, &filter, &assignments)?;
+    let (items, total) = ips::list(&subnet, &filter, &assignments, &view)?;
 
     Ok(Json(IpPage {
         items,

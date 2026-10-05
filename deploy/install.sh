@@ -519,6 +519,9 @@ ExecStart=${INSTALL_DIR}/asset-nest
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
+# IP 觀測 ARP 探測的最小權限（見 docs/adr/0015）
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

@@ -12,6 +12,7 @@ pub mod import;
 pub mod interfaces;
 pub mod ips;
 pub mod kea;
+pub mod observation;
 pub mod peer;
 pub mod probe;
 pub mod subnet_import;

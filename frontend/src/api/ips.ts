@@ -24,6 +24,9 @@ export interface IpAssignmentTarget {
   hostname: string | null;
 }
 
+/** 觀測來源：本地 ARP 探測或 Kea 租約（見 GLOSSARY.md「觀測詞彙」）。 */
+export type IpSeenSource = "arp" | "kea_lease";
+
 /** IP 列（見 spec §4.3；v4 由後端自網段範圍枚舉、v6 僅列登錄位址）。 */
 export interface IpEntry {
   address: string;
@@ -37,6 +40,17 @@ export interface IpEntry {
   /** 衝突標記：命中的語意規則代碼（IpInPool／IpOutOfSubnet／DuplicateHwAddress；
    *  僅標記、不阻擋，見 ADR-0006）。 */
   conflicts: string[];
+  /** 最後可見時間（UTC）；從未上線為 null（見票 02）。 */
+  last_seen_at: string | null;
+  /** 最後可見 MAC（小寫冒號格式）；從未上線為 null。 */
+  last_seen_mac: string | null;
+  /** 最後可見來源；從未上線為 null。 */
+  last_seen_source: IpSeenSource | null;
+  /** 最後檢查時間；尚未掃描為 null。 */
+  last_checked_at: string | null;
+  /** 有效觀測涵蓋（網段已開觀測且本機同 L2；v6 恆為 false）；據此區分
+   *  「未觀測」與「從未上線」。 */
+  observed: boolean;
 }
 
 /** 指派結果（僅記目前狀態，無歷程）。 */
@@ -77,8 +91,13 @@ export interface RegistryInput {
   interface_id: number;
 }
 
-/** IP 清單可排序欄位（後端白名單；見 spec §5、票 14）。 */
-export type IpSortField = "address" | "status" | "location" | "assignment";
+/** IP 清單可排序欄位（後端白名單；見 spec §5、票 14；`last_seen` 為票 02）。 */
+export type IpSortField =
+  | "address"
+  | "status"
+  | "location"
+  | "assignment"
+  | "last_seen";
 
 /** IP 清單搜尋、排序與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
@@ -148,4 +167,22 @@ export function cancelAssignment(
   return apiDelete<AssignmentDeleted>(
     `/api/v1/subnets/${subnetId}/ips/${encodeURIComponent(address)}/assignment`
   );
+}
+
+/** 掃描摘要（見 spec §HTTP API）。 */
+export interface SweepReport {
+  mode: string;
+  /** 本次探測的目標位址數（快速掃描＝已指派位址）。 */
+  targets: number;
+  /** 有回應的目標位址數。 */
+  seen: number;
+  /** 掃描耗時（毫秒）。 */
+  duration_ms: number;
+}
+
+/** 手動觸發快速掃描（同步執行；前提與錯誤訊息由後端驗證，見票 02）。 */
+export function quickSweep(subnetId: number): Promise<SweepReport> {
+  return apiPost<SweepReport>(`/api/v1/subnets/${subnetId}/sweeps`, {
+    mode: "quick"
+  });
 }

@@ -1,5 +1,6 @@
 //! 觀測設定整合測試：`observed` PATCH、`local` 標示與摘要欄位（見票 01）。
 
+use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -38,6 +39,11 @@ impl Prober for StubProber {
     fn is_local(&self, subnet: &Subnet) -> bool {
         self.seen.lock().expect("stub 鎖").push(subnet.cidr.clone());
         self.local_cidrs.iter().any(|cidr| cidr == &subnet.cidr)
+    }
+
+    /// 本檔僅測設定與本機判定；探測回應固定為空（掃描行為見 `observation_sweep.rs`）。
+    fn probe(&self, _subnet: &Subnet, _targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, String)> {
+        Vec::new()
     }
 }
 

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+use crate::probe::ProbeMode;
+
 /// 後端啟動設定（見 `.env.example`）。
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -20,6 +22,9 @@ pub struct Config {
     pub kea_api_username: Option<String>,
     /// Kea 控制通道 Basic 認證密碼；`KEA_API_PASSWORD`（搭配帳號使用）。
     pub kea_api_password: Option<String>,
+    /// 觀測探測模式；`OBSERVATION_PROBE_MODE`（`auto|raw|unprivileged`，預設 `auto`；
+    /// 見 `docs/adr/0015`）。
+    pub observation_probe_mode: ProbeMode,
 }
 
 impl Config {
@@ -47,6 +52,15 @@ impl Config {
             anyhow::bail!("KEA_API_PASSWORD 已設定但缺少 KEA_API_USERNAME");
         }
 
+        let observation_probe_mode = match std::env::var("OBSERVATION_PROBE_MODE") {
+            Ok(raw) => ProbeMode::parse(&raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OBSERVATION_PROBE_MODE 格式錯誤：{raw}（僅接受 auto／raw／unprivileged）"
+                )
+            })?,
+            Err(_) => ProbeMode::default(),
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -54,6 +68,7 @@ impl Config {
             kea_api_url,
             kea_api_username,
             kea_api_password,
+            observation_probe_mode,
         })
     }
 }

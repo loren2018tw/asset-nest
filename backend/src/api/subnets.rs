@@ -5,13 +5,14 @@ use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Local;
-use serde::Serialize;
+use chrono::{Local, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::api::{ApiError, encode_filename};
+use crate::observation::{self, SweepReport};
 use crate::probe::Prober;
 use crate::subnets::{self, Subnet, SubnetInput, SubnetPatch, SubnetSummary};
 
@@ -25,6 +26,8 @@ pub fn router() -> Router<AppState> {
             "/subnets/{id}",
             get(get_subnet).patch(update_subnet).delete(delete_subnet),
         )
+        // 手動觸發掃描（票 02 僅快速掃描；探索掃描為票 05）。
+        .route("/subnets/{id}/sweeps", post(sweep_subnet))
 }
 
 /// 網段清單回應；`items` 為列表摘要（含已用／總數／衝突數與觀測欄位，見票 07、票 01）。
@@ -158,4 +161,48 @@ async fn delete_subnet(
     } else {
         Err(ApiError::not_found("找不到網段"))
     }
+}
+
+/// 掃描輸入；`mode` 目前僅支援 `quick`（`discovery` 為票 05）。
+#[derive(Debug, Deserialize)]
+struct SweepInput {
+    mode: Option<String>,
+}
+
+/// `POST /subnets/{id}/sweeps`：同步執行掃描並回摘要（見票 02、spec §HTTP API）。
+///
+/// 前提由 [`observation::run_quick`] 驗證：v4、已開觀測、本機同 L2，
+/// 否則回 400 明確訊息；未知模式與尚未實作的 `discovery` 亦回 400。
+async fn sweep_subnet(
+    State(state): State<AppState>,
+    id: Result<Path<i64>, PathRejection>,
+    payload: Result<Json<SweepInput>, JsonRejection>,
+) -> Result<Json<SweepReport>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
+    let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
+
+    match input.mode.as_deref().map(str::trim).unwrap_or_default() {
+        "quick" => {}
+        "discovery" => {
+            return Err(ApiError::validation("探索掃描尚未支援（見票 05）").field("mode"));
+        }
+        "" => {
+            return Err(ApiError::validation("mode 為必填（目前僅支援 quick）").field("mode"));
+        }
+        other => {
+            return Err(
+                ApiError::validation(format!("不支援的掃描模式：{other}（僅支援 quick）"))
+                    .field("mode"),
+            );
+        }
+    }
+
+    let subnet = subnets::get(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
+
+    let report =
+        observation::run_quick(&state.db, state.prober.clone(), &subnet, Utc::now()).await?;
+    Ok(Json(report))
 }

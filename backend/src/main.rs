@@ -1,8 +1,10 @@
 //! asset-nest 後端啟動點。
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Context;
+use asset_nest::probe::SystemProber;
 use asset_nest::{AppState, config::Config, db, kea};
 use axum::serve;
 use tokio::net::TcpListener;
@@ -40,7 +42,9 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("無法綁定 {}", config.bind_addr))?;
     tracing::info!("asset-nest 後端：http://{}", listener.local_addr()?);
 
-    let mut state = AppState::new(pool, config.web_dist_dir.clone());
+    let mut state = AppState::new(pool, config.web_dist_dir.clone()).with_prober(Arc::new(
+        SystemProber::with_mode(config.observation_probe_mode),
+    ));
     if let Some(url) = config.kea_api_url.clone() {
         let mut client = kea::http::Client::new(url);
         if let Some(username) = config.kea_api_username.clone() {
