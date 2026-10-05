@@ -359,6 +359,15 @@ render_kea_config() {
     "interfaces-config": {
       "interfaces": ${interfaces_json}
     },
+    // 最上層預設 DNS（domain-name-servers）；未另行覆寫的網段皆適用。
+    "option-data": [
+      {
+        "name": "domain-name-servers",
+        "code": 6,
+        "space": "dhcp4",
+        "data": "8.8.8.8"
+      }
+    ],
     "control-sockets": [
       {
         "socket-type": "http",

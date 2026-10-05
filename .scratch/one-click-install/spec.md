@@ -17,6 +17,7 @@
 ## 決策摘要（詳見 ADR-0012）
 
 - **Kea**：ISC Cloudsmith `kea-3-2` 套件庫；安裝 `isc-kea-dhcp4`、`isc-kea-hooks`；控制通道 `127.0.0.1:8000`（HTTP + Basic）。Kea 3.2 拒絕明文憑證，故以 `user-file`／`password-file` 檔（`/etc/kea/asset-nest-api.*`）設定。
+- **Kea 全域 DNS 預設**：產生的 `/etc/kea/kea-dhcp4.conf` 於最上層 `Dhcp4.option-data` 預設 `domain-name-servers`＝`8.8.8.8`；未另行覆寫的網段皆適用（追加定案 2026-10-05）。
 - **安全預設**：`interfaces` 與 `subnet4` 皆空（不主動服務）；`--kea-interfaces`／`--kea-subnet` 可先寫入。
 - **asset-nest**：目標機原始碼建置（Node 24＋pnpm 依 `packageManager` 釘版＋rustup stable）；產物 `/opt/asset-nest`、環境檔 `/etc/asset-nest/asset-nest.env`、資料庫 `/var/lib/asset-nest`、服務 `asset-nest.service`（專用系統使用者）。
 - **重跑語意**：更新程式並保留 Kea 設定與憑證；`--force-kea-config` 才覆寫 Kea 設定並重新產生憑證。
@@ -30,3 +31,5 @@
 ## 實作記錄
 
 - 主實作 commit：`b3c5a4e`（`deploy/install.sh`、`deploy/uninstall.sh`、CI workflow、README 一鍵安裝章節、ADR-0012；決策見 ADR-0012）。
+- 追加（2026-10-05）：`render_kea_config` 於最上層新增 `option-data`（DNS `8.8.8.8`）；README 安裝後注意同步。
+- 文件（2026-10-05）：README 一鍵安裝章節補「升級（已安裝系統）」——重跑安裝即更新（fetch／checkout、重建、重啟；Kea 設定與憑證、資料庫保留）；`--source-dir` 情境說明。
