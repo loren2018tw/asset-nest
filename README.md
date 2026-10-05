@@ -1,6 +1,6 @@
 # asset-nest — IT 資產整合管理系統
 
-Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、IP 位址與 Kea DHCP 保留同步功能陸續開發中；側邊欄「Kea」區段提供兩個唯讀頁面：**租約清單**（Kea DHCPv4 動態配發結果）與**系統狀態**（版本、監聽介面、運行資訊、DHCPv4 摘要與連線診斷）。
+Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、IP 位址與 Kea DHCP 同步（保留、位址池與 gateway）功能陸續開發中；側邊欄「Kea」區段提供兩個唯讀頁面：**租約清單**（Kea DHCPv4 動態配發結果）與**系統狀態**（版本、監聽介面、運行資訊、DHCPv4 摘要與連線診斷）。
 
 - 領域詞彙：`GLOSSARY.md`
 - 決策記錄：`docs/adr/`
@@ -62,7 +62,7 @@ sudo ./deploy/install.sh --source-dir "$PWD"
 
 安裝後注意：
 
-- **Kea 預設不監聽任何介面、也不含網段**（避免誤發 DHCP）。請編輯 `/etc/kea/kea-dhcp4.conf` 設定 `interfaces-config` 與 `subnet4`（記下 `id`）後 `systemctl restart isc-kea-dhcp4-server`；在本系統建立網段並填入相同 `kea_subnet_id`，保留才會同步（見 `docs/adr/0011`）。
+- **Kea 預設不監聽任何介面、也不含網段**（避免誤發 DHCP）。請編輯 `/etc/kea/kea-dhcp4.conf` 設定 `interfaces-config` 與 `subnet4`（記下 `id`）後 `systemctl restart isc-kea-dhcp4-server`；在本系統建立網段並填入相同 `kea_subnet_id`，保留、位址池與 gateway 由「Kea 同步」對齊（見 `docs/adr/0011`、`docs/adr/0013`）。
 - 本系統尚無登入驗證；請以防火牆限制 8080 來源，勿暴露公網。
 - 移除：`sudo ./deploy/uninstall.sh`（`--purge` 連資料與設定；`--remove-kea` 連 Kea 移除）。
 

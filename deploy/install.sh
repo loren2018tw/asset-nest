@@ -3,11 +3,12 @@
 # asset-nest 一鍵安裝腳本（全新 Ubuntu 24.04／26.04）
 #
 # 安裝內容：
-#   - ISC Kea DHCP 3.2（Cloudsmith 套件庫）與 host_cmds、lease_cmds hook
+#   - ISC Kea DHCP 3.2（Cloudsmith 套件庫）與 host_cmds、lease_cmds、
+#     subnet_cmds hook
 #   - asset-nest（自原始碼建置：Node.js 24、pnpm、Rust stable）
 #   - systemd 服務：asset-nest、isc-kea-dhcp4-server
 #
-# 決策見 docs/adr/0012；使用說明見 README.md。
+# 決策見 docs/adr/0012、docs/adr/0013；使用說明見 README.md。
 # 可直接 source 本檔取用函式做測試（不會執行安裝）。
 set -euo pipefail
 
@@ -36,6 +37,7 @@ FORCE_KEA_CONFIG=0
 KEA_PASSWORD=""
 KEA_HOOK_PATH=""
 KEA_LEASE_HOOK_PATH=""
+KEA_SUBNET_HOOK_PATH=""
 
 KEA_KEYRING="/usr/share/keyrings/isc-kea-3-2-archive-keyring.gpg"
 KEA_SOURCE_LIST="/etc/apt/sources.list.d/isc-kea-3-2.list"
@@ -376,7 +378,8 @@ render_kea_config() {
     ],
     "hooks-libraries": [
       { "library": "${KEA_HOOK_PATH}" },
-      { "library": "${KEA_LEASE_HOOK_PATH}" }
+      { "library": "${KEA_LEASE_HOOK_PATH}" },
+      { "library": "${KEA_SUBNET_HOOK_PATH}" }
     ],
     "lease-database": {
       "type": "memfile",
@@ -397,7 +400,7 @@ EOF
 }
 
 configure_kea() {
-  local hook lease_hook check_log backup
+  local hook lease_hook subnet_hook check_log backup
   hook=""
   for f in /usr/lib/*/kea/hooks/libdhcp_host_cmds.so; do
     if [ -f "$f" ]; then
@@ -418,11 +421,24 @@ configure_kea() {
   [ -n "$lease_hook" ] || die "找不到 lease_cmds hook（isc-kea-hooks 是否安裝成功？）。"
   KEA_LEASE_HOOK_PATH="$lease_hook"
 
+  subnet_hook=""
+  for f in /usr/lib/*/kea/hooks/libdhcp_subnet_cmds.so; do
+    if [ -f "$f" ]; then
+      subnet_hook="$f"
+      break
+    fi
+  done
+  [ -n "$subnet_hook" ] || die "找不到 subnet_cmds hook（isc-kea-hooks 是否安裝成功？）。"
+  KEA_SUBNET_HOOK_PATH="$subnet_hook"
+
   if [ -f "$KEA_CONF" ] && grep -q 'asset-nest-api.user' "$KEA_CONF" \
     && [ "$FORCE_KEA_CONFIG" -eq 0 ]; then
     info "保留既有 Kea 設定（$KEA_CONF）。"
     if ! grep -q 'libdhcp_lease_cmds' "$KEA_CONF"; then
       warn "既有 Kea 設定未載入 lease_cmds hook（libdhcp_lease_cmds.so）：租約清單需此 hook，可手動加入 hooks-libraries 或改用 --force-kea-config 重新產生。"
+    fi
+    if ! grep -q 'libdhcp_subnet_cmds' "$KEA_CONF"; then
+      warn "既有 Kea 設定未載入 subnet_cmds hook（libdhcp_subnet_cmds.so）：網段層同步（位址池與 gateway）需此 hook，可手動加入 hooks-libraries 或改用 --force-kea-config 重新產生。"
     fi
     return
   fi
@@ -556,7 +572,8 @@ EOF
   1. 以防火牆限制 8080 來源（本系統尚無登入驗證）。
   2. 於 ${KEA_CONF} 設定 interfaces-config 與 subnet4 後：
      systemctl restart isc-kea-dhcp4-server
-  3. 在本系統建立對應網段並填入 Kea subnet id（kea_subnet_id），保留才會同步。
+  3. 在本系統建立對應網段並填入 Kea subnet id（kea_subnet_id）；保留、位址池
+     與 gateway 由「Kea 同步」對齊（見 docs/adr/0011、docs/adr/0013）。
 EOF
   fi
 }
