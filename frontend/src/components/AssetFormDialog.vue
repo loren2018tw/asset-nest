@@ -532,14 +532,17 @@ async function loadTags() {
   }
 }
 
-/** 依輸入過濾既有標籤，並排除已選者（新標籤仍可直接輸入新增）。 */
-function filterTags(input: string) {
-  const needle = input.toLowerCase();
-  const selected = new Set(form.value.tags.map(tag => tag.toLowerCase()));
-  tagOptions.value = allTags.value.filter(
-    tag =>
-      !selected.has(tag.toLowerCase()) && tag.toLowerCase().includes(needle)
-  );
+/** 依輸入過濾既有標籤，並排除已選者（新標籤仍可直接輸入新增）。
+ *  須呼叫 `update()` 讓 Quasar 結束 loading 並開啟選單（否則轉圈不止、選項不顯示）。 */
+function filterTags(input: string, update: (callback: () => void) => void) {
+  update(() => {
+    const needle = input.toLowerCase();
+    const selected = new Set(form.value.tags.map(tag => tag.toLowerCase()));
+    tagOptions.value = allTags.value.filter(
+      tag =>
+        !selected.has(tag.toLowerCase()) && tag.toLowerCase().includes(needle)
+    );
+  });
 }
 
 /** 編輯模式載入資產詳情中的介面；新增模式無既有介面。 */
