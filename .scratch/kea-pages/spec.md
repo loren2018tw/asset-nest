@@ -1,6 +1,6 @@
 # Kea 檢視：租約清單與系統狀態
 
-對應票號：01（後端狀態端點）、02（後端租約端點）、03（前端 Kea 區段）。
+對應票號：01（後端狀態端點）、02（後端租約端點）、03（前端 Kea 區段）、04（deploy 載入 lease_cmds hook＋真機重驗）。
 
 ## 目標
 
@@ -12,7 +12,7 @@
 ## 範圍
 
 - 僅 IPv4 租約（`lease4-get-all`）。
-- 不做租約對帳（與本地保留／指派比對）、不做租約變更（釋放／刪除）、不做 IPv6、不改動 `deploy/`。
+- 不做租約對帳（與本地保留／指派比對）、不做租約變更（釋放／刪除）、不做 IPv6；`deploy/` 僅為載入 lease_cmds hook 而調整（票 04）。
 - 不改動既有 Kea 同步行為、端點與對話框。
 
 ## 領域詞彙
@@ -112,14 +112,15 @@ pnpm test:kea                                    # 真機（需 .env）
 pnpm lint:check                                  # 前端
 ```
 
-## 待實測定案（真機）
+## 真機實測結論（Kea 3.2.1）
 
-- `status-get`：已實測（3.2.1）——`pid`／`uptime`／`reload` 為數字，`uptime`／`reload` 為相對秒數（非 epoch 時間）；`sockets` 為物件 `{"status":"ready"}`，非綁定清單；另有 `csv-lease-file`／`dhcp-state`／`thread-pool-size` 等未取用欄位。
-- `version-get`：已實測——回 `text: "3.2.1"` 與 `arguments.extended`（完整建置資訊），未提供 `arguments.version`；API 的 `version` 區塊為 `version: null`、`text: "3.2.1"`。
-- `config-get`：已實測——`Dhcp4.interfaces-config.interfaces`（可為空陣列＝未監聽）、`Dhcp4.lease-database.type`（`memfile`）、`Dhcp4.subnet4` 皆如預期。
-- `lease4-get-all`（票 02 實測）：
-  - 10.1.0.2（Kea 3.2.1、`config-get` 的 `hooks-libraries` 僅 `libdhcp_host_cmds.so`）回 `result` 2「'lease4-get-all' command not supported.」——該機未載入 `lease_cmds` hook，因此 `state` 型別與 0 筆時 `result` 無法於該機實測。
-  - 解析行為以 Kea ARM 規格為準並由 stub 測試覆蓋（數字 0／1／2／3 與文字 `state`、result 3 空清單）；真機欄位重驗需 Kea 載入 `libdhcp_lease_cmds.so`（`deploy/install.sh` 目前 `hooks-libraries` 只設定 `host_cmds`；本票未動 `deploy/`，列為後續）。
+- `status-get`：`pid`／`uptime`／`reload` 為數字，`uptime`／`reload` 為相對秒數（非 epoch 時間）；`sockets` 為物件 `{"status":"ready"}`，非綁定清單；另有 `csv-lease-file`／`dhcp-state`／`thread-pool-size` 等未取用欄位。
+- `version-get`：回 `text: "3.2.1"` 與 `arguments.extended`（完整建置資訊），未提供 `arguments.version`；API 的 `version` 區塊為 `version: null`、`text: "3.2.1"`。
+- `config-get`：`Dhcp4.interfaces-config.interfaces`（可為空陣列＝未監聽）、`Dhcp4.lease-database.type`（`memfile`）、`Dhcp4.subnet4` 皆如預期。
+- `lease4-get-all`：
+  - 票 02 實測（該機未載入 `lease_cmds`）回 `result` 2「'lease4-get-all' command not supported.」；票 04 於真機 `hooks-libraries` 載入 `libdhcp_lease_cmds.so` 後命令可用（journal `LEASE_CMDS_INIT_OK`、`HOOKS_LIBRARY_LOADED`）。
+  - 票 04 實測 0 筆：回 `result` 3、`arguments.leases` 為空陣列、`text`「0 IPv4 lease(s) found.」；與後端「result 3 → 空清單」解析相符（`lease4_get_all` 收斂為 `Vec::new()`）。
+  - 該機 `interfaces: []`（不主動服務）且 memfile 無動態租約（`/var/lib/kea/kea-leases4.csv` 僅表頭），因此 `state` 的實際型別與逐筆欄位仍無法於真機觀測；解析以 Kea ARM 規格為準、由 stub 測試覆蓋（數字 0／1／2／3 與文字 `state`、result 3 空清單）；真機唯讀測試在命令成功且非空時逐筆斷言（合法 IPv4、MAC 形式 `hw_address`、`state` 在集合內）。
 - 實測結果若與本節牴觸，以實測為準並回頭更新本 spec。
 
 ## 實作記錄

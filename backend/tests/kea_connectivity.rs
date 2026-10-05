@@ -51,7 +51,8 @@ async fn reservation_roundtrip_against_live_server() {
     let config = Config::from_env().expect("讀取環境設定失敗");
     let (client, url) = live_client(&config);
 
-    // 取第一個 Kea IPv4 網段，測試位址用該網段最後一個可用主機位址附近（冷門）。
+    // 取第一個 Kea IPv4 網段，測試位址由該網段 broadcast−1 往下找首個未被
+    // 保留的位址（避開既有真實保留，如 140.128.179.254）。
     let subnets = client
         .kea_subnets()
         .await
@@ -62,18 +63,28 @@ async fn reservation_roundtrip_against_live_server() {
     let network: ipnet::Ipv4Net = cidr
         .parse()
         .unwrap_or_else(|_| panic!("Kea 網段 CIDR 無效：{cidr}"));
-    let test_ip = Ipv4Addr::from(u32::from(network.broadcast()) - 1).to_string();
 
     let hosts = client
         .reservation_get_all(subnet_id)
         .await
         .expect("reservation-get-all 失敗");
-    assert!(
-        !hosts
+
+    let mut candidate = u32::from(network.broadcast()) - 1;
+    let test_ip = loop {
+        let ip = Ipv4Addr::from(candidate).to_string();
+        if !hosts
             .iter()
-            .any(|host| host.ip_address.as_deref() == Some(test_ip.as_str())),
-        "測試位址 {test_ip} 在 Kea 已有保留；請更換測試位址"
-    );
+            .any(|host| host.ip_address.as_deref() == Some(ip.as_str()))
+        {
+            break ip;
+        }
+        assert!(
+            candidate > u32::from(network.network()) + 1,
+            "Kea 網段 {cidr}（subnet-id {subnet_id}）內找不到未被保留的位址"
+        );
+        candidate -= 1;
+    };
+    println!("保留 roundtrip 測試位址：subnet-id {subnet_id}、{test_ip}");
 
     let record = ReservationRecord {
         ip_address: test_ip.clone(),
@@ -148,8 +159,9 @@ async fn status_commands_against_live_server() {
     println!("唯讀狀態實測完成（{url}）");
 }
 
-/// 唯讀實測 `lease4-get-all`：印出租約欄位與 `state` 正規化結果，供定案
-/// （見 `.scratch/kea-pages/spec.md` 票 02）。不送任何修改命令、不留變更。
+/// 唯讀實測 `lease4-get-all`：支援時逐筆斷言欄位解析合理（合法 IPv4、
+/// MAC 形式 `hw_address`、`state` 在正規化集合內），並印出實測供定案
+/// （見 `.scratch/kea-pages/spec.md`）。不送任何修改命令、不留變更。
 #[tokio::test]
 #[ignore = "需要真機 Kea（KEA_API_URL）"]
 async fn lease4_get_all_against_live_server() {
@@ -163,17 +175,45 @@ async fn lease4_get_all_against_live_server() {
             println!("lease4-get-all 共 {} 筆", leases.len());
             for lease in &leases {
                 println!("{lease:#?}");
+
+                assert!(
+                    lease
+                        .ip_address
+                        .as_deref()
+                        .and_then(|ip| ip.parse::<Ipv4Addr>().ok())
+                        .is_some_and(|ip| ip != Ipv4Addr::UNSPECIFIED),
+                    "租約 ip_address 非合法 IPv4：{lease:#?}"
+                );
+                assert!(
+                    lease.hw_address.as_deref().is_some_and(is_mac_like),
+                    "租約 hw_address 為空或格式不合理：{lease:#?}"
+                );
+                assert!(
+                    lease.state.as_deref().is_none_or(|state| {
+                        matches!(state, "default" | "declined" | "expired" | "released")
+                    }),
+                    "租約 state 非預期值：{lease:#?}"
+                );
             }
             if leases.is_empty() {
                 println!("（0 筆：memfile 尚無租約；client 對 result 0／3 皆收斂為空清單）");
             }
         }
-        // 10.1.0.2 實測：Kea 只載入 host_cmds、未載入 lease_cmds → result 2。
-        // 這是環境設定限制而非連線失敗，照實記錄、不讓唯讀探測卡住。
+        // 實測：Kea 未載入 lease_cmds（result 2）為環境設定限制而非連線失敗，
+        // 照實記錄、不讓唯讀探測卡住；載入 hook 後走上方欄位斷言路徑。
         Err(KeaError::Response { result: 2, text }) => println!(
-            "lease4-get-all 不支援（result 2：{text}）：Kea 未載入 lease_cmds hook，\
-             無法於此機實測欄位（見 .scratch/kea-pages/issues/02 的 Comments）"
+            "lease4-get-all 不支援（result 2：{text}）：此機 Kea 未載入 lease_cmds hook；\
+             載入後本測試會改走欄位斷言（見 .scratch/kea-pages/issues/04）"
         ),
         Err(err) => panic!("lease4-get-all 失敗（{url}）：{err}"),
     }
+}
+
+/// 寬鬆 MAC 檢查：`:` 分隔的 6／8 組兩位十六進位（Kea `hw-address` 格式）。
+fn is_mac_like(value: &str) -> bool {
+    let octets: Vec<&str> = value.split(':').collect();
+    matches!(octets.len(), 6 | 8)
+        && octets
+            .iter()
+            .all(|octet| octet.len() == 2 && octet.chars().all(|c| c.is_ascii_hexdigit()))
 }

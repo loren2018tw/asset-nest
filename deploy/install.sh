@@ -3,7 +3,7 @@
 # asset-nest 一鍵安裝腳本（全新 Ubuntu 24.04／26.04）
 #
 # 安裝內容：
-#   - ISC Kea DHCP 3.2（Cloudsmith 套件庫）與 host_cmds hook
+#   - ISC Kea DHCP 3.2（Cloudsmith 套件庫）與 host_cmds、lease_cmds hook
 #   - asset-nest（自原始碼建置：Node.js 24、pnpm、Rust stable）
 #   - systemd 服務：asset-nest、isc-kea-dhcp4-server
 #
@@ -35,6 +35,7 @@ KEA_SUBNET=""
 FORCE_KEA_CONFIG=0
 KEA_PASSWORD=""
 KEA_HOOK_PATH=""
+KEA_LEASE_HOOK_PATH=""
 
 KEA_KEYRING="/usr/share/keyrings/isc-kea-3-2-archive-keyring.gpg"
 KEA_SOURCE_LIST="/etc/apt/sources.list.d/isc-kea-3-2.list"
@@ -374,7 +375,8 @@ render_kea_config() {
       }
     ],
     "hooks-libraries": [
-      { "library": "${KEA_HOOK_PATH}" }
+      { "library": "${KEA_HOOK_PATH}" },
+      { "library": "${KEA_LEASE_HOOK_PATH}" }
     ],
     "lease-database": {
       "type": "memfile",
@@ -395,7 +397,7 @@ EOF
 }
 
 configure_kea() {
-  local hook check_log backup
+  local hook lease_hook check_log backup
   hook=""
   for f in /usr/lib/*/kea/hooks/libdhcp_host_cmds.so; do
     if [ -f "$f" ]; then
@@ -406,9 +408,22 @@ configure_kea() {
   [ -n "$hook" ] || die "找不到 host_cmds hook（isc-kea-hooks 是否安裝成功？）。"
   KEA_HOOK_PATH="$hook"
 
+  lease_hook=""
+  for f in /usr/lib/*/kea/hooks/libdhcp_lease_cmds.so; do
+    if [ -f "$f" ]; then
+      lease_hook="$f"
+      break
+    fi
+  done
+  [ -n "$lease_hook" ] || die "找不到 lease_cmds hook（isc-kea-hooks 是否安裝成功？）。"
+  KEA_LEASE_HOOK_PATH="$lease_hook"
+
   if [ -f "$KEA_CONF" ] && grep -q 'asset-nest-api.user' "$KEA_CONF" \
     && [ "$FORCE_KEA_CONFIG" -eq 0 ]; then
     info "保留既有 Kea 設定（$KEA_CONF）。"
+    if ! grep -q 'libdhcp_lease_cmds' "$KEA_CONF"; then
+      warn "既有 Kea 設定未載入 lease_cmds hook（libdhcp_lease_cmds.so）：租約清單需此 hook，可手動加入 hooks-libraries 或改用 --force-kea-config 重新產生。"
+    fi
     return
   fi
 
