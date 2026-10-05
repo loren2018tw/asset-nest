@@ -202,7 +202,13 @@ async fn sweep_subnet(
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到網段"))?;
 
-    let report =
-        observation::run_quick(&state.db, state.prober.clone(), &subnet, Utc::now()).await?;
+    let report = observation::run_quick(
+        &state.db,
+        state.prober.clone(),
+        state.kea.as_ref(),
+        &subnet,
+        Utc::now(),
+    )
+    .await?;
     Ok(Json(report))
 }
