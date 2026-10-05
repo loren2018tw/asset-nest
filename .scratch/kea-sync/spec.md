@@ -46,3 +46,7 @@
 cargo test --manifest-path backend/Cargo.toml   # 含 stub 整合測試
 pnpm test:kea                                    # 真機（需 .env）
 ```
+
+## 實作記錄
+
+- 主實作 commit：`6df2240`（連線檢查、單筆推送、完整同步、Kea 同步對話框與警示、stub＋真機測試；決策見 ADR-0010／0011）。
