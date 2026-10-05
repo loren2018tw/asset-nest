@@ -15,7 +15,7 @@ Kea 3.0 起 `subnet_cmds` hook 為開源（隨 `isc-kea-hooks` 安裝），提�
 - **網段本身不由本系統增刪**：受管網段仍須先存在於 Kea（`kea_subnet_id`＋CIDR 相符），本系統只更新其 pool 與 gateway。
 - **嚴格對齊（以 asset-nest 為準）**：Kea 端多出的 pool 刪除；asset-nest 未設 gateway 時移除 Kea 的 `routers`。高風險動作一律先出現在 dry-run 計畫，經確認才套用。
 - **只在完整同步推送**：網段編輯（PATCH）不即時推送；即時推送維持只針對保留（ADR-0011）。
-- **通道**：`subnet_cmds` hook 的 `subnet4-update`（自 `config-get` 取得的原始網段物件整段回寫，只改 `pools` 與 `routers` 條目），全部成功後與保留變更合併一次 `config-write`；`deploy/install.sh` 載入 `libdhcp_subnet_cmds.so`。
+- **通道**：`subnet_cmds` hook 的 `subnet4-update`（自 `config-get` 取得的原始網段物件整段回寫，只改 `pools` 與 `routers` 條目；`config-get` 合併呈現的主機保留 `reservations` 於送出前剝除——保留存於 Kea `CfgHosts`、不受網段取代影響），全部成功後與保留變更合併一次 `config-write`；`deploy/install.sh` 載入 `libdhcp_subnet_cmds.so`。
 - **pool 比對以範圍正規化**：Kea 的 CIDR 形式 pool 以整段位址展開比較（v4 prefix pool 可配發 network／broadcast，依 Kea ARM）；同範圍且 Kea 端帶額外屬性的條目原樣保留、不重建。
 - 失敗策略不變（ADR-0011）：單一網段更新失敗記入報告、不阻擋其他網段與本地資料；修復靠重跑完整同步。
 

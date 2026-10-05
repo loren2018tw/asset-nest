@@ -1,6 +1,6 @@
 # Kea 網段層同步：位址池與 gateway
 
-對應票號：01（後端差異與套用）、02（前端對話框）、03（deploy 載入 subnet_cmds hook＋文件）。
+對應票號：01（後端差異與套用）、02（前端對話框）、03（deploy 載入 subnet_cmds hook＋文件）、04（subnet4-update 剝除 reservations 的真機錯誤修正）。
 
 決策見 `docs/adr/0013`；延伸 `docs/adr/0011`（保留同步）與 `docs/adr/0012`（一鍵安裝）。
 
@@ -73,6 +73,9 @@
   屬性遺失；同範圍不重建。
 - `subnet4-update` 需載入 `subnet_cmds` hook；未載入時計畫照常顯示差異、套用時
   該網段記 `settings_error`（訊息含 `subnet4-update`）。deploy 已載入（票 03）。
+- `config-get` 的 `subnet4[]` 會合併執行中的主機保留（`reservations`）；`subnet4-update`
+  禁止指定保留，送出前剝除該欄位。保留存於 Kea `CfgHosts`、不受網段取代影響，
+  `config-write` 照常持久化（議題與修正見票 04）。
 
 ## 前端
 

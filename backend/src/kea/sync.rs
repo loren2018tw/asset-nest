@@ -616,6 +616,13 @@ async fn apply_settings(client: &Client, plan: &SubnetPlan) -> Result<(), KeaErr
         .clone()
         .ok_or_else(|| KeaError::Data("缺少 Kea 網段原始設定".to_string()))?;
 
+    // `config-get` 會把執行中的主機保留合併在 `subnet4[].reservations`，但
+    // `subnet4-update` 禁止指定保留（保留存於 Kea 的 CfgHosts、與網段取代無關），
+    // 送出前必須剝除；否則 Kea 回 result 1（見 .scratch/kea-subnet-sync/issues/04）。
+    if let Some(object) = subnet.as_object_mut() {
+        object.remove("reservations");
+    }
+
     let desired: HashSet<Ipv4Range> = plan.desired_pools.iter().copied().collect();
     let mut pools: Vec<Value> = Vec::new();
     if let Some(existing) = subnet.get("pools").and_then(Value::as_array) {

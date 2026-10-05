@@ -253,8 +253,23 @@ async fn handle(State(stub): State<StubKea>, Json(payload): Json<Value>) -> Json
             else {
                 return Json(json!([{ "result": 1, "text": "missing subnet4" }]));
             };
+
+            // 比照真機：更新不可帶主機保留（見 .scratch/kea-subnet-sync/issues/04）。
+            if subnet.get("reservations").is_some() {
+                return Json(json!([{
+                    "result": 1,
+                    "text": "must not specify host reservations with 'subnet4-update'."
+                }]));
+            }
+
             let id = subnet["id"].as_i64().unwrap_or(0);
-            stub.set_subnet(id, subnet);
+            // 比照真機：保留存於 CfgHosts，網段取代後 `config-get` 仍會合併呈現。
+            let mut stored = subnet;
+            let previous = stub.subnet(id);
+            if let Some(reservations) = previous.get("reservations") {
+                stored["reservations"] = reservations.clone();
+            }
+            stub.set_subnet(id, stored);
             json!([{ "result": 0, "text": "IPv4 subnet updated" }])
         }
         "config-write" => {
@@ -370,8 +385,9 @@ async fn create_subnet_full(
 }
 
 /// 網段層同步情境：asset-nest 端建立帶 gateway／pool 的網段；Kea 端 subnet 1
-/// 有 `.30–.40`（帶 `client-classes` 屬性）＋`.50–.60`、routers `.254`，
-/// 另有 `domain-name-servers` option 與 `interface` 欄位（驗證原樣保留）。
+/// 有 `.30–.40`（帶 `client-classes` 屬性）＋`.50–.60`、routers `.254`、
+/// `reservations`（比照真機 config-get 合併主機保留）、`domain-name-servers`
+/// option 與 `interface` 欄位（驗證原樣保留）。
 async fn settings_fixture(
     state: &AppState,
     stub: &StubKea,
@@ -388,6 +404,9 @@ async fn settings_fixture(
             "pools": [
                 { "pool": "10.0.0.30 - 10.0.0.40", "client-classes": ["keep-me"] },
                 { "pool": "10.0.0.50 - 10.0.0.60" }
+            ],
+            "reservations": [
+                { "hw-address": "aa:bb:cc:dd:ee:ff", "ip-address": "10.0.0.99" }
             ],
             "option-data": [
                 { "name": "domain-name-servers", "code": 6, "space": "dhcp4", "data": "10.0.0.53" },
@@ -813,6 +832,10 @@ async fn apply_rebuilds_pools_and_gateway_keeping_other_fields() {
             .iter()
             .any(|option| option["name"] == "domain-name-servers"),
         "其他 option 保留"
+    );
+    assert_eq!(
+        updated["reservations"][0]["ip-address"], "10.0.0.99",
+        "主機保留不受網段更新影響（送出前剝除 reservations）"
     );
 }
 
