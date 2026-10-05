@@ -180,6 +180,7 @@ mod tests {
             note: None,
             gateway: None,
             kea_subnet_id: None,
+            observed: false,
             pools: pools
                 .iter()
                 .enumerate()

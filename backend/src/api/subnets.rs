@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::AppState;
 use crate::api::{ApiError, encode_filename};
+use crate::probe::Prober;
 use crate::subnets::{self, Subnet, SubnetInput, SubnetPatch, SubnetSummary};
 
 pub fn router() -> Router<AppState> {
@@ -26,14 +27,32 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// 網段清單回應；`items` 為列表摘要（含已用／總數／衝突數，見票 07）。
+/// 網段清單回應；`items` 為列表摘要（含已用／總數／衝突數與觀測欄位，見票 07、票 01）。
 #[derive(Debug, Serialize)]
 struct SubnetItems {
     items: Vec<SubnetSummary>,
 }
 
+/// 網段詳情回應：網段欄位＋本機同 L2 判定（見票 01）。
+#[derive(Debug, Serialize)]
+struct SubnetDetail {
+    #[serde(flatten)]
+    subnet: Subnet,
+    /// `prober.is_local`：本機是否有介面位址落在該 v4 子網；v6 恆為 false。
+    local: bool,
+}
+
+impl SubnetDetail {
+    fn new(subnet: Subnet, prober: &dyn Prober) -> Self {
+        Self {
+            local: prober.is_local(&subnet),
+            subnet,
+        }
+    }
+}
+
 async fn list_subnets(State(state): State<AppState>) -> Result<Json<SubnetItems>, ApiError> {
-    let items = subnets::list(&state.db).await?;
+    let items = subnets::list(&state.db, state.prober.as_ref()).await?;
 
     Ok(Json(SubnetItems { items }))
 }
@@ -63,7 +82,7 @@ async fn export_subnets(State(state): State<AppState>) -> Result<Response<Body>,
 async fn get_subnet(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
-) -> Result<Json<Subnet>, ApiError> {
+) -> Result<Json<SubnetDetail>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
 
     let subnet = subnets::get(&state.db, id)
@@ -71,13 +90,13 @@ async fn get_subnet(
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到網段"))?;
 
-    Ok(Json(subnet))
+    Ok(Json(SubnetDetail::new(subnet, state.prober.as_ref())))
 }
 
 async fn create_subnet(
     State(state): State<AppState>,
     payload: Result<Json<SubnetInput>, JsonRejection>,
-) -> Result<(StatusCode, Json<Subnet>), ApiError> {
+) -> Result<(StatusCode, Json<SubnetDetail>), ApiError> {
     let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
     let valid = input.validate()?;
 
@@ -87,14 +106,17 @@ async fn create_subnet(
         .await
         .map_err(|error| ApiError::internal("新增網段失敗", error))?;
 
-    Ok((StatusCode::CREATED, Json(subnet)))
+    Ok((
+        StatusCode::CREATED,
+        Json(SubnetDetail::new(subnet, state.prober.as_ref())),
+    ))
 }
 
 async fn update_subnet(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
     payload: Result<Json<SubnetPatch>, JsonRejection>,
-) -> Result<Json<Subnet>, ApiError> {
+) -> Result<Json<SubnetDetail>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
     let Json(patch) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
 
@@ -109,7 +131,7 @@ async fn update_subnet(
     subnets::update(&state.db, id, valid)
         .await
         .map_err(|error| ApiError::internal("更新網段失敗", error))?
-        .map(Json)
+        .map(|subnet| Json(SubnetDetail::new(subnet, state.prober.as_ref())))
         .ok_or_else(|| ApiError::not_found("找不到網段"))
 }
 

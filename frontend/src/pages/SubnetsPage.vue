@@ -59,6 +59,25 @@
           {{ props.value === "ipv4" ? "IPv4" : "IPv6" }}
         </q-td>
       </template>
+      <template #body-cell-observed="props">
+        <q-td :props="props">
+          <q-badge
+            v-if="props.row.observed"
+            :color="props.row.local ? 'positive' : 'warning'"
+            :text-color="props.row.local ? 'white' : 'black'"
+          >
+            觀測中
+            <q-tooltip>
+              {{
+                props.row.local
+                  ? "本機與該網段同 L2，持續探測中"
+                  : "v1 無法觀測（本機非同 L2）"
+              }}
+            </q-tooltip>
+          </q-badge>
+          <span v-else class="text-grey-6">未觀測</span>
+        </q-td>
+      </template>
       <template #body-cell-usage="props">
         <q-td :props="props">
           {{
@@ -154,6 +173,7 @@ const columns: QTableProps["columns"] = [
   { name: "name", label: "名稱", field: "name", align: "left" },
   { name: "cidr", label: "CIDR", field: "cidr", align: "left" },
   { name: "family", label: "地址族", field: "family", align: "left" },
+  { name: "observed", label: "觀測", field: "observed", align: "left" },
   { name: "usage", label: "已用／總數", field: "used", align: "left" },
   { name: "conflicts", label: "衝突數", field: "conflicts", align: "left" },
   { name: "actions", label: "操作", field: "id", align: "right" }

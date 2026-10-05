@@ -27,6 +27,10 @@ export interface Subnet {
   note: string | null;
   gateway: string | null;
   kea_subnet_id: number | null;
+  /** 觀測開關（見 ADR-0014）；v6 恆為 false。 */
+  observed: boolean;
+  /** 本機是否有介面位址落在該 v4 子網（同 L2；見 ADR-0015）。 */
+  local: boolean;
   pools: SubnetPool[];
   created_at: string;
   updated_at: string;
@@ -44,6 +48,10 @@ export interface SubnetSummary {
   total: number;
   /** 衝突數：命中至少一條語意規則的指派筆數。 */
   conflicts: number;
+  /** 觀測開關（見 ADR-0014）；v6 恆為 false。 */
+  observed: boolean;
+  /** 本機是否有介面位址落在該 v4 子網（同 L2）。 */
+  local: boolean;
 }
 
 /** pool 輸入（僅 IPv4）。 */
@@ -59,6 +67,8 @@ export interface SubnetInput {
   note: string | null;
   gateway: string | null;
   kea_subnet_id: number | null;
+  /** 觀測開關；僅編輯既有 IPv4 網段有效（新增由後端預設關閉）。 */
+  observed: boolean;
   pools: SubnetPoolInput[];
 }
 

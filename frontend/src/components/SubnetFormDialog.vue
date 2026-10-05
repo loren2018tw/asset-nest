@@ -148,6 +148,34 @@
           </q-card>
         </q-card-section>
 
+        <q-card-section
+          v-if="family === 'ipv4' && subnet !== null"
+          class="q-pt-none"
+        >
+          <q-separator class="q-mb-md" />
+
+          <div class="text-subtitle2 q-mb-sm">觀測</div>
+          <q-toggle v-model="form.observed" label="開啟觀測（快速掃描）" />
+          <q-banner
+            v-if="form.observed && !local"
+            dense
+            rounded
+            class="bg-warning text-black q-mt-sm"
+          >
+            v1 無法觀測（本機非同 L2）
+          </q-banner>
+          <div
+            v-else-if="form.observed"
+            class="text-caption text-positive q-mt-xs"
+          >
+            本機與該網段同 L2，可觀測。
+          </div>
+          <div v-else class="text-caption text-grey-7 q-mt-xs">
+            開啟後將定期探測已指派與有租約位址；v1 僅支援本機同 L2 的 IPv4
+            網段。
+          </div>
+        </q-card-section>
+
         <q-card-actions align="right">
           <q-btn v-close-popup flat label="取消" />
           <q-btn color="primary" type="submit" label="儲存" :loading="saving" />
@@ -195,6 +223,7 @@ interface FormState {
   gateway: string;
   kea_subnet_id: string;
   note: string;
+  observed: boolean;
 }
 
 /** 對話框中的 pool 編輯列。 */
@@ -210,12 +239,15 @@ function emptyForm(): FormState {
     name: "",
     gateway: "",
     kea_subnet_id: "",
-    note: ""
+    note: "",
+    observed: false
   };
 }
 
 const form = ref<FormState>(emptyForm());
 const pools = ref<PoolDraft[]>([]);
+/** 本機是否與該網段同 L2（由詳情載入；見 ADR-0015）。 */
+const local = ref(false);
 const saving = ref(false);
 const loading = ref(false);
 const errorMessage = ref("");
@@ -386,6 +418,7 @@ async function prepare() {
   errorMessage.value = "";
   form.value = emptyForm();
   pools.value = [];
+  local.value = false;
   loading.value = false;
 
   if (props.subnet === null) {
@@ -397,8 +430,10 @@ async function prepare() {
     name: props.subnet.name ?? "",
     gateway: "",
     kea_subnet_id: "",
-    note: ""
+    note: "",
+    observed: props.subnet.observed
   };
+  local.value = props.subnet.local;
 
   loading.value = true;
   try {
@@ -412,8 +447,10 @@ async function prepare() {
       gateway: detail.gateway ?? "",
       kea_subnet_id:
         detail.kea_subnet_id === null ? "" : String(detail.kea_subnet_id),
-      note: detail.note ?? ""
+      note: detail.note ?? "",
+      observed: detail.observed
     };
+    local.value = detail.local;
     pools.value = detail.pools.map(pool => ({
       key: ++poolKey,
       start_ip: pool.start_ip,
@@ -478,6 +515,8 @@ function toInput(): SubnetInput {
     note: textOrNull(form.value.note),
     gateway: textOrNull(form.value.gateway),
     kea_subnet_id: isV4 && kea !== "" ? Number(kea) : null,
+    // 新增時後端一律預設關閉；v6 不得開啟（見票 01）。
+    observed: isV4 && props.subnet !== null ? form.value.observed : false,
     pools: isV4
       ? pools.value.map(row => ({
           start_ip: row.start_ip.trim(),

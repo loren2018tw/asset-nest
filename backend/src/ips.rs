@@ -752,6 +752,7 @@ mod tests {
             note: None,
             gateway: gateway.map(str::to_string),
             kea_subnet_id: None,
+            observed: false,
             pools: pools
                 .iter()
                 .enumerate()

@@ -17,9 +17,11 @@ use crate::assets::{double_option, optional_text};
 use crate::assignments;
 use crate::conflicts;
 use crate::ips::HostRange;
+use crate::probe::Prober;
 
 /// `subnets` 資料表完整欄位清單。
-const COLUMNS: &str = "id, cidr, name, note, gateway, kea_subnet_id, created_at, updated_at";
+const COLUMNS: &str =
+    "id, cidr, name, note, gateway, kea_subnet_id, observed, created_at, updated_at";
 
 /// `subnets` 資料表列。
 #[derive(Debug, FromRow)]
@@ -30,6 +32,7 @@ struct SubnetRow {
     note: Option<String>,
     gateway: Option<String>,
     kea_subnet_id: Option<i64>,
+    observed: i64,
     created_at: String,
     updated_at: String,
 }
@@ -69,6 +72,8 @@ pub struct Subnet {
     pub note: Option<String>,
     pub gateway: Option<String>,
     pub kea_subnet_id: Option<i64>,
+    /// 觀測開關（快速掃描；見 ADR-0014）；v6 網段恆為 false。
+    pub observed: bool,
     pub pools: Vec<Pool>,
     pub created_at: String,
     pub updated_at: String,
@@ -90,6 +95,10 @@ pub struct SubnetSummary {
     /// 衝突數：命中至少一條語意規則的指派筆數（同一筆命中多條規則仍計 1；
     /// 見 [`crate::conflicts::detect`]）。
     pub conflicts: u64,
+    /// 觀測開關（見 ADR-0014）；v6 恆為 false。
+    pub observed: bool,
+    /// 本機是否有介面位址落在該 v4 子網（同 L2；由注入的探測邊界判定）。
+    pub local: bool,
 }
 
 /// 新增網段的 pool 輸入。
@@ -127,6 +136,8 @@ pub struct SubnetPatch {
     #[serde(default, deserialize_with = "double_option")]
     pub kea_subnet_id: Option<Option<i64>>,
     pub pools: Option<Vec<PoolInput>>,
+    /// 觀測開關（見票 01、ADR-0014）；未提供＝維持原值，v6 不得為 true。
+    pub observed: Option<bool>,
 }
 
 /// 已驗證的網段內容。
@@ -138,6 +149,7 @@ pub struct ValidSubnet {
     gateway: Option<IpAddr>,
     kea_subnet_id: Option<i64>,
     pools: Vec<ValidPool>,
+    observed: bool,
 }
 
 /// 已驗證的 pool 範圍（僅 IPv4）。
@@ -164,6 +176,7 @@ impl SubnetInput {
 impl SubnetPatch {
     /// 與既有網段合併後驗證：以合併後的最終狀態判斷結構規則。
     pub fn apply_to(self, existing: &Subnet) -> Result<ValidSubnet, ApiError> {
+        let observed = self.observed.unwrap_or(existing.observed);
         let pools = match self.pools {
             Some(pools) => pools,
             None => existing
@@ -176,14 +189,22 @@ impl SubnetPatch {
                 .collect(),
         };
 
-        validate_fields(
+        let mut valid = validate_fields(
             Some(self.cidr.unwrap_or_else(|| existing.cidr.clone())),
             self.name.unwrap_or_else(|| existing.name.clone()),
             self.note.unwrap_or_else(|| existing.note.clone()),
             self.gateway.unwrap_or_else(|| existing.gateway.clone()),
             self.kea_subnet_id.unwrap_or(existing.kea_subnet_id),
             pools,
-        )
+        )?;
+
+        // 結構驗證：v6 網段不得開啟觀測（關閉或 v4 任何值皆可；見票 01）。
+        if observed && !valid.cidr.addr().is_ipv4() {
+            return Err(ApiError::validation("IPv6 網段不支援觀測").field("observed"));
+        }
+        valid.observed = observed;
+
+        Ok(valid)
     }
 }
 
@@ -263,6 +284,7 @@ fn validate_fields(
         gateway,
         kea_subnet_id,
         pools: valid_pools,
+        observed: false,
     })
 }
 
@@ -357,7 +379,8 @@ fn describe(cidr: &str, name: Option<&str>) -> String {
 ///
 /// 統計即時計算、無快取：逐網段讀取 pools 與指派並偵測衝突；網段編輯
 /// （縮小 CIDR、擴大 pool）或指派異動後，下一次讀取即反映最新結果。
-pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
+/// `local` 以注入的探測邊界判定（見票 01、ADR-0015）。
+pub async fn list(pool: &SqlitePool, prober: &dyn Prober) -> Result<Vec<SubnetSummary>, ApiError> {
     let rows =
         sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
             .fetch_all(pool)
@@ -383,6 +406,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
             Ok(IpNet::V6(_)) => used,
             Err(error) => return Err(ApiError::internal("網段 CIDR 格式錯誤", error)),
         };
+        let local = prober.is_local(&subnet);
 
         summaries.push(SubnetSummary {
             id: subnet.id,
@@ -392,6 +416,8 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
             used,
             total,
             conflicts,
+            observed: subnet.observed,
+            local,
         });
     }
 
@@ -560,13 +586,15 @@ pub(crate) async fn insert_subnet(
     valid: ValidSubnet,
 ) -> sqlx::Result<i64> {
     let result = sqlx::query(
-        "INSERT INTO subnets (cidr, name, note, gateway, kea_subnet_id) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO subnets (cidr, name, note, gateway, kea_subnet_id, observed)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(valid.cidr.to_string())
     .bind(valid.name)
     .bind(valid.note)
     .bind(valid.gateway.map(|address| address.to_string()))
     .bind(valid.kea_subnet_id)
+    .bind(valid.observed)
     .execute(&mut *connection)
     .await?;
 
@@ -594,6 +622,7 @@ pub async fn update(
     let result = sqlx::query(
         "UPDATE subnets
              SET cidr = ?, name = ?, note = ?, gateway = ?, kea_subnet_id = ?,
+                 observed = ?,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
            WHERE id = ?",
     )
@@ -602,6 +631,7 @@ pub async fn update(
     .bind(valid.note)
     .bind(valid.gateway.map(|address| address.to_string()))
     .bind(valid.kea_subnet_id)
+    .bind(valid.observed)
     .bind(id)
     .execute(&mut *transaction)
     .await?;
@@ -702,6 +732,7 @@ impl SubnetRow {
             note: self.note,
             gateway: self.gateway,
             kea_subnet_id: self.kea_subnet_id,
+            observed: self.observed != 0,
             pools,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -917,6 +948,7 @@ mod tests {
             note: note.map(str::to_string),
             gateway: gateway.map(str::to_string),
             kea_subnet_id,
+            observed: false,
             pools: pools
                 .iter()
                 .enumerate()
