@@ -5,7 +5,7 @@ const routes: RouteRecordRaw[] = [
     path: "/",
     component: () => import("@/layouts/MainLayout.vue"),
     children: [
-      { path: "", component: () => import("@/pages/IndexPage.vue") },
+      { path: "", redirect: "/kea/status" },
       { path: "assets", component: () => import("@/pages/AssetsPage.vue") },
       { path: "ips", component: () => import("@/pages/SubnetsPage.vue") },
       {

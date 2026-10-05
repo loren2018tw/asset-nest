@@ -1,6 +1,8 @@
 # Kea 檢視：租約清單與系統狀態
 
-對應票號：01（後端狀態端點）、02（後端租約端點）、03（前端 Kea 區段）、04（deploy 載入 lease_cmds hook＋真機重驗）。
+對應票號：01（後端狀態端點）、02（後端租約端點）、03（前端 Kea 區段）、04（deploy 載入 lease_cmds hook＋真機重驗）、05（總覽整併入系統狀態）。
+
+追加定案（2026-10-05）：原「總覽」頁（後端健康檢查）整併入「系統狀態」頁並移除該頁；`/` 導向 `/kea/status`（見票 05）。
 
 ## 目標
 
@@ -92,7 +94,8 @@
   - 進頁自動載入；「重新整理」＋上次更新時間。
   - 錯誤（400／502）：頂部 `q-banner` 顯示訊息＋「前往系統狀態」連結；空表。
 - **系統狀態頁**：
-  - 區塊：連線（可達／未設定／失敗；顯示 `url`；未設定文案「未設定 Kea 連線（KEA_API_URL）」）、版本（`version ?? text`）、監聽介面（設定值；空＝「未監聽任何介面（不主動服務 DHCP；安裝預設）」）、運行資訊（pid／uptime（人化相對秒數）／reload（人化「X 前」）／socket 狀態（值存在時以「socket 狀態：ready」一行呈現；真機為物件 `{"status":"ready"}`，非綁定清單））、DHCPv4 摘要（Kea 網段數 vs 本地受管數；不一致加 warning chip；租約庫類型）。
+  - 區塊：asset-nest 服務（本系統健康檢查：狀態／服務／版本／資料庫；見票 05）、連線（可達／未設定／失敗；顯示 `url`；未設定文案「未設定 Kea 連線（KEA_API_URL）」）、版本（`version ?? text`）、監聽介面（設定值；空＝「未監聽任何介面（不主動服務 DHCP；安裝預設）」）、運行資訊（pid／uptime（人化相對秒數）／reload（人化「X 前」）／socket 狀態（值存在時以「socket 狀態：ready」一行呈現；真機為物件 `{"status":"ready"}`，非綁定清單））、DHCPv4 摘要（Kea 網段數 vs 本地受管數；不一致加 warning chip；租約庫類型）。運行資訊與 DHCPv4 摘要以多欄網格呈現（每列 2–3 項；見票 06），避免一項一列佔用過長。
+  - 兩個來源（`/api/health` 與 `/api/v1/kea/status`）並行載入；錯誤各自呈現，互不影響。
   - 分區錯誤：各區塊顯示「無法取得」；頁面其餘部分照常運作。
   - 進頁自動載入；「重新整理」＋上次更新時間。
 
@@ -129,3 +132,5 @@ pnpm lint:check                                  # 前端
 - 票 02（後端租約端點）主實作 commit：`bac761a`（`lease4_get_all`、`GET /api/v1/kea/leases`、stub＋真機唯讀測試；真機未載入 `lease_cmds` 的實測列於「待實測定案」）。
 - 票 03（前端租約清單與系統狀態頁）主實作 commit：`a6362b8`（`MainLayout` 選單、`routes.ts`、`api/kea.ts`、`KeaLeasesPage.vue`、`KeaStatusPage.vue`、README；前端段依票 01／02 真機實測調整版本、uptime／reload 與 sockets 呈現）。
 - 票 04（deploy 載入 lease_cmds hook＋真機重驗）主實作 commit：`a075b57`（`configure_kea`／`render_kea_config` 加入 lease_cmds、保留分支 `warn`；真機 `hooks-libraries` 載入 hook 後實測 `lease4-get-all` `result` 3 與 0 筆；真機租約測試改為成功時逐筆斷言、roundtrip 改為由 broadcast−1 向下找未保留位址）。
+- 票 05（總覽整併入系統狀態，2026-10-05）：`KeaStatusPage.vue` 新增「asset-nest 服務」區塊（`/api/health` 與 Kea 狀態並行載入；錯誤各自呈現）；移除 `IndexPage.vue` 與側邊欄「總覽」；`/` 導向 `/kea/status`；README 同步。
+- 票 06（狀態頁精簡排列，2026-10-05）：運行資訊（2 欄）與 DHCPv4 摘要（桌機 3 欄／窄螢幕 2 欄）由一項一列改多欄網格。

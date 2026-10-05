@@ -21,6 +21,43 @@
     </q-banner>
 
     <div class="row q-col-gutter-md">
+      <div class="col-12">
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="text-subtitle1 q-mb-sm">asset-nest 服務</div>
+            <template v-if="health">
+              <div class="row q-col-gutter-md">
+                <div class="col-6 col-md-3">
+                  <div class="text-caption text-grey-7">狀態</div>
+                  <div>{{ health.status }}</div>
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="text-caption text-grey-7">服務</div>
+                  <div>{{ health.service }}</div>
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="text-caption text-grey-7">版本</div>
+                  <div>{{ health.version }}</div>
+                </div>
+                <div class="col-6 col-md-3">
+                  <div class="text-caption text-grey-7">資料庫</div>
+                  <div>{{ health.database }}</div>
+                </div>
+              </div>
+            </template>
+            <q-banner
+              v-else-if="healthError"
+              dense
+              rounded
+              class="bg-negative text-white"
+            >
+              無法連線後端：{{ healthError }}
+            </q-banner>
+            <div v-else class="text-grey-7">載入中…</div>
+          </q-card-section>
+        </q-card>
+      </div>
+
       <div class="col-12 col-md-6">
         <q-card flat bordered class="fit">
           <q-card-section>
@@ -114,32 +151,24 @@
           <q-card-section>
             <div class="text-subtitle1 q-mb-sm">運行資訊</div>
             <template v-if="status?.runtime">
-              <q-list dense>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label caption>PID</q-item-label>
-                    <q-item-label>{{ status.runtime.pid ?? "—" }}</q-item-label>
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label caption>運行時間</q-item-label>
-                    <q-item-label>{{ uptimeText }}</q-item-label>
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label caption>上次設定重載</q-item-label>
-                    <q-item-label>{{ reloadText }}</q-item-label>
-                  </q-item-section>
-                </q-item>
-                <q-item v-if="socketText !== null">
-                  <q-item-section>
-                    <q-item-label caption>socket 狀態</q-item-label>
-                    <q-item-label>{{ socketText }}</q-item-label>
-                  </q-item-section>
-                </q-item>
-              </q-list>
+              <div class="row q-col-gutter-md">
+                <div class="col-6">
+                  <div class="text-caption text-grey-7">PID</div>
+                  <div>{{ status.runtime.pid ?? "—" }}</div>
+                </div>
+                <div class="col-6">
+                  <div class="text-caption text-grey-7">運行時間</div>
+                  <div>{{ uptimeText }}</div>
+                </div>
+                <div class="col-6">
+                  <div class="text-caption text-grey-7">上次設定重載</div>
+                  <div>{{ reloadText }}</div>
+                </div>
+                <div v-if="socketText !== null" class="col-6">
+                  <div class="text-caption text-grey-7">socket 狀態</div>
+                  <div>{{ socketText }}</div>
+                </div>
+              </div>
             </template>
             <template v-else>
               <div class="text-grey-7">無法取得</div>
@@ -159,46 +188,36 @@
           <q-card-section>
             <div class="text-subtitle1 q-mb-sm">DHCPv4 摘要</div>
             <template v-if="status?.dhcp4">
-              <q-list dense>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label caption>Kea 網段數</q-item-label>
-                    <q-item-label>
-                      {{ status.dhcp4.subnet_count }}
-                      <q-chip
-                        v-if="subnetCountMismatch"
-                        dense
-                        size="sm"
-                        color="warning"
-                        text-color="black"
-                        class="q-ml-sm"
-                      >
-                        不一致
-                        <q-tooltip>
-                          Kea 的網段數與本地受管網段數不一致，請確認
-                          kea_subnet_id 設定
-                        </q-tooltip>
-                      </q-chip>
-                    </q-item-label>
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label caption>本地受管網段數</q-item-label>
-                    <q-item-label>
-                      {{ status.dhcp4.managed_subnet_count }}
-                    </q-item-label>
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label caption>租約庫類型</q-item-label>
-                    <q-item-label>
-                      {{ status.dhcp4.lease_backend ?? "—" }}
-                    </q-item-label>
-                  </q-item-section>
-                </q-item>
-              </q-list>
+              <div class="row q-col-gutter-md">
+                <div class="col-6 col-md-4">
+                  <div class="text-caption text-grey-7">Kea 網段數</div>
+                  <div>
+                    {{ status.dhcp4.subnet_count }}
+                    <q-chip
+                      v-if="subnetCountMismatch"
+                      dense
+                      size="sm"
+                      color="warning"
+                      text-color="black"
+                      class="q-ml-sm"
+                    >
+                      不一致
+                      <q-tooltip>
+                        Kea 的網段數與本地受管網段數不一致，請確認 kea_subnet_id
+                        設定
+                      </q-tooltip>
+                    </q-chip>
+                  </div>
+                </div>
+                <div class="col-6 col-md-4">
+                  <div class="text-caption text-grey-7">本地受管網段數</div>
+                  <div>{{ status.dhcp4.managed_subnet_count }}</div>
+                </div>
+                <div class="col-6 col-md-4">
+                  <div class="text-caption text-grey-7">租約庫類型</div>
+                  <div>{{ status.dhcp4.lease_backend ?? "—" }}</div>
+                </div>
+              </div>
             </template>
             <template v-else>
               <div class="text-grey-7">無法取得</div>
@@ -219,11 +238,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 
+import { fetchHealth, type HealthResponse } from "@/api/health";
 import { getKeaStatus, type KeaStatus } from "@/api/kea";
 
 const status = ref<KeaStatus | null>(null);
+const health = ref<HealthResponse | null>(null);
 const loading = ref(false);
 const loadError = ref("");
+const healthError = ref("");
 const updatedAt = ref<Date | null>(null);
 
 /** 版本顯示 `version ?? text`（真機 3.2.1 無 `arguments.version`，只回 text）。 */
@@ -290,15 +312,35 @@ function formatTime(date: Date): string {
 async function load() {
   loading.value = true;
   try {
-    status.value = await getKeaStatus();
+    const [keaResult, healthResult] = await Promise.allSettled([
+      getKeaStatus(),
+      fetchHealth()
+    ]);
+
+    if (keaResult.status === "fulfilled") {
+      status.value = keaResult.value;
+      loadError.value = "";
+    } else {
+      status.value = null;
+      loadError.value = errorMessage(keaResult.reason);
+    }
+
+    if (healthResult.status === "fulfilled") {
+      health.value = healthResult.value;
+      healthError.value = "";
+    } else {
+      health.value = null;
+      healthError.value = errorMessage(healthResult.reason);
+    }
+
     updatedAt.value = new Date();
-    loadError.value = "";
-  } catch (cause) {
-    status.value = null;
-    loadError.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     loading.value = false;
   }
+}
+
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 onMounted(() => {

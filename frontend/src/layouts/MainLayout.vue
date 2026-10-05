@@ -19,12 +19,6 @@
 
     <q-drawer v-model="leftDrawerOpen" show-if-above bordered>
       <q-list>
-        <q-item clickable to="/" exact>
-          <q-item-section avatar>
-            <q-icon name="dashboard" />
-          </q-item-section>
-          <q-item-section> 總覽 </q-item-section>
-        </q-item>
         <q-item clickable to="/assets" exact>
           <q-item-section avatar>
             <q-icon name="inventory_2" />

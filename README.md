@@ -1,6 +1,6 @@
 # asset-nest — IT 資產整合管理系統
 
-Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、IP 位址與 Kea DHCP 同步（保留、位址池與 gateway）功能陸續開發中；側邊欄「Kea」區段提供兩個唯讀頁面：**租約清單**（Kea DHCPv4 動態配發結果）與**系統狀態**（版本、監聽介面、運行資訊、DHCPv4 摘要與連線診斷）。
+Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、IP 位址與 Kea DHCP 同步（保留、位址池與 gateway）功能陸續開發中；側邊欄「Kea」區段提供兩個唯讀頁面：**租約清單**（Kea DHCPv4 動態配發結果）與**系統狀態**（本系統服務狀態、Kea 版本、監聽介面、運行資訊、DHCPv4 摘要與連線診斷；首頁導向此頁）。
 
 - 領域詞彙：`GLOSSARY.md`
 - 決策記錄：`docs/adr/`
