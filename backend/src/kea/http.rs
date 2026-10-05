@@ -86,6 +86,24 @@ pub struct KeaHost {
     pub hostname: Option<String>,
 }
 
+/// `lease4-get-all` 的一筆 DHCPv4 動態租約；空字串視為未提供。
+///
+/// `cltt`／`valid_lft` 為秒數（`cltt` 為 Unix epoch）；`state` 已正規化：
+/// 數字 0／1／2／3 → `default`／`declined`／`expired`／`released`、文字小寫、
+/// 未知保留原值；缺欄位為 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeaLease {
+    pub ip_address: Option<String>,
+    pub hw_address: Option<String>,
+    pub hostname: Option<String>,
+    pub subnet_id: Option<i64>,
+    /// 租約開始時間（Unix epoch 秒）。
+    pub cltt: Option<i64>,
+    /// 租約有效期（秒）。
+    pub valid_lft: Option<i64>,
+    pub state: Option<String>,
+}
+
 /// 要推送的保留內容（IP＋MAC＋選填 hostname）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationRecord {
@@ -238,6 +256,28 @@ impl Client {
             reload: number("reload"),
             sockets,
         })
+    }
+
+    /// 列出 Kea 全部 DHCPv4 動態租約（`lease4-get-all`；唯讀，不帶 arguments）。
+    ///
+    /// `result` 3（空）視為空清單（比照 [`Client::reservation_get_all`]）。
+    pub async fn lease4_get_all(&self) -> Result<Vec<KeaLease>, KeaError> {
+        let outcome = self.command("lease4-get-all", None).await?;
+
+        match outcome.result {
+            0 => {
+                let leases = outcome
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("leases"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(leases.iter().map(parse_lease).collect())
+            }
+            3 => Ok(Vec::new()),
+            result => Err(response_error(result, outcome.text)),
+        }
     }
 
     /// 列出某 subnet-id 的全部主機保留（`reservation-get-all`）。
@@ -430,6 +470,60 @@ fn parse_host(host: &Value) -> KeaHost {
     }
 }
 
+/// 解析一筆 Kea 租約；空字串視為未提供（比照 [`parse_host`]）。
+///
+/// 數值欄位接受 JSON 數字或數字字串（不同版本／後端可能給字串）。
+fn parse_lease(lease: &Value) -> KeaLease {
+    let text = |key: &str| {
+        lease
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let number = |key: &str| {
+        lease.get(key).and_then(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            Value::String(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    None
+                } else {
+                    text.parse::<i64>().ok()
+                }
+            }
+            _ => None,
+        })
+    };
+
+    KeaLease {
+        ip_address: text("ip-address"),
+        hw_address: text("hw-address"),
+        hostname: text("hostname"),
+        subnet_id: number("subnet-id"),
+        cltt: number("cltt"),
+        valid_lft: number("valid-lft"),
+        state: normalize_state(lease.get("state")),
+    }
+}
+
+/// `state` 正規化：數字 0／1／2／3 → `default`／`declined`／`expired`／`released`；
+/// 文字原樣小寫；未知保留原值；缺欄位為 `None`。
+fn normalize_state(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Number(number) => Some(match number.as_i64() {
+            Some(0) => "default".to_string(),
+            Some(1) => "declined".to_string(),
+            Some(2) => "expired".to_string(),
+            Some(3) => "released".to_string(),
+            _ => number.to_string(),
+        }),
+        Value::String(text) => Some(text.to_lowercase()),
+        other => Some(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +538,71 @@ mod tests {
 
         let client = Client::new("http://127.0.0.1:8000/kea///".parse().expect("URL"));
         assert_eq!(client.base_url(), "http://127.0.0.1:8000/kea");
+    }
+
+    #[test]
+    fn parse_lease_normalizes_fields_and_state() {
+        let lease = json!({
+            "ip-address": "10.0.0.5",
+            "hw-address": "aa:bb:cc:dd:ee:ff",
+            "hostname": "  ",
+            "subnet-id": "1",
+            "cltt": 1791201600,
+            "valid-lft": 3600,
+            "state": 2,
+        });
+
+        let parsed = parse_lease(&lease);
+
+        assert_eq!(parsed.ip_address.as_deref(), Some("10.0.0.5"));
+        assert_eq!(parsed.hw_address.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(parsed.hostname, None, "空字串／空白視為未提供");
+        assert_eq!(parsed.subnet_id, Some(1), "數字字串可解析");
+        assert_eq!(parsed.cltt, Some(1791201600));
+        assert_eq!(parsed.valid_lft, Some(3600));
+        assert_eq!(parsed.state.as_deref(), Some("expired"));
+    }
+
+    #[test]
+    fn parse_lease_missing_fields_are_none() {
+        let parsed = parse_lease(&json!({}));
+
+        assert_eq!(
+            parsed,
+            KeaLease {
+                ip_address: None,
+                hw_address: None,
+                hostname: None,
+                subnet_id: None,
+                cltt: None,
+                valid_lft: None,
+                state: None,
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_state_handles_numbers_strings_and_unknown() {
+        assert_eq!(normalize_state(Some(&json!(0))).as_deref(), Some("default"));
+        assert_eq!(
+            normalize_state(Some(&json!(1))).as_deref(),
+            Some("declined")
+        );
+        assert_eq!(normalize_state(Some(&json!(2))).as_deref(), Some("expired"));
+        assert_eq!(
+            normalize_state(Some(&json!(3))).as_deref(),
+            Some("released")
+        );
+        assert_eq!(
+            normalize_state(Some(&json!(9))).as_deref(),
+            Some("9"),
+            "未知數字保留原值"
+        );
+        assert_eq!(
+            normalize_state(Some(&json!("DECLINED"))).as_deref(),
+            Some("declined"),
+            "文字原樣小寫"
+        );
+        assert_eq!(normalize_state(None), None);
     }
 }

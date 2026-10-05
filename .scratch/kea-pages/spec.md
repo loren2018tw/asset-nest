@@ -117,7 +117,9 @@ pnpm lint:check                                  # 前端
 - `status-get`：已實測（3.2.1）——`pid`／`uptime`／`reload` 為數字，`uptime`／`reload` 為相對秒數（非 epoch 時間）；`sockets` 為物件 `{"status":"ready"}`，非綁定清單；另有 `csv-lease-file`／`dhcp-state`／`thread-pool-size` 等未取用欄位。
 - `version-get`：已實測——回 `text: "3.2.1"` 與 `arguments.extended`（完整建置資訊），未提供 `arguments.version`；API 的 `version` 區塊為 `version: null`、`text: "3.2.1"`。
 - `config-get`：已實測——`Dhcp4.interfaces-config.interfaces`（可為空陣列＝未監聽）、`Dhcp4.lease-database.type`（`memfile`）、`Dhcp4.subnet4` 皆如預期。
-- `lease4-get-all` 的 `state` 型別與 0 筆時 `result`：待票 02 實測。
+- `lease4-get-all`（票 02 實測）：
+  - 10.1.0.2（Kea 3.2.1、`config-get` 的 `hooks-libraries` 僅 `libdhcp_host_cmds.so`）回 `result` 2「'lease4-get-all' command not supported.」——該機未載入 `lease_cmds` hook，因此 `state` 型別與 0 筆時 `result` 無法於該機實測。
+  - 解析行為以 Kea ARM 規格為準並由 stub 測試覆蓋（數字 0／1／2／3 與文字 `state`、result 3 空清單）；真機欄位重驗需 Kea 載入 `libdhcp_lease_cmds.so`（`deploy/install.sh` 目前 `hooks-libraries` 只設定 `host_cmds`；本票未動 `deploy/`，列為後續）。
 - 實測結果若與本節牴觸，以實測為準並回頭更新本 spec。
 
 ## 實作記錄

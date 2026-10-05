@@ -1,9 +1,12 @@
 //! `/api/v1` Kea 路由（見 `docs/adr/0010`、`docs/adr/0011`）。
 //!
+//! `GET /kea/leases`：DHCPv4 動態租約清單（唯讀；見票 02）。
 //! `GET /kea/status`：連線診斷；一律 200、分區容錯（見票 01）。
 //! `GET /kea/sync/plan`：完整同步計畫（dry-run、唯讀）。
 //! `POST /kea/sync`：重算計畫並套用；回傳每網段增／改／刪計數、失敗清單與
 //! `config-write` 狀態。`KEA_API_URL` 未設定時回 400。
+
+use std::collections::HashMap;
 
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -17,17 +20,20 @@ use crate::kea::sync::{self, SyncApplyReport, SyncPlan};
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/kea/leases", get(leases))
         .route("/kea/status", get(status))
         .route("/kea/sync/plan", get(sync_plan))
         .route("/kea/sync", post(apply_sync))
 }
 
-/// 取得 Kea client；未設定時回 400（前端據訊息提示；同步端點用）。
-fn client(state: &AppState) -> Result<&Client, ApiError> {
+/// 取得 Kea client；未設定時回 400（前端據訊息提示）。
+///
+/// `action` 接在訊息後（如「無法同步」、「無法讀取租約」），沿用既有提示風格。
+fn client<'a>(state: &'a AppState, action: &str) -> Result<&'a Client, ApiError> {
     state
         .kea
         .as_ref()
-        .ok_or_else(|| ApiError::validation("Kea 未設定（KEA_API_URL），無法同步"))
+        .ok_or_else(|| ApiError::validation(format!("Kea 未設定（KEA_API_URL），{action}")))
 }
 
 /// `GET /kea/status` 回應（一律 200、分區容錯；見票 01）。
@@ -161,12 +167,85 @@ async fn status(State(state): State<AppState>) -> Result<Json<KeaStatus>, ApiErr
     }))
 }
 
+/// `GET /kea/leases` 回應（唯讀；見票 02）。
+#[derive(Serialize)]
+struct KeaLeases {
+    leases: Vec<KeaLeaseEntry>,
+}
+
+/// 租約清單中的一筆；本地無對應受管網段時 `subnet_cidr`／`subnet_name` 為 null。
+#[derive(Serialize)]
+struct KeaLeaseEntry {
+    ip_address: Option<String>,
+    hw_address: Option<String>,
+    hostname: Option<String>,
+    subnet_id: Option<i64>,
+    subnet_cidr: Option<String>,
+    subnet_name: Option<String>,
+    /// `cltt + valid_lft`（ISO 8601 UTC）；任一缺欄位為 null。
+    expires_at: Option<String>,
+    state: Option<String>,
+}
+
+/// Kea 動態租約清單：未設定 `KEA_API_URL` 回 400、命令失敗回 502。
+async fn leases(State(state): State<AppState>) -> Result<Json<KeaLeases>, ApiError> {
+    let client = client(&state, "無法讀取租約")?;
+
+    let leases = client
+        .lease4_get_all()
+        .await
+        .map_err(|error| ApiError::kea(format!("讀取 Kea 租約失敗：{error}")))?;
+
+    // 本地受管網段（`kea_subnet_id` → CIDR＋名稱），供租約對應顯示。
+    let rows = sqlx::query_as::<_, (i64, String, Option<String>)>(
+        "SELECT kea_subnet_id, cidr, name FROM subnets WHERE kea_subnet_id IS NOT NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| ApiError::internal("讀取網段失敗", error))?;
+    let subnets: HashMap<i64, (String, Option<String>)> = rows
+        .into_iter()
+        .map(|(kea_subnet_id, cidr, name)| (kea_subnet_id, (cidr, name)))
+        .collect();
+
+    let leases = leases
+        .into_iter()
+        .map(|lease| {
+            let (subnet_cidr, subnet_name) = lease
+                .subnet_id
+                .and_then(|subnet_id| subnets.get(&subnet_id))
+                .map(|(cidr, name)| (Some(cidr.clone()), name.clone()))
+                .unwrap_or((None, None));
+
+            KeaLeaseEntry {
+                expires_at: expires_at(lease.cltt, lease.valid_lft),
+                ip_address: lease.ip_address,
+                hw_address: lease.hw_address,
+                hostname: lease.hostname,
+                subnet_id: lease.subnet_id,
+                subnet_cidr,
+                subnet_name,
+                state: lease.state,
+            }
+        })
+        .collect();
+
+    Ok(Json(KeaLeases { leases }))
+}
+
+/// `expires_at = cltt + valid_lft` 轉 ISO 8601 UTC；任一缺欄位或溢位為 null。
+fn expires_at(cltt: Option<i64>, valid_lft: Option<i64>) -> Option<String> {
+    let expires = cltt?.checked_add(valid_lft?)?;
+    chrono::DateTime::from_timestamp(expires, 0)
+        .map(|time| time.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
 async fn sync_plan(State(state): State<AppState>) -> Result<Json<SyncPlan>, ApiError> {
-    let plan = sync::plan(&state.db, client(&state)?).await?;
+    let plan = sync::plan(&state.db, client(&state, "無法同步")?).await?;
     Ok(Json(plan))
 }
 
 async fn apply_sync(State(state): State<AppState>) -> Result<Json<SyncApplyReport>, ApiError> {
-    let report = sync::apply(&state.db, client(&state)?).await?;
+    let report = sync::apply(&state.db, client(&state, "無法同步")?).await?;
     Ok(Json(report))
 }

@@ -7,6 +7,7 @@
 use std::net::Ipv4Addr;
 
 use asset_nest::config::Config;
+use asset_nest::kea::KeaError;
 use asset_nest::kea::http::{Client, ReservationRecord};
 
 /// 建立帶 `.env` 認證的 client 與位址。
@@ -145,4 +146,34 @@ async fn status_commands_against_live_server() {
     println!("status-get：{status:#?}");
 
     println!("唯讀狀態實測完成（{url}）");
+}
+
+/// 唯讀實測 `lease4-get-all`：印出租約欄位與 `state` 正規化結果，供定案
+/// （見 `.scratch/kea-pages/spec.md` 票 02）。不送任何修改命令、不留變更。
+#[tokio::test]
+#[ignore = "需要真機 Kea（KEA_API_URL）"]
+async fn lease4_get_all_against_live_server() {
+    dotenvy::dotenv().ok();
+
+    let config = Config::from_env().expect("讀取環境設定失敗");
+    let (client, url) = live_client(&config);
+
+    match client.lease4_get_all().await {
+        Ok(leases) => {
+            println!("lease4-get-all 共 {} 筆", leases.len());
+            for lease in &leases {
+                println!("{lease:#?}");
+            }
+            if leases.is_empty() {
+                println!("（0 筆：memfile 尚無租約；client 對 result 0／3 皆收斂為空清單）");
+            }
+        }
+        // 10.1.0.2 實測：Kea 只載入 host_cmds、未載入 lease_cmds → result 2。
+        // 這是環境設定限制而非連線失敗，照實記錄、不讓唯讀探測卡住。
+        Err(KeaError::Response { result: 2, text }) => println!(
+            "lease4-get-all 不支援（result 2：{text}）：Kea 未載入 lease_cmds hook，\
+             無法於此機實測欄位（見 .scratch/kea-pages/issues/02 的 Comments）"
+        ),
+        Err(err) => panic!("lease4-get-all 失敗（{url}）：{err}"),
+    }
 }

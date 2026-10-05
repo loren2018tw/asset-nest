@@ -1,8 +1,8 @@
-//! Kea 系統狀態端點整合測試：以本機 stub Kea 驗證 `GET /api/v1/kea/status`
-//! 的未設定、正常與分區容錯行為（見 `.scratch/kea-pages/spec.md`）。
+//! Kea 檢視端點整合測試：以本機 stub Kea 驗證 `GET /api/v1/kea/status` 與
+//! `GET /api/v1/kea/leases` 的未設定、正常與失敗行為（見 `.scratch/kea-pages/spec.md`）。
 //!
-//! stub 只實作唯讀命令（version-get／config-get／status-get），資料存記憶體、
-//! 不觸及真機；真機唯讀實測見 `tests/kea_connectivity.rs`。
+//! stub 只實作唯讀命令（version-get／config-get／status-get／lease4-get-all），
+//! 資料存記憶體、不觸及真機；真機唯讀實測見 `tests/kea_connectivity.rs`。
 
 use std::sync::{Arc, Mutex};
 
@@ -29,6 +29,8 @@ struct StubKea {
     lease_backend: Arc<Mutex<String>>,
     subnets: Arc<Mutex<Vec<(i64, String)>>>,
     status: Arc<Mutex<Value>>,
+    /// `Some`＝`lease4-get-all` 回 result 0 帶 leases 陣列；`None`＝result 3（空）。
+    leases: Arc<Mutex<Option<Vec<Value>>>>,
     fail: Arc<Mutex<Vec<String>>>,
     log: Arc<Mutex<Vec<String>>>,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -46,6 +48,7 @@ impl Default for StubKea {
                 "reload": 789,
                 "sockets": { "status": "ready" },
             }))),
+            leases: Arc::new(Mutex::new(None)),
             fail: Arc::new(Mutex::new(Vec::new())),
             log: Arc::new(Mutex::new(Vec::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -95,6 +98,16 @@ impl StubKea {
 
     fn set_status(&self, status: Value) {
         *self.status.lock().expect("status") = status;
+    }
+
+    /// 設定 `lease4-get-all` 回傳的租約陣列（result 0）。
+    fn set_leases(&self, leases: &[Value]) {
+        *self.leases.lock().expect("leases") = Some(leases.to_vec());
+    }
+
+    /// 設定 `lease4-get-all` 回 result 3（0 筆）。
+    fn set_no_leases(&self) {
+        *self.leases.lock().expect("leases") = None;
     }
 }
 
@@ -147,6 +160,10 @@ async fn handle(State(stub): State<StubKea>, Json(payload): Json<Value>) -> Json
             let arguments = stub.status.lock().expect("status").clone();
             json!([{ "result": 0, "arguments": arguments }])
         }
+        "lease4-get-all" => match stub.leases.lock().expect("leases").clone() {
+            Some(leases) => json!([{ "result": 0, "arguments": { "leases": leases } }]),
+            None => json!([{ "result": 3, "text": "0 leases found" }]),
+        },
         other => json!([{ "result": 2, "text": format!("unsupported: {other}") }]),
     };
 
@@ -184,11 +201,11 @@ async fn test_state() -> (AppState, StubKea, String) {
     (state, stub, url)
 }
 
-/// 以 `oneshot` 發送 `GET /api/v1/kea/status`；回傳狀態碼與 JSON。
-async fn get_status(state: &AppState) -> (StatusCode, Value) {
+/// 以 `oneshot` 發送 GET；回傳狀態碼與 JSON。
+async fn get_json(state: &AppState, uri: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method(Method::GET)
-        .uri("/api/v1/kea/status")
+        .uri(uri)
         .body(Body::empty())
         .expect("建立請求");
 
@@ -211,10 +228,26 @@ async fn get_status(state: &AppState) -> (StatusCode, Value) {
     (status, json)
 }
 
-/// 直接寫入本地網段（帶／不帶 `kea_subnet_id`）。
-async fn insert_subnet(state: &AppState, cidr: &str, kea_subnet_id: Option<i64>) {
-    sqlx::query("INSERT INTO subnets (cidr, kea_subnet_id) VALUES (?, ?)")
+/// 以 `oneshot` 發送 `GET /api/v1/kea/status`。
+async fn get_status(state: &AppState) -> (StatusCode, Value) {
+    get_json(state, "/api/v1/kea/status").await
+}
+
+/// 以 `oneshot` 發送 `GET /api/v1/kea/leases`。
+async fn get_leases(state: &AppState) -> (StatusCode, Value) {
+    get_json(state, "/api/v1/kea/leases").await
+}
+
+/// 直接寫入本地網段（選填名稱與 `kea_subnet_id`）。
+async fn insert_subnet(
+    state: &AppState,
+    cidr: &str,
+    name: Option<&str>,
+    kea_subnet_id: Option<i64>,
+) {
+    sqlx::query("INSERT INTO subnets (cidr, name, kea_subnet_id) VALUES (?, ?, ?)")
         .bind(cidr)
+        .bind(name)
         .bind(kea_subnet_id)
         .execute(&state.db)
         .await
@@ -259,8 +292,8 @@ async fn status_reports_all_blocks_and_managed_subnet_count() {
         "reload": 60,
         "sockets": { "status": "ready" },
     }));
-    insert_subnet(&state, "10.0.0.0/24", Some(1)).await;
-    insert_subnet(&state, "10.9.0.0/24", None).await;
+    insert_subnet(&state, "10.0.0.0/24", None, Some(1)).await;
+    insert_subnet(&state, "10.9.0.0/24", None, None).await;
 
     let (status, body) = get_status(&state).await;
 
@@ -306,7 +339,7 @@ async fn status_reports_all_blocks_and_managed_subnet_count() {
 async fn status_partial_failure_keeps_successful_blocks() {
     let (state, stub, _url) = test_state().await;
     stub.fail_commands(&["config-get", "status-get"]);
-    insert_subnet(&state, "10.0.0.0/24", Some(1)).await;
+    insert_subnet(&state, "10.0.0.0/24", None, Some(1)).await;
 
     let (status, body) = get_status(&state).await;
 
@@ -339,7 +372,7 @@ async fn status_partial_failure_keeps_successful_blocks() {
 async fn status_version_failure_marks_unreachable_but_keeps_other_blocks() {
     let (state, stub, _url) = test_state().await;
     stub.fail_commands(&["version-get"]);
-    insert_subnet(&state, "10.0.0.0/24", Some(1)).await;
+    insert_subnet(&state, "10.0.0.0/24", None, Some(1)).await;
 
     let (status, body) = get_status(&state).await;
 
@@ -383,4 +416,128 @@ async fn status_empty_interfaces_and_missing_fields_are_neutral() {
     assert!(body["runtime"]["uptime"].is_null());
     assert!(body["runtime"]["reload"].is_null());
     assert!(body["runtime"]["sockets"].is_null(), "缺 sockets 為 null");
+}
+
+// ---------- 租約清單（票 02） ----------
+
+#[tokio::test]
+async fn leases_happy_path_maps_subnets_state_and_expires_at() {
+    let (state, stub, _url) = test_state().await;
+    // cltt＝2026-10-05T12:00:00Z；valid-lft 3600 秒 → 到期 13:00:00Z。
+    insert_subnet(&state, "10.0.0.0/24", Some("辦公區"), Some(1)).await;
+    insert_subnet(&state, "10.9.0.0/24", None, None).await;
+
+    stub.set_leases(&[
+        json!({
+            "ip-address": "10.0.0.5",
+            "hw-address": "aa:bb:cc:dd:ee:ff",
+            "hostname": "pc-01",
+            "subnet-id": 1,
+            "cltt": 1791201600,
+            "valid-lft": 3600,
+            "state": 0,
+        }),
+        json!({
+            "ip-address": "10.9.0.7",
+            "hw-address": "aa:bb:cc:dd:ee:07",
+            "hostname": "",
+            "subnet-id": 9,
+            "cltt": 1791201600,
+            "valid-lft": 600,
+            "state": "DECLINED",
+        }),
+        json!({
+            "ip-address": "10.0.0.9",
+            "hw-address": "aa:bb:cc:dd:ee:09",
+            "subnet-id": 1,
+            "state": 3,
+        }),
+    ]);
+
+    let (status, body) = get_leases(&state).await;
+
+    assert_eq!(status, StatusCode::OK, "租約端點應成功：{body}");
+    let leases = body["leases"].as_array().expect("leases 為陣列");
+    assert_eq!(leases.len(), 3);
+
+    let first = &leases[0];
+    assert_eq!(first["ip_address"], "10.0.0.5");
+    assert_eq!(first["hw_address"], "aa:bb:cc:dd:ee:ff");
+    assert_eq!(first["hostname"], "pc-01");
+    assert_eq!(first["subnet_id"], 1);
+    assert_eq!(first["subnet_cidr"], "10.0.0.0/24");
+    assert_eq!(first["subnet_name"], "辦公區");
+    assert_eq!(first["expires_at"], "2026-10-05T13:00:00Z");
+    assert_eq!(first["state"], "default", "數字 state 0 正規化");
+
+    let second = &leases[1];
+    assert!(second["hostname"].is_null(), "空字串視為未提供");
+    assert!(second["subnet_cidr"].is_null(), "無對應網段 → CIDR null");
+    assert!(second["subnet_name"].is_null(), "無對應網段 → 名稱 null");
+    assert_eq!(second["expires_at"], "2026-10-05T12:10:00Z");
+    assert_eq!(second["state"], "declined", "文字 state 正規化小寫");
+
+    let third = &leases[2];
+    assert!(third["cltt"].is_null());
+    assert!(third["expires_at"].is_null(), "缺 cltt → expires_at null");
+    assert_eq!(third["state"], "released", "數字 state 3 正規化");
+    assert_eq!(third["subnet_cidr"], "10.0.0.0/24", "同一受管網段對應");
+
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 1, "只送一個命令");
+    assert_eq!(requests[0]["command"], "lease4-get-all");
+    assert!(
+        requests[0].get("arguments").is_none(),
+        "唯讀命令不帶 arguments：{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
+async fn leases_without_kea_returns_400_and_sends_no_command() {
+    // stub 有啟動但不附掛：驗證未設定時不發任何命令。
+    let stub = StubKea::default();
+    let _url = stub.spawn().await;
+    let state = AppState::new(test_pool().await, dist_dir());
+
+    let (status, body) = get_leases(&state).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "未設定應回 400：{body}");
+    assert_eq!(body["error"], "validation_error");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("KEA_API_URL")),
+        "訊息含 KEA_API_URL：{body}"
+    );
+    assert!(stub.log().is_empty(), "未設定時不得發送任何命令");
+}
+
+#[tokio::test]
+async fn leases_command_failure_returns_502_kea_error() {
+    let (state, stub, _url) = test_state().await;
+    stub.fail_commands(&["lease4-get-all"]);
+
+    let (status, body) = get_leases(&state).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "kea_error");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated failure")),
+        "回傳 Kea 失敗原因：{body}"
+    );
+}
+
+#[tokio::test]
+async fn leases_empty_result_is_empty_list() {
+    let (state, stub, _url) = test_state().await;
+    stub.set_no_leases();
+    insert_subnet(&state, "10.0.0.0/24", Some("辦公區"), Some(1)).await;
+
+    let (status, body) = get_leases(&state).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "leases": [] }), "result 3 → 空陣列：{body}");
 }
