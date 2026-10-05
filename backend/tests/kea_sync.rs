@@ -1,10 +1,10 @@
 //! Kea 推送與完整同步整合測試：以本機 stub Kea 驗證命令、差異與失敗處理
-//!（見 `docs/adr/0011`）。
+//!（見 `docs/adr/0011`、`docs/adr/0013`）。
 //!
 //! stub 只實作本系統使用的命令子集（version-get／config-get／reservation-*／
-//! config-write），資料存記憶體；不觸及真機。
+//! subnet4-update／config-write），資料存記憶體；不觸及真機。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -32,12 +32,31 @@ struct StubReservation {
 }
 
 /// 記憶體版假 Kea；`clone` 共用同一份狀態。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct StubKea {
     hosts: Arc<Mutex<HashMap<i64, Vec<StubReservation>>>>,
     fail: Arc<Mutex<Vec<String>>>,
     config_writes: Arc<Mutex<usize>>,
     log: Arc<Mutex<Vec<String>>>,
+    /// 完整 `subnet4` 物件（subnet-id → 設定；`config-get` 用）。
+    subnets: Arc<Mutex<BTreeMap<i64, Value>>>,
+}
+
+impl Default for StubKea {
+    /// 預設一個受管網段（subnet-id 1、`10.0.0.0/24`、無 pool／option-data），
+    /// 與既有保留同步測試的資料相符。
+    fn default() -> Self {
+        Self {
+            hosts: Arc::default(),
+            fail: Arc::default(),
+            config_writes: Arc::default(),
+            log: Arc::default(),
+            subnets: Arc::new(Mutex::new(BTreeMap::from([(
+                1,
+                json!({ "id": 1, "subnet": "10.0.0.0/24" }),
+            )]))),
+        }
+    }
 }
 
 impl StubKea {
@@ -91,6 +110,20 @@ impl StubKea {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// 覆寫整個 `subnet4` 條目。
+    fn set_subnet(&self, id: i64, subnet: Value) {
+        self.subnets.lock().expect("subnets").insert(id, subnet);
+    }
+
+    fn subnet(&self, id: i64) -> Value {
+        self.subnets
+            .lock()
+            .expect("subnets")
+            .get(&id)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
 }
 
 /// stub 的命令處理：回應格式比照 Kea（單元素陣列、result 0／1／3）。
@@ -119,12 +152,19 @@ async fn handle(State(stub): State<StubKea>, Json(payload): Json<Value>) -> Json
             "text": "Kea",
             "arguments": { "version": "3.2.1" }
         }]),
-        "config-get" => json!([{
-            "result": 0,
-            "arguments": { "Dhcp4": { "subnet4": [
-                { "id": 1, "subnet": "10.0.0.0/24" }
-            ] } }
-        }]),
+        "config-get" => {
+            let subnets: Vec<Value> = stub
+                .subnets
+                .lock()
+                .expect("subnets")
+                .values()
+                .cloned()
+                .collect();
+            json!([{
+                "result": 0,
+                "arguments": { "Dhcp4": { "subnet4": subnets } }
+            }])
+        }
         "reservation-get-all" => {
             let subnet_id = arguments
                 .get("subnet-id")
@@ -203,6 +243,19 @@ async fn handle(State(stub): State<StubKea>, Json(payload): Json<Value>) -> Json
             } else {
                 json!([{ "result": 3, "text": "Host not found." }])
             }
+        }
+        "subnet4-update" => {
+            let Some(subnet) = arguments
+                .get("subnet4")
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+                .cloned()
+            else {
+                return Json(json!([{ "result": 1, "text": "missing subnet4" }]));
+            };
+            let id = subnet["id"].as_i64().unwrap_or(0);
+            stub.set_subnet(id, subnet);
+            json!([{ "result": 0, "text": "IPv4 subnet updated" }])
         }
         "config-write" => {
             *stub.config_writes.lock().expect("config_writes") += 1;
@@ -292,6 +345,57 @@ async fn create_subnet(state: &AppState, cidr: &str, kea_subnet_id: Option<i64>)
     let (status, json) = send(state, Method::POST, "/api/v1/subnets", Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "新增網段應成功：{json}");
     json["id"].as_i64().expect("回應含 id")
+}
+
+/// 建立含 gateway 與 pool 的受管網段。
+async fn create_subnet_full(
+    state: &AppState,
+    cidr: &str,
+    kea_subnet_id: i64,
+    gateway: Option<&str>,
+    pools: &[(&str, &str)],
+) -> i64 {
+    let pools: Vec<Value> = pools
+        .iter()
+        .map(|(start, end)| json!({ "start_ip": start, "end_ip": end }))
+        .collect();
+    let mut body = json!({ "cidr": cidr, "kea_subnet_id": kea_subnet_id, "pools": pools });
+    if let Some(gateway) = gateway {
+        body["gateway"] = json!(gateway);
+    }
+
+    let (status, json) = send(state, Method::POST, "/api/v1/subnets", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "新增網段應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
+/// 網段層同步情境：asset-nest 端建立帶 gateway／pool 的網段；Kea 端 subnet 1
+/// 有 `.30–.40`（帶 `client-classes` 屬性）＋`.50–.60`、routers `.254`，
+/// 另有 `domain-name-servers` option 與 `interface` 欄位（驗證原樣保留）。
+async fn settings_fixture(
+    state: &AppState,
+    stub: &StubKea,
+    gateway: Option<&str>,
+    pools: &[(&str, &str)],
+) -> i64 {
+    let subnet = create_subnet_full(state, "10.0.0.0/24", 1, gateway, pools).await;
+    stub.set_subnet(
+        1,
+        json!({
+            "id": 1,
+            "subnet": "10.0.0.0/24",
+            "interface": "eth0",
+            "pools": [
+                { "pool": "10.0.0.30 - 10.0.0.40", "client-classes": ["keep-me"] },
+                { "pool": "10.0.0.50 - 10.0.0.60" }
+            ],
+            "option-data": [
+                { "name": "domain-name-servers", "code": 6, "space": "dhcp4", "data": "10.0.0.53" },
+                { "name": "routers", "code": 3, "space": "dhcp4", "csv-format": true, "data": "10.0.0.254" }
+            ]
+        }),
+    );
+    subnet
 }
 
 async fn create_asset(state: &AppState, description: &str) -> i64 {
@@ -619,6 +723,248 @@ async fn apply_executes_plan_and_writes_config_once() {
         by_ip("10.0.0.9").is_none() && by_ip("10.0.0.10").is_none(),
         "衝突項不推送"
     );
+}
+
+#[tokio::test]
+async fn plan_reports_pool_and_gateway_changes() {
+    let (state, stub) = test_state().await;
+    settings_fixture(
+        &state,
+        &stub,
+        Some("10.0.0.1"),
+        &[("10.0.0.10", "10.0.0.20"), ("10.0.0.30", "10.0.0.40")],
+    )
+    .await;
+
+    let (status, plan) = send(&state, Method::GET, "/api/v1/kea/sync/plan", None).await;
+
+    assert_eq!(status, StatusCode::OK, "計畫應成功：{plan}");
+    assert_eq!(plan["totals"]["add"], 0, "無保留變更");
+    assert_eq!(plan["totals"]["pool_add"], 1);
+    assert_eq!(plan["totals"]["pool_delete"], 1);
+    assert_eq!(plan["totals"]["gateway"], 1);
+
+    let subnet = &plan["subnets"][0];
+    assert_eq!(subnet["pool_add"][0], "10.0.0.10-10.0.0.20");
+    assert_eq!(subnet["pool_delete"][0], "10.0.0.50-10.0.0.60");
+    assert_eq!(subnet["gateway"]["current"], "10.0.0.254");
+    assert_eq!(subnet["gateway"]["desired"], "10.0.0.1");
+}
+
+#[tokio::test]
+async fn apply_rebuilds_pools_and_gateway_keeping_other_fields() {
+    let (state, stub) = test_state().await;
+    settings_fixture(
+        &state,
+        &stub,
+        Some("10.0.0.1"),
+        &[("10.0.0.10", "10.0.0.20"), ("10.0.0.30", "10.0.0.40")],
+    )
+    .await;
+
+    let (status, report) = send(&state, Method::POST, "/api/v1/kea/sync", None).await;
+
+    assert_eq!(status, StatusCode::OK, "套用應成功：{report}");
+    let subnet = &report["subnets"][0];
+    assert_eq!(subnet["pool_added"], 1);
+    assert_eq!(subnet["pool_deleted"], 1);
+    assert_eq!(subnet["gateway_updated"], true);
+    assert!(subnet.get("settings_error").is_none(), "成功時省略錯誤");
+    assert_eq!(report["config_write"], "ok");
+    assert_eq!(
+        stub.log()
+            .iter()
+            .filter(|command| command.as_str() == "subnet4-update")
+            .count(),
+        1,
+        "單一網段更新"
+    );
+    assert_eq!(stub.config_writes(), 1);
+
+    let updated = stub.subnet(1);
+    assert_eq!(updated["interface"], "eth0", "其他欄位原樣保留");
+    let pools = updated["pools"].as_array().expect("pools 陣列");
+    let by_range = |range: &str| {
+        pools.iter().find(|entry| {
+            entry["pool"]
+                .as_str()
+                .is_some_and(|value| value.replace(' ', "") == range)
+        })
+    };
+    assert_eq!(
+        by_range("10.0.0.10-10.0.0.20").expect("新增的 pool")["pool"],
+        "10.0.0.10 - 10.0.0.20"
+    );
+    assert_eq!(
+        by_range("10.0.0.30-10.0.0.40").expect("保留的 pool")["client-classes"][0],
+        "keep-me",
+        "同範圍的既有條目原樣保留"
+    );
+    assert!(by_range("10.0.0.50-10.0.0.60").is_none(), "多餘 pool 刪除");
+
+    let options = updated["option-data"].as_array().expect("option-data");
+    let routers = options
+        .iter()
+        .find(|option| option["name"] == "routers")
+        .expect("routers 存在");
+    assert_eq!(routers["data"], "10.0.0.1");
+    assert!(
+        options
+            .iter()
+            .any(|option| option["name"] == "domain-name-servers"),
+        "其他 option 保留"
+    );
+}
+
+#[tokio::test]
+async fn apply_removes_routers_when_gateway_unset() {
+    let (state, stub) = test_state().await;
+    settings_fixture(&state, &stub, None, &[("10.0.0.30", "10.0.0.40")]).await;
+
+    let (status, report) = send(&state, Method::POST, "/api/v1/kea/sync", None).await;
+
+    assert_eq!(status, StatusCode::OK, "套用應成功：{report}");
+    assert_eq!(report["subnets"][0]["gateway_updated"], true);
+
+    let updated = stub.subnet(1);
+    let options = updated["option-data"].as_array().expect("option-data");
+    assert!(
+        !options.iter().any(|option| option["name"] == "routers"),
+        "gateway 未設＝移除 routers"
+    );
+    assert!(
+        options
+            .iter()
+            .any(|option| option["name"] == "domain-name-servers"),
+        "其他 option 保留"
+    );
+}
+
+#[tokio::test]
+async fn matching_subnet_settings_are_not_pushed() {
+    let (state, stub) = test_state().await;
+    settings_fixture(
+        &state,
+        &stub,
+        Some("10.0.0.254"),
+        &[("10.0.0.30", "10.0.0.40")],
+    )
+    .await;
+    // Kea 端只留同範圍的 pool 與相同 routers。
+    stub.set_subnet(
+        1,
+        json!({
+            "id": 1,
+            "subnet": "10.0.0.0/24",
+            "pools": [ { "pool": "10.0.0.30 - 10.0.0.40" } ],
+            "option-data": [ { "name": "routers", "code": 3, "space": "dhcp4", "data": "10.0.0.254" } ]
+        }),
+    );
+    let writes_before = stub.config_writes();
+
+    let (status, report) = send(&state, Method::POST, "/api/v1/kea/sync", None).await;
+
+    assert_eq!(status, StatusCode::OK, "套用應成功：{report}");
+    assert_eq!(report["config_write"], "skipped");
+    assert_eq!(stub.config_writes(), writes_before, "無變更不寫檔");
+    assert!(
+        !stub.log().contains(&"subnet4-update".to_string()),
+        "無差異不送更新"
+    );
+    assert_eq!(report["subnets"][0]["pool_added"], 0);
+    assert_eq!(report["subnets"][0]["pool_deleted"], 0);
+    assert_eq!(report["subnets"][0]["gateway_updated"], false);
+}
+
+#[tokio::test]
+async fn subnet_update_failure_is_reported_without_blocking_reservations() {
+    let (state, stub) = test_state().await;
+    let subnet = settings_fixture(
+        &state,
+        &stub,
+        Some("10.0.0.1"),
+        &[("10.0.0.30", "10.0.0.40")],
+    )
+    .await;
+    let asset = create_asset(&state, "同步主機").await;
+    let interface = create_interface(&state, asset, "aa:aa:aa:aa:aa:01").await;
+    let (status, body) =
+        put_assignment(&state, subnet, "10.0.0.5", interface, "reservation", None).await;
+    assert_eq!(status, StatusCode::OK, "指派應成功：{body}");
+    stub.clear_hosts();
+    stub.fail_commands(&["subnet4-update"]);
+
+    let writes_before = stub.config_writes();
+    let (status, report) = send(&state, Method::POST, "/api/v1/kea/sync", None).await;
+
+    assert_eq!(status, StatusCode::OK, "套用應成功：{report}");
+    let entry = &report["subnets"][0];
+    assert_eq!(entry["added"], 1, "保留仍推送");
+    assert_eq!(entry["pool_added"], 0, "失敗不計數");
+    assert!(
+        entry["settings_error"]
+            .as_str()
+            .is_some_and(|message| message.contains("simulated failure")),
+        "網段層失敗應記錄：{entry}"
+    );
+    assert_eq!(report["config_write"], "ok", "保留成功仍寫檔");
+    assert_eq!(stub.config_writes(), writes_before + 1, "整批一次");
+    assert!(
+        stub.hosts(1)
+            .iter()
+            .any(|host| host.ip_address == "10.0.0.5"),
+        "保留已推送"
+    );
+}
+
+#[tokio::test]
+async fn reservations_and_settings_share_single_config_write() {
+    let (state, stub) = test_state().await;
+    let subnet = settings_fixture(
+        &state,
+        &stub,
+        Some("10.0.0.1"),
+        &[("10.0.0.30", "10.0.0.40")],
+    )
+    .await;
+    let asset = create_asset(&state, "同步主機").await;
+    let interface = create_interface(&state, asset, "aa:aa:aa:aa:aa:01").await;
+    let (status, body) =
+        put_assignment(&state, subnet, "10.0.0.5", interface, "reservation", None).await;
+    assert_eq!(status, StatusCode::OK, "指派應成功：{body}");
+    stub.clear_hosts();
+
+    let writes_before = stub.config_writes();
+    let (status, report) = send(&state, Method::POST, "/api/v1/kea/sync", None).await;
+
+    assert_eq!(status, StatusCode::OK, "套用應成功：{report}");
+    let entry = &report["subnets"][0];
+    assert_eq!(entry["added"], 1);
+    assert_eq!(entry["pool_added"], 0, "同範圍不重建");
+    assert_eq!(entry["pool_deleted"], 1);
+    assert_eq!(entry["gateway_updated"], true);
+    assert_eq!(report["config_write"], "ok");
+    assert_eq!(
+        stub.config_writes(),
+        writes_before + 1,
+        "保留與網段層合併一次寫檔"
+    );
+
+    assert!(
+        stub.hosts(1)
+            .iter()
+            .any(|host| host.ip_address == "10.0.0.5"),
+        "保留已推送"
+    );
+    let options = stub.subnet(1)["option-data"].clone();
+    let routers = options
+        .as_array()
+        .expect("option-data")
+        .iter()
+        .find(|option| option["name"] == "routers")
+        .cloned()
+        .expect("routers 存在");
+    assert_eq!(routers["data"], "10.0.0.1", "gateway 已更新");
 }
 
 #[tokio::test]

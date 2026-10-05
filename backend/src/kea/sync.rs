@@ -2,21 +2,24 @@
 //!
 //! 單筆：指派／改用途／改 hostname／取消指派時即時推送該筆保留（僅受管網段＋
 //! 保留用途）；Kea 失敗僅警示、不阻擋本地儲存，由完整同步修復。
-//! 完整同步：以 asset-nest 為準對齊受管網段的 Kea 保留（新增／更新／刪除）；
-//! 先產生計畫（dry-run）再套用；有衝突標記的指派跳過並列入報告。
+//! 完整同步：以 asset-nest 為準對齊受管網段的 Kea 保留（新增／更新／刪除）
+//! 與網段層設定（pool、gateway；見 `docs/adr/0013`）；先產生計畫（dry-run）
+//! 再套用；有衝突標記的指派跳過並列入報告。
 //! upsert 以「先刪除（不存在視同已刪）再新增」實作，變更期間僅毫秒級空窗。
 
 use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
 use serde::Serialize;
+use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::KeaError;
-use super::http::{Client, ReservationRecord};
+use super::http::{Client, Ipv4Range, ReservationRecord, is_routers_option, parse_pool_entry};
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment};
 use crate::conflicts;
@@ -145,6 +148,12 @@ pub struct SyncTotals {
     pub update: usize,
     pub delete: usize,
     pub skipped: usize,
+    /// 要新增的 pool 筆數（見 ADR-0013）。
+    pub pool_add: usize,
+    /// 要刪除的 pool 筆數。
+    pub pool_delete: usize,
+    /// 要變更 gateway 的網段數（每網段至多 1）。
+    pub gateway: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,8 +167,22 @@ pub struct SyncPlanSubnet {
     pub update: Vec<PlanItem>,
     pub delete: Vec<PlanItem>,
     pub skipped: Vec<PlanSkip>,
+    /// 要新增的 pool 範圍（正規化 `start-end`）。
+    pub pool_add: Vec<String>,
+    /// 要刪除的 pool 範圍（正規化 `start-end`）。
+    pub pool_delete: Vec<String>,
+    /// gateway（routers option）變更；相同時省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayPlanItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// gateway（routers option）變更；`None`＝未設／移除。
+#[derive(Debug, Serialize)]
+pub struct GatewayPlanItem {
+    pub current: Option<String>,
+    pub desired: Option<String>,
 }
 
 /// 一筆變更；新增＝`desired`、刪除＝`current`、更新＝兩者。
@@ -207,6 +230,15 @@ pub struct ApplySubnet {
     pub updated: usize,
     pub deleted: usize,
     pub skipped: usize,
+    /// 成功新增的 pool 筆數（見 ADR-0013）。
+    pub pool_added: usize,
+    /// 成功刪除的 pool 筆數。
+    pub pool_deleted: usize,
+    /// gateway 是否已更新。
+    pub gateway_updated: bool,
+    /// 網段層（pool／gateway）套用失敗訊息；成功時省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_error: Option<String>,
     pub failures: Vec<ApplyFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -275,11 +307,32 @@ pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport
         }
     }
 
+    // 網段層設定（pool／gateway）：逐網段序列執行、單一失敗續行（見 ADR-0013）。
+    let mut settings: Vec<SettingsOutcome> = vec![SettingsOutcome::default(); plans.len()];
+    let mut settings_mutated = false;
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.error.is_some() || !plan.has_settings_change() {
+            continue;
+        }
+        match apply_settings(client, plan).await {
+            Ok(()) => {
+                settings[index] = SettingsOutcome {
+                    pool_added: plan.pool_adds.len(),
+                    pool_deleted: plan.pool_deletes.len(),
+                    gateway_updated: plan.gateway_change.is_some(),
+                    error: None,
+                };
+                settings_mutated = true;
+            }
+            Err(error) => settings[index].error = Some(error.to_string()),
+        }
+    }
+
     let mutated: usize = counts
         .iter()
         .map(|counts| counts.iter().sum::<usize>())
         .sum();
-    let (config_write, config_write_message) = if mutated == 0 {
+    let (config_write, config_write_message) = if mutated == 0 && !settings_mutated {
         ("skipped", None)
     } else {
         match client.config_write().await {
@@ -292,7 +345,8 @@ pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport
         .into_iter()
         .zip(counts)
         .zip(failures)
-        .map(|((plan, counts), failures)| ApplySubnet {
+        .zip(settings)
+        .map(|(((plan, counts), failures), settings)| ApplySubnet {
             subnet_id: plan.subnet_id,
             cidr: plan.cidr,
             name: plan.name,
@@ -301,6 +355,10 @@ pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport
             updated: counts[Action::Update.index()],
             deleted: counts[Action::Delete.index()],
             skipped: plan.skipped.len(),
+            pool_added: settings.pool_added,
+            pool_deleted: settings.pool_deleted,
+            gateway_updated: settings.gateway_updated,
+            settings_error: settings.error,
             failures,
             error: plan.error,
         })
@@ -319,9 +377,10 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
         .await
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?;
     let kea_subnets = client
-        .kea_subnets()
+        .config_get_dhcp4()
         .await
-        .map_err(|error| ApiError::kea(format!("讀取 Kea 設定失敗：{error}")))?;
+        .map_err(|error| ApiError::kea(format!("讀取 Kea 設定失敗：{error}")))?
+        .subnets;
 
     let mut plans = Vec::new();
     for subnet in subnets {
@@ -338,25 +397,48 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
             updates: Vec::new(),
             deletes: Vec::new(),
             skipped: Vec::new(),
+            desired_pools: Vec::new(),
+            pool_adds: Vec::new(),
+            pool_deletes: Vec::new(),
+            gateway_change: None,
+            raw_subnet: None,
             error: None,
         };
 
-        match kea_subnets.get(&kea_subnet_id) {
+        let kea_subnet = match kea_subnets.get(&kea_subnet_id) {
             None => {
                 plan.error = Some(format!("Kea 端沒有 subnet-id {kea_subnet_id}"));
                 plans.push(plan);
                 continue;
             }
-            Some(kea_cidr) if !same_network(&subnet.cidr, kea_cidr) => {
+            Some(kea_subnet) if !same_network(&subnet.cidr, &kea_subnet.cidr) => {
                 plan.error = Some(format!(
                     "CIDR 不符：asset-nest {}／Kea {}",
-                    subnet.cidr, kea_cidr
+                    subnet.cidr, kea_subnet.cidr
                 ));
                 plans.push(plan);
                 continue;
             }
-            Some(_) => {}
+            Some(kea_subnet) => kea_subnet,
+        };
+
+        // 網段層設定差異（pool／gateway；見 ADR-0013）。
+        plan.desired_pools = match subnet_pool_ranges(&subnet) {
+            Ok(ranges) => ranges,
+            Err(message) => {
+                plan.error = Some(format!("讀取網段 pool 失敗：{message}"));
+                plans.push(plan);
+                continue;
+            }
+        };
+        (plan.pool_adds, plan.pool_deletes) = pool_diff(&plan.desired_pools, &kea_subnet.pools);
+        if subnet.gateway != kea_subnet.gateway {
+            plan.gateway_change = Some(GatewayChange {
+                current: kea_subnet.gateway.clone(),
+                desired: subnet.gateway.clone(),
+            });
         }
+        plan.raw_subnet = Some(kea_subnet.raw.clone());
 
         let assignments = assignments::list_for_subnet(pool, subnet.id)
             .await
@@ -448,7 +530,142 @@ struct SubnetPlan {
     updates: Vec<(String, RecordFields, RecordFields)>,
     deletes: Vec<(String, RecordFields)>,
     skipped: Vec<PlanSkip>,
+    /// 期望 pool（來自 asset-nest；正規化範圍）。
+    desired_pools: Vec<Ipv4Range>,
+    /// 要新增的 pool 範圍。
+    pool_adds: Vec<Ipv4Range>,
+    /// 要刪除的 pool 範圍。
+    pool_deletes: Vec<Ipv4Range>,
+    /// gateway 變更；相同時為 `None`。
+    gateway_change: Option<GatewayChange>,
+    /// 取自 `config-get` 的原始 `subnet4` 物件（供 `subnet4-update`）。
+    raw_subnet: Option<Value>,
     error: Option<String>,
+}
+
+impl SubnetPlan {
+    /// 是否有任何網段層（pool／gateway）變更。
+    fn has_settings_change(&self) -> bool {
+        !self.pool_adds.is_empty() || !self.pool_deletes.is_empty() || self.gateway_change.is_some()
+    }
+}
+
+/// 單一網段的 gateway 變更。
+struct GatewayChange {
+    current: Option<String>,
+    desired: Option<String>,
+}
+
+/// 單一網段網段層套用結果（內部彙總）。
+#[derive(Debug, Clone, Default)]
+struct SettingsOutcome {
+    pool_added: usize,
+    pool_deleted: usize,
+    gateway_updated: bool,
+    error: Option<String>,
+}
+
+/// 由 asset-nest 網段取出期望 pool 範圍（資料庫內容經結構驗證；異常視為內部錯誤）。
+fn subnet_pool_ranges(subnet: &Subnet) -> Result<Vec<Ipv4Range>, String> {
+    subnet
+        .pools
+        .iter()
+        .map(|pool| {
+            let start: Ipv4Addr = pool
+                .start_ip
+                .parse()
+                .map_err(|_| format!("pool 起點格式異常：{}", pool.start_ip))?;
+            let end: Ipv4Addr = pool
+                .end_ip
+                .parse()
+                .map_err(|_| format!("pool 終點格式異常：{}", pool.end_ip))?;
+            if start > end {
+                return Err(format!("pool 範圍顛倒：{}-{}", pool.start_ip, pool.end_ip));
+            }
+            Ok(Ipv4Range { start, end })
+        })
+        .collect()
+}
+
+/// pool 差異：期望與 Kea 現值以「正規化範圍」比較（順序無關）。
+///
+/// 同範圍但 Kea 端帶額外屬性（如 client-classes）視為相同、不重建（見 ADR-0013）。
+fn pool_diff(desired: &[Ipv4Range], current: &[Ipv4Range]) -> (Vec<Ipv4Range>, Vec<Ipv4Range>) {
+    let mut adds: Vec<Ipv4Range> = desired
+        .iter()
+        .copied()
+        .filter(|range| !current.contains(range))
+        .collect();
+    adds.sort();
+    let mut deletes: Vec<Ipv4Range> = current
+        .iter()
+        .copied()
+        .filter(|range| !desired.contains(range))
+        .collect();
+    deletes.sort();
+    (adds, deletes)
+}
+
+/// 以 `subnet4-update` 套用單一網段的 pool／gateway（整段回寫；見 ADR-0013）。
+///
+/// 由 `config-get` 取得的原始網段物件複製後只改 `pools` 與 routers 條目；
+/// 同範圍的既有 pool 條目原樣保留（屬性不遺失）。
+async fn apply_settings(client: &Client, plan: &SubnetPlan) -> Result<(), KeaError> {
+    let mut subnet = plan
+        .raw_subnet
+        .clone()
+        .ok_or_else(|| KeaError::Data("缺少 Kea 網段原始設定".to_string()))?;
+
+    let desired: HashSet<Ipv4Range> = plan.desired_pools.iter().copied().collect();
+    let mut pools: Vec<Value> = Vec::new();
+    if let Some(existing) = subnet.get("pools").and_then(Value::as_array) {
+        for entry in existing {
+            if parse_pool_entry(entry).is_some_and(|range| desired.contains(&range)) {
+                pools.push(entry.clone());
+            }
+        }
+    }
+    let kept: HashSet<Ipv4Range> = pools.iter().filter_map(parse_pool_entry).collect();
+    for range in &plan.desired_pools {
+        if !kept.contains(range) {
+            pools.push(json!({ "pool": range.to_kea_string() }));
+        }
+    }
+    subnet["pools"] = Value::Array(pools);
+
+    if let Some(change) = &plan.gateway_change {
+        set_gateway_option(&mut subnet, change.desired.as_deref());
+    }
+
+    client.subnet4_update(&subnet).await
+}
+
+/// 設定或移除 `subnet4` 的 routers option（gateway）；其他 option 原樣保留。
+fn set_gateway_option(subnet: &mut Value, gateway: Option<&str>) {
+    let options = subnet.get_mut("option-data").and_then(Value::as_array_mut);
+    match (options, gateway) {
+        (Some(options), Some(gateway)) => {
+            match options.iter_mut().find(|option| is_routers_option(option)) {
+                Some(entry) => entry["data"] = json!(gateway),
+                None => options.push(json!({
+                    "name": "routers",
+                    "code": 3,
+                    "space": "dhcp4",
+                    "data": gateway,
+                })),
+            }
+        }
+        (Some(options), None) => options.retain(|option| !is_routers_option(option)),
+        (None, Some(gateway)) => {
+            subnet["option-data"] = json!([{
+                "name": "routers",
+                "code": 3,
+                "space": "dhcp4",
+                "data": gateway,
+            }]);
+        }
+        (None, None) => {}
+    }
 }
 
 /// 差異計算：期望 vs Kea 現值；`untouchable`（衝突跳過者）不刪除也不更新。
@@ -527,10 +744,28 @@ fn to_api_plan(plans: Vec<SubnetPlan>) -> SyncPlan {
                 })
                 .collect();
 
+            let pool_add: Vec<String> = plan
+                .pool_adds
+                .iter()
+                .map(|range| range.to_compact_string())
+                .collect();
+            let pool_delete: Vec<String> = plan
+                .pool_deletes
+                .iter()
+                .map(|range| range.to_compact_string())
+                .collect();
+            let gateway = plan.gateway_change.map(|change| GatewayPlanItem {
+                current: change.current,
+                desired: change.desired,
+            });
+
             totals.add += add.len();
             totals.update += update.len();
             totals.delete += delete.len();
             totals.skipped += plan.skipped.len();
+            totals.pool_add += pool_add.len();
+            totals.pool_delete += pool_delete.len();
+            totals.gateway += usize::from(gateway.is_some());
 
             SyncPlanSubnet {
                 subnet_id: plan.subnet_id,
@@ -541,6 +776,9 @@ fn to_api_plan(plans: Vec<SubnetPlan>) -> SyncPlan {
                 update,
                 delete,
                 skipped: plan.skipped,
+                pool_add,
+                pool_delete,
+                gateway,
                 error: plan.error,
             }
         })
@@ -736,6 +974,70 @@ mod tests {
             adds.iter().map(|(ip, _)| ip.as_str()).collect::<Vec<_>>(),
             vec!["10.0.0.2", "10.0.0.10"],
             "依數值排序而非字串"
+        );
+    }
+
+    #[test]
+    fn pool_diff_adds_and_removes_by_normalized_range() {
+        let range = |start: &str, end: &str| Ipv4Range {
+            start: start.parse().expect("起點"),
+            end: end.parse().expect("終點"),
+        };
+        let desired = vec![
+            range("10.0.0.30", "10.0.0.40"),
+            range("10.0.0.10", "10.0.0.20"),
+        ];
+        let current = vec![
+            range("10.0.0.50", "10.0.0.60"),
+            range("10.0.0.30", "10.0.0.40"),
+        ];
+
+        let (adds, deletes) = pool_diff(&desired, &current);
+
+        assert_eq!(
+            adds.iter()
+                .map(|range| range.to_compact_string())
+                .collect::<Vec<_>>(),
+            vec!["10.0.0.10-10.0.0.20"],
+            "缺少的補上、數值排序"
+        );
+        assert_eq!(
+            deletes
+                .iter()
+                .map(|range| range.to_compact_string())
+                .collect::<Vec<_>>(),
+            vec!["10.0.0.50-10.0.0.60"],
+            "同範圍不重建、多餘刪除"
+        );
+    }
+
+    #[test]
+    fn set_gateway_option_adds_replaces_and_removes_routers() {
+        let mut subnet = json!({
+            "option-data": [
+                { "name": "domain-name-servers", "code": 6, "space": "dhcp4", "data": "10.0.0.53" },
+                { "name": "routers", "code": 3, "space": "dhcp4", "data": "10.0.0.254" }
+            ]
+        });
+
+        set_gateway_option(&mut subnet, Some("10.0.0.1"));
+        assert_eq!(subnet["option-data"][1]["data"], "10.0.0.1", "改值");
+        assert_eq!(
+            subnet["option-data"][0]["name"], "domain-name-servers",
+            "其他 option 保留"
+        );
+
+        let mut subnet = json!({});
+        set_gateway_option(&mut subnet, Some("10.0.0.1"));
+        assert_eq!(
+            subnet["option-data"][0]["name"], "routers",
+            "無 option-data 時新增"
+        );
+
+        set_gateway_option(&mut subnet, None);
+        assert!(
+            subnet["option-data"].as_array().expect("陣列").is_empty(),
+            "gateway 未設＝移除 routers"
         );
     }
 }

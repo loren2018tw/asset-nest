@@ -4,8 +4,10 @@
 //! `result` 0 表示成功、3 表示空結果（Kea ARM 18.2）。
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use ipnet::Ipv4Net;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -45,12 +47,46 @@ impl std::fmt::Display for VersionInfo {
 ///
 /// 取 `Dhcp4.interfaces-config.interfaces`（Kea 實際監聽的作業系統介面；
 /// 空清單＝不主動服務 DHCP）、`Dhcp4.lease-database.type`（租約庫類型）與
-/// `Dhcp4.subnet4`（subnet-id → CIDR）。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `Dhcp4.subnet4`（subnet-id → [`KeaSubnet`]）。
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Dhcp4Config {
     pub interfaces: Vec<String>,
     pub lease_backend: Option<String>,
-    pub subnets: HashMap<i64, String>,
+    pub subnets: HashMap<i64, KeaSubnet>,
+}
+
+/// Kea `subnet4` 的一筆設定（自 `config-get` 讀取；見 ADR-0013）。
+///
+/// `raw` 為原始 `subnet4` 物件，供 `subnet4-update` 整段回寫（只改 pool 與
+/// routers 條目、其餘欄位原樣保留）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeaSubnet {
+    pub cidr: String,
+    /// 各 pool 的正規化範圍（數值排序）。
+    pub pools: Vec<Ipv4Range>,
+    /// `routers` option 的值（即 gateway）；未設定為 `None`。
+    pub gateway: Option<String>,
+    /// 原始 `subnet4` 物件。
+    pub raw: Value,
+}
+
+/// 解析後的 IPv4 位址範圍（pool 比對用；端點皆含）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ipv4Range {
+    pub start: Ipv4Addr,
+    pub end: Ipv4Addr,
+}
+
+impl Ipv4Range {
+    /// 計畫顯示用的緊湊字串（`a-b`）。
+    pub fn to_compact_string(self) -> String {
+        format!("{}-{}", self.start, self.end)
+    }
+
+    /// Kea 設定格式的範圍字串（`a - b`）。
+    pub fn to_kea_string(self) -> String {
+        format!("{} - {}", self.start, self.end)
+    }
 }
 
 /// `status-get` 的 socket 狀態；Kea 3.2.1 實測回物件（如 `{"status":"ready"}`）。
@@ -206,13 +242,8 @@ impl Client {
             .and_then(Value::as_array)
         {
             for entry in entries {
-                if let Some(id) = entry.get("id").and_then(Value::as_i64) {
-                    let cidr = entry
-                        .get("subnet")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    subnets.insert(id, cidr);
+                if let Some((id, subnet)) = parse_subnet(entry) {
+                    subnets.insert(id, subnet);
                 }
             }
         }
@@ -353,12 +384,50 @@ impl Client {
         expect_success(outcome).map(|_| ())
     }
 
+    /// 取代單一 Kea 網段（`subnet4-update`；需載入 subnet_cmds hook，見 ADR-0013）。
+    ///
+    /// 傳入完整的 `subnet4` 物件（通常取自 [`Client::config_get_dhcp4`] 的
+    /// [`KeaSubnet::raw`]，只改動要同步的欄位）；成功後由完整同步統一
+    /// `config-write` 持久化。
+    pub async fn subnet4_update(&self, subnet: &Value) -> Result<(), KeaError> {
+        let outcome = self
+            .command("subnet4-update", Some(json!({ "subnet4": [subnet] })))
+            .await?;
+        expect_success(outcome).map(|_| ())
+    }
+
+    /// 列出 Kea 支援的命令（`list-commands`；唯讀）。
+    ///
+    /// 供診斷用（如確認 subnet_cmds hook 是否提供 `subnet4-update`）；
+    /// `arguments` 為命令字串陣列（部分版本包在 `commands` 內，兩者皆接受）。
+    pub async fn list_commands(&self) -> Result<Vec<String>, KeaError> {
+        let outcome = self.command("list-commands", None).await?;
+        let outcome = expect_success(outcome)?;
+        let arguments = outcome.arguments.unwrap_or(Value::Null);
+        let items = arguments
+            .as_array()
+            .cloned()
+            .or_else(|| arguments.get("commands").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        Ok(items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect())
+    }
+
     /// 讀取 Kea 設定的 IPv4 網段（重用 [`Client::config_get_dhcp4`] 的 `subnet4`）。
     ///
     /// 回傳 `subnet-id → CIDR`；供完整同步檢查受管網段是否存在、CIDR 是否相符。
     /// 行為與過往 `config-get` 直取一致。
     pub async fn kea_subnets(&self) -> Result<HashMap<i64, String>, KeaError> {
-        Ok(self.config_get_dhcp4().await?.subnets)
+        Ok(self
+            .config_get_dhcp4()
+            .await?
+            .subnets
+            .into_iter()
+            .map(|(id, subnet)| (id, subnet.cidr))
+            .collect())
     }
 
     /// 送一個命令並解析回應（陣列取首元素；認證失敗等單一物件直接使用）。
@@ -451,6 +520,87 @@ fn reservation_body(subnet_id: i64, record: &ReservationRecord) -> Value {
         reservation["hostname"] = json!(hostname);
     }
     reservation
+}
+
+/// 解析一筆 `subnet4`（缺 `id` 視為無法對應、回 `None`）。
+fn parse_subnet(entry: &Value) -> Option<(i64, KeaSubnet)> {
+    let id = entry.get("id").and_then(Value::as_i64)?;
+    let cidr = entry
+        .get("subnet")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    let mut pools: Vec<Ipv4Range> = entry
+        .get("pools")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().filter_map(parse_pool_entry).collect())
+        .unwrap_or_default();
+    pools.sort();
+
+    Some((
+        id,
+        KeaSubnet {
+            cidr,
+            pools,
+            gateway: subnet_gateway(entry),
+            raw: entry.clone(),
+        },
+    ))
+}
+
+/// 解析一筆 Kea pool 條目（`{"pool": "a - b"}`）。
+pub(crate) fn parse_pool_entry(entry: &Value) -> Option<Ipv4Range> {
+    parse_pool_range(entry.get("pool").and_then(Value::as_str)?)
+}
+
+/// 解析 Kea pool 字串：範圍 `a - b` 或 CIDR 形式。
+///
+/// CIDR 以整段位址展開（Kea 的 v4 prefix pool 可配發 network／broadcast，
+/// 見 Kea ARM「DHCPv4 Server」）；範圍頭尾順序顛倒視為無效。
+pub(crate) fn parse_pool_range(text: &str) -> Option<Ipv4Range> {
+    let text = text.trim();
+    if let Some((start, end)) = text.split_once('-') {
+        let start: Ipv4Addr = start.trim().parse().ok()?;
+        let end: Ipv4Addr = end.trim().parse().ok()?;
+        if start > end {
+            return None;
+        }
+        return Some(Ipv4Range { start, end });
+    }
+
+    let network: Ipv4Net = text.parse().ok()?;
+    Some(Ipv4Range {
+        start: network.network(),
+        end: network.broadcast(),
+    })
+}
+
+/// 取 `subnet4` 的 routers option 值（gateway）；缺欄位或空字串為 `None`。
+fn subnet_gateway(subnet: &Value) -> Option<String> {
+    subnet
+        .get("option-data")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|option| is_routers_option(option))
+        .and_then(|option| option.get("data"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// routers 條目：`name == "routers"`，或 `code == 3` 且 `space` 為 `dhcp4`
+/// （未指定 space 視為 `dhcp4`）。
+pub(crate) fn is_routers_option(option: &Value) -> bool {
+    if option.get("name").and_then(Value::as_str) == Some("routers") {
+        return true;
+    }
+    option.get("code").and_then(Value::as_i64) == Some(3)
+        && option
+            .get("space")
+            .and_then(Value::as_str)
+            .is_none_or(|space| space == "dhcp4")
 }
 
 /// 解析一筆 Kea host；空字串視為未提供。
@@ -604,5 +754,76 @@ mod tests {
             "文字原樣小寫"
         );
         assert_eq!(normalize_state(None), None);
+    }
+
+    #[test]
+    fn parse_pool_range_accepts_ranges_and_prefixes() {
+        let range = |start: &str, end: &str| Ipv4Range {
+            start: start.parse().expect("起點"),
+            end: end.parse().expect("終點"),
+        };
+
+        assert_eq!(
+            parse_pool_range("10.0.0.10 - 10.0.0.20"),
+            Some(range("10.0.0.10", "10.0.0.20"))
+        );
+        assert_eq!(
+            parse_pool_range("10.0.0.10-10.0.0.20"),
+            Some(range("10.0.0.10", "10.0.0.20")),
+            "緊湊寫法"
+        );
+        assert_eq!(
+            parse_pool_range("10.0.0.0/30"),
+            Some(range("10.0.0.0", "10.0.0.3")),
+            "CIDR 以整段展開（prefix pool 可配發頭尾）"
+        );
+        assert_eq!(parse_pool_range("10.0.0.20-10.0.0.10"), None, "頭尾顛倒");
+        assert_eq!(parse_pool_range("not-an-address"), None);
+    }
+
+    #[test]
+    fn parse_subnet_extracts_pools_and_gateway() {
+        let entry = json!({
+            "id": 1,
+            "subnet": "10.0.0.0/24",
+            "pools": [
+                {"pool": "10.0.0.30 - 10.0.0.40"},
+                {"pool": "10.0.0.10/31"},
+                {"pool": "bad"}
+            ],
+            "option-data": [
+                {"name": "domain-name-servers", "code": 6, "data": "10.0.0.53"},
+                {"name": "routers", "code": 3, "space": "dhcp4", "data": "10.0.0.1"}
+            ]
+        });
+
+        let (id, subnet) = parse_subnet(&entry).expect("可解析");
+        assert_eq!(id, 1);
+        assert_eq!(subnet.cidr, "10.0.0.0/24");
+        assert_eq!(
+            subnet
+                .pools
+                .iter()
+                .map(|pool| pool.to_compact_string())
+                .collect::<Vec<_>>(),
+            vec!["10.0.0.10-10.0.0.11", "10.0.0.30-10.0.0.40"],
+            "範圍解析、無效忽略、數值排序"
+        );
+        assert_eq!(subnet.gateway.as_deref(), Some("10.0.0.1"));
+        assert_eq!(subnet.raw, entry);
+    }
+
+    #[test]
+    fn subnet_gateway_accepts_code_three_and_ignores_empty() {
+        let entry = json!({ "option-data": [{"code": 3, "data": "10.0.0.254"}] });
+        assert_eq!(
+            subnet_gateway(&entry).as_deref(),
+            Some("10.0.0.254"),
+            "code 3、未指定 space 視為 dhcp4"
+        );
+
+        let entry = json!({ "option-data": [{"name": "routers", "data": "  "}] });
+        assert_eq!(subnet_gateway(&entry), None, "空字串視為未提供");
+        assert_eq!(subnet_gateway(&json!({})), None);
     }
 }

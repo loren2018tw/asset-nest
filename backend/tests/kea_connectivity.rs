@@ -159,6 +159,46 @@ async fn status_commands_against_live_server() {
     println!("唯讀狀態實測完成（{url}）");
 }
 
+/// 唯讀實測網段層同步所需欄位：`config-get` 的 subnet4 pools／routers 解析，
+/// 並以 `list-commands` 檢查 subnet_cmds hook 是否提供 `subnet4-update`
+/// （未載入時照實記錄）。不送修改命令、不留變更（見 `docs/adr/0013`）。
+#[tokio::test]
+#[ignore = "需要真機 Kea（KEA_API_URL）"]
+async fn subnet_settings_against_live_server() {
+    dotenvy::dotenv().ok();
+
+    let config = Config::from_env().expect("讀取環境設定失敗");
+    let (client, url) = live_client(&config);
+
+    let dhcp4 = client.config_get_dhcp4().await.expect("config-get 失敗");
+    assert!(
+        !dhcp4.subnets.is_empty(),
+        "真機應至少一個 IPv4 網段（{url}）"
+    );
+    for (id, subnet) in &dhcp4.subnets {
+        println!(
+            "subnet-id {id}：cidr={:?}、pools={:?}、gateway={:?}",
+            subnet.cidr,
+            subnet
+                .pools
+                .iter()
+                .map(|range| range.to_compact_string())
+                .collect::<Vec<_>>(),
+            subnet.gateway
+        );
+    }
+
+    let commands = client.list_commands().await.expect("list-commands 失敗");
+    if commands.iter().any(|command| command == "subnet4-update") {
+        println!("subnet_cmds hook 已載入：subnet4-update 可用");
+    } else {
+        println!(
+            "subnet4-update 不支援：此機 Kea 未載入 subnet_cmds hook；\
+             載入後網段層同步（pool／gateway）才能套用（見 .scratch/kea-subnet-sync/issues/03）"
+        );
+    }
+}
+
 /// 唯讀實測 `lease4-get-all`：支援時逐筆斷言欄位解析合理（合法 IPv4、
 /// MAC 形式 `hw_address`、`state` 在正規化集合內），並印出實測供定案
 /// （見 `.scratch/kea-pages/spec.md`）。不送任何修改命令、不留變更。
