@@ -3,6 +3,7 @@
 - 狀態：已定案（2026-10-04，四輪逐題確認），待實作。
 - 追加定案（2026-10-04）：資產清單「已指派 IP」欄與搜尋補強、IP 清單「位置」欄與標頭排序、指派對話框資產顯示格式（見票 12–15）。
 - 追加定案（2026-10-04，第二批）：位置篩選可輸入過濾；指派對象顯示「描述(廠牌 型號)」；移除 IP 清單 Gateway 欄與排序。資產匯出與網段匯出／匯入見 `.scratch/csv-export-import/spec.md`。
+- 追加定案（2026-10-05）：兩張清單標頭排序修正（第二次點擊反向、箭頭跟隨所點欄位；同欄只在 asc／desc 切換）；資產清單「已指派 IP」改為可排序（見票 19）。
 - 詞彙依 `GLOSSARY.md`；關鍵取捨見 `docs/adr/0005`（指派以 Interface 為對象）與 `docs/adr/0006`（兩層驗證）。
 
 ## 1. 範圍
@@ -44,7 +45,7 @@
 
 - **屆齡徽章**：`purchase_date + lifespan_years < 今天` 時顯示（僅提示）。
 - **列表預設欄位**：財產編號、描述、位置、已指派 IP、廠牌、型號、備註、標籤、屆齡徽章。
-- **已指派 IP 欄**：列出該資產全部已指派位址（跨介面、跨網段；v4 先、v6 後，同地址族依位址數值）；多筆同列並排（chips）、過多換行；未指派顯示「—」；純顯示，不可排序。
+- **已指派 IP 欄**：列出該資產全部已指派位址（跨介面、跨網段；v4 先、v6 後，同地址族依位址數值）；多筆同列並排（chips）、過多換行；未指派顯示「—」；可排序：依第一筆已指派位址（顯示序；見票 19）。
 - **搜尋**：單一關鍵字跨 財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派 IP（大小寫無關、子字串）。**篩選**：位置、廠牌、標籤（不分大小寫完全符合）。皆為伺服器端。列表標題列可點擊快速排序（伺服器端；預設描述升冪，欄位白名單見 §5）。
 - **位置篩選輸入**：位置篩選的下拉可輸入文字即時過濾既有位置選項（本地過濾）。
 - **刪除**：連動刪除其 Interface、指派與 Reservation；確認對話框顯示「將刪除 N 個介面、M 筆指派（含 K 筆保留）」。
@@ -185,7 +186,7 @@ ip_assignments(id, subnet_id NOT NULL REFERENCES subnets,
 | DELETE | `/subnets/{id}/ips/{address}/assignment` | 取消指派 |
 
 - 沿用既有 JSON 錯誤格式 `{error, message}`；結構錯誤可附 `details`（如衝突網段、受影響筆數）。
-- `GET /assets` 排序：`sort` 欄位白名單 `property_no`／`description`／`location`／`brand`／`model`／`note`／`tags`／`expired`；`dir`＝`asc`／`desc`；預設 `description` 升冪；無效值回 400。
+- `GET /assets` 排序：`sort` 欄位白名單 `property_no`／`description`／`location`／`brand`／`model`／`note`／`tags`／`expired`／`assigned_ips`；`dir`＝`asc`／`desc`；預設 `description` 升冪；無效值回 400。`assigned_ips` 依第一筆已指派位址（v4 先、v6 後、同族依數值；未指派固定排最後；desc 為完全反向；見票 19）；匯出沿用同一排序。
 - `GET /subnets/{id}/ips` 排序：`sort` 欄位白名單 `address`／`status`／`location`／`assignment`；`dir`＝`asc`／`desc`；預設 `address` 升冪；無效值回 400。
 
 ## 6. 實作預設（未逐題確認，可直接修改）

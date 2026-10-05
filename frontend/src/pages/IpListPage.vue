@@ -62,8 +62,9 @@
       :columns="columns"
       row-key="address"
       :loading="loading"
-      :pagination="pagination"
+      v-model:pagination="pagination"
       :rows-per-page-options="[10, 25, 50, 100]"
+      binary-state-sort
       @request="onRequest"
     >
       <template #body-cell-address="props">
@@ -207,7 +208,12 @@ const filters = ref<{ q: string | null; status: IpStatus | null }>({
   status: null
 });
 
-/** 伺服器端分頁與排序；預設 IP 數值升冪（見 spec §4.3、票 14）。 */
+/**
+ * 伺服器端分頁與排序；預設 IP 數值升冪（見 spec §4.3、票 14）。
+ * 須以 `v-model:pagination` 綁定（而非只傳 `:pagination`），Quasar 才會把
+ * 父層更新併回表格內部狀態，否則排序箭頭永遠停在初始欄位（見票 19）。
+ * `binary-state-sort`：同欄點擊只在 asc／desc 間切換，不停在「取消排序」。
+ */
 const pagination = ref<{
   page: number;
   rowsPerPage: number;

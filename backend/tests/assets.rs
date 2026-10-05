@@ -906,6 +906,95 @@ async fn list_sorts_by_whitelisted_columns_with_direction() {
 }
 
 #[tokio::test]
+async fn list_sorts_by_first_assigned_ip_with_unassigned_last() {
+    let pool = test_pool().await;
+
+    let subnet4 = create_subnet(&pool, json!({ "cidr": "10.0.0.0/24" })).await;
+    let subnet6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+
+    // alpha：10.0.0.10（文字序會排在 10.0.0.9 之前，須以數值序）
+    let alpha = create_asset(&pool, json!({ "description": "alpha", "location": "機房" })).await;
+    let alpha_id = alpha["id"].as_i64().expect("回應含 id");
+    let alpha_interface = create_interface(&pool, alpha_id, json!({ "name": "eth0" })).await;
+    assign_static(&pool, subnet4, "10.0.0.10", alpha_interface).await;
+
+    // Bravo：10.0.0.9
+    let bravo = create_asset(&pool, json!({ "description": "Bravo", "location": "機房" })).await;
+    let bravo_id = bravo["id"].as_i64().expect("回應含 id");
+    let bravo_interface = create_interface(&pool, bravo_id, json!({ "name": "eth0" })).await;
+    assign_static(&pool, subnet4, "10.0.0.9", bravo_interface).await;
+
+    // Charlie：未指派（排序固定最後，且供篩選組合驗證）
+    create_asset(
+        &pool,
+        json!({ "description": "Charlie", "location": "機房 B" }),
+    )
+    .await;
+
+    // Delta：僅 v6 → 第一筆為 v6，排在所有 v4 之後
+    let delta = create_asset(&pool, json!({ "description": "Delta", "location": "機房" })).await;
+    let delta_id = delta["id"].as_i64().expect("回應含 id");
+    let delta_interface = create_interface(&pool, delta_id, json!({ "name": "eth0" })).await;
+    assign_static(&pool, subnet6, "fd00::5", delta_interface).await;
+
+    // Echo：先指派 v6 再指派 v4 → 第一筆仍取顯示序的 v4
+    let echo = create_asset(&pool, json!({ "description": "Echo", "location": "機房" })).await;
+    let echo_id = echo["id"].as_i64().expect("回應含 id");
+    let echo_interface = create_interface(&pool, echo_id, json!({ "name": "eth0" })).await;
+    assign_static(&pool, subnet6, "fd00::9", echo_interface).await;
+    assign_static(&pool, subnet4, "10.0.0.2", echo_interface).await;
+
+    // 升冪：第一筆位址數值序；v4 全在 v6 前；未指派最後
+    assert_eq!(
+        descriptions(&pool, "sort=assigned_ips&dir=asc&per_page=10").await,
+        vec!["Echo", "Bravo", "alpha", "Delta", "Charlie"]
+    );
+    // 降冪：升冪的完全反向（v6 排在 v4 前），未指派仍最後
+    assert_eq!(
+        descriptions(&pool, "sort=assigned_ips&dir=desc&per_page=10").await,
+        vec!["Delta", "alpha", "Bravo", "Echo", "Charlie"]
+    );
+
+    // 分頁：以排序後的完整序列切頁，總數不變
+    let (status, page) = send(
+        &pool,
+        Method::GET,
+        "/api/v1/assets?sort=assigned_ips&dir=asc&per_page=2&page=2",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 5);
+    let page_descriptions: Vec<&str> = page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .map(|item| item["description"].as_str().expect("描述為字串"))
+        .collect();
+    assert_eq!(page_descriptions, ["alpha", "Delta"]);
+
+    // 可與既有篩選組合
+    assert_eq!(
+        descriptions(
+            &pool,
+            &format!(
+                "sort=assigned_ips&per_page=10&location={}",
+                encode("機房 B")
+            )
+        )
+        .await,
+        vec!["Charlie"]
+    );
+
+    // 匯出沿用同一排序
+    let (status, _, bytes) = export_bytes(&pool, "sort=assigned_ips&dir=asc").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, rows) = parse_export(&bytes);
+    let exported: Vec<&str> = rows.iter().map(|row| row.get(1).expect("描述欄")).collect();
+    assert_eq!(exported, ["Echo", "Bravo", "alpha", "Delta", "Charlie"]);
+}
+
+#[tokio::test]
 async fn expired_sort_is_consistent_with_rust_flag() {
     use chrono::{Duration, Local};
 

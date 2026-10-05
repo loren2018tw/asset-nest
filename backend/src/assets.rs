@@ -2,6 +2,7 @@
 //!
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.1、§3。
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use chrono::{Datelike, Local, NaiveDate};
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::api::ApiError;
+use crate::assignments;
 
 /// `assets` 資料表完整欄位清單。
 const COLUMNS: &str = "id, property_no, description, location, device_serial, brand, model, \
@@ -175,7 +177,7 @@ impl AssetPatch {
     }
 }
 
-/// 清單可排序欄位白名單（見票 11）。
+/// 清單可排序欄位白名單（見票 11、票 19）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortField {
     PropertyNo,
@@ -187,6 +189,7 @@ pub enum SortField {
     Note,
     Tags,
     Expired,
+    AssignedIps,
 }
 
 impl SortField {
@@ -201,6 +204,7 @@ impl SortField {
             "note" => Some(Self::Note),
             "tags" => Some(Self::Tags),
             "expired" => Some(Self::Expired),
+            "assigned_ips" => Some(Self::AssignedIps),
             _ => None,
         }
     }
@@ -216,6 +220,9 @@ impl SortField {
             Self::Note => "note COLLATE NOCASE",
             Self::Tags => "tags COLLATE NOCASE",
             Self::Expired => EXPIRED_EXPR,
+            // 「已指派 IP」於 Rust 端比較位址數值（SQLite 無 inet 型別）；
+            // SQL 端僅需穩定基底，實際排序見 `list_all_by_assigned_ips`（票 19）。
+            Self::AssignedIps => "id",
         }
     }
 }
@@ -270,6 +277,14 @@ pub struct AssetFilter {
 
 /// 搜尋／篩選後的分頁查詢；回傳（當頁資產、符合總數）。
 pub async fn list(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<(Vec<Asset>, i64)> {
+    // 「已指派 IP」需以第一筆位址跨全部符合資產比較，改於 Rust 端排序後切頁
+    // （見票 19）；其餘欄位維持 SQL 端排序與分頁。
+    if filter.sort == SortField::AssignedIps {
+        let all = list_all_by_assigned_ips(pool, filter).await?;
+        let total = all.len() as i64;
+        return Ok((take_page(all, filter), total));
+    }
+
     let mut count = QueryBuilder::new("SELECT COUNT(*) FROM assets WHERE 1 = 1");
     push_filters(&mut count, filter);
     let total = count.build_query_scalar::<i64>().fetch_one(pool).await?;
@@ -288,12 +303,78 @@ pub async fn list(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<(Vec<
 
 /// 搜尋／篩選後的全部符合資產（不分頁；供匯出使用，見票 04）。
 pub async fn list_all(pool: &SqlitePool, filter: &AssetFilter) -> sqlx::Result<Vec<Asset>> {
+    if filter.sort == SortField::AssignedIps {
+        return list_all_by_assigned_ips(pool, filter).await;
+    }
+
     let mut query = QueryBuilder::new(format!("SELECT {COLUMNS} FROM assets WHERE 1 = 1"));
     push_filters(&mut query, filter);
     push_order(&mut query, filter);
     let rows: Vec<AssetRow> = query.build_query_as().fetch_all(pool).await?;
 
     Ok(into_assets(rows))
+}
+
+/// 依第一筆已指派 IP 排序全部符合資產（供 `sort=assigned_ips` 的清單與匯出；
+/// 見票 19）。
+///
+/// 排序鍵為顯示序第一筆位址（v4 先、v6 後、同族依數值；見
+/// [`assignments::list_for_assets`]），未指派固定排最後（asc／desc 皆然），
+/// 同鍵以 id 升冪決勝；desc 為位址鍵的完全反向（v6 排在 v4 前）。SQLite 無
+/// inet 型別，於 Rust 端解析位址比較；成本與關鍵字搜尋同級，切頁由呼叫端
+/// 以 [`take_page`] 負責。
+async fn list_all_by_assigned_ips(
+    pool: &SqlitePool,
+    filter: &AssetFilter,
+) -> sqlx::Result<Vec<Asset>> {
+    let mut query = QueryBuilder::new(format!("SELECT {COLUMNS} FROM assets WHERE 1 = 1"));
+    push_filters(&mut query, filter);
+    let rows: Vec<AssetRow> = query.build_query_as().fetch_all(pool).await?;
+    let assets = into_assets(rows);
+
+    let ids: Vec<i64> = assets.iter().map(|asset| asset.id).collect();
+    let mut assigned = assignments::list_for_assets(pool, &ids).await?;
+
+    let mut items: Vec<(Asset, Option<String>)> = assets
+        .into_iter()
+        .map(|asset| {
+            let first = assigned
+                .remove(&asset.id)
+                .and_then(|addresses| addresses.into_iter().next());
+            (asset, first)
+        })
+        .collect();
+
+    items.sort_by(|(left, left_ip), (right, right_ip)| {
+        compare_first_assigned_ip(left_ip.as_deref(), right_ip.as_deref(), filter.dir)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(items.into_iter().map(|(asset, _)| asset).collect())
+}
+
+/// 比較兩資產的第一筆已指派位址；未指派（`None`）固定排最後（asc／desc 皆然）。
+fn compare_first_assigned_ip(left: Option<&str>, right: Option<&str>, dir: SortDir) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let order =
+                assignments::address_sort_key(left).cmp(&assignments::address_sort_key(right));
+            match dir {
+                SortDir::Asc => order,
+                SortDir::Desc => order.reverse(),
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// 依 `filter` 的頁碼與每頁筆數切取一頁；供 Rust 端排序後的清單使用。
+fn take_page(assets: Vec<Asset>, filter: &AssetFilter) -> Vec<Asset> {
+    let offset = ((filter.page - 1).max(0) * filter.per_page).max(0) as usize;
+    let limit = filter.per_page.max(0) as usize;
+    assets.into_iter().skip(offset).take(limit).collect()
 }
 
 /// 讀取單一資產；不存在回傳 `None`。

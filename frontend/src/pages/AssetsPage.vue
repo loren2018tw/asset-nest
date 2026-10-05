@@ -79,8 +79,9 @@
       :columns="columns"
       row-key="id"
       :loading="loading"
-      :pagination="pagination"
+      v-model:pagination="pagination"
       :rows-per-page-options="[10, 25, 50]"
+      binary-state-sort
       @request="onRequest"
     >
       <template #body-cell-property_no="props">
@@ -219,7 +220,12 @@ const filters = ref<{
   tag: null
 });
 
-/** 伺服器端分頁與排序；預設描述升冪（見 spec §6）。 */
+/**
+ * 伺服器端分頁與排序；預設描述升冪（見 spec §6）。
+ * 須以 `v-model:pagination` 綁定（而非只傳 `:pagination`），Quasar 才會把
+ * 父層更新併回表格內部狀態，箭頭顯示與點擊反向切換才正常（見票 19）。
+ * `binary-state-sort`：同欄點擊只在 asc／desc 間切換，不停在「取消排序」。
+ */
 const pagination = ref<{
   page: number;
   rowsPerPage: number;
@@ -257,12 +263,12 @@ const columns: QTableProps["columns"] = [
     sortable: true
   },
   {
-    // 純顯示：列出全部已指派位址（v4 先、v6 後），不列入排序白名單（見票 12）
+    // 依第一筆已指派位址排序（v4 先、v6 後、同族數值；未指派固定最後；見票 19）
     name: "assigned_ips",
     label: "已指派 IP",
     field: "assigned_ips",
     align: "left",
-    sortable: false
+    sortable: true
   },
   {
     name: "brand",

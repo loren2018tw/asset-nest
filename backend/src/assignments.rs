@@ -690,7 +690,10 @@ pub async fn list_for_assets(
 }
 
 /// 已指派位址的顯示排序鍵：v4 先、v6 後，同地址族依位址數值；無法解析者排最後。
-fn address_sort_key(address: &str) -> (u8, u128) {
+///
+/// 供本模組排序顯示序，亦供資產清單「已指派 IP」排序比較第一筆位址
+/// （見 `assets::list_all_by_assigned_ips`、票 19）。
+pub(crate) fn address_sort_key(address: &str) -> (u8, u128) {
     match address.parse::<IpAddr>() {
         Ok(IpAddr::V4(address)) => (0, u128::from(u32::from(address))),
         Ok(IpAddr::V6(address)) => (1, u128::from(address)),
