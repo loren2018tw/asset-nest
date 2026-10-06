@@ -1,5 +1,5 @@
-//! 網段 CSV 匯入整合測試：編碼、標題、6 欄規則、跨列衝突、
-//! dry_run 預覽與單一交易寫入（見票 02）。
+//! 網段 CSV 匯入整合測試：編碼、標題、7 欄規則（含排除範圍）、跨列衝突、
+//! dry_run 預覽與單一交易寫入（見票 02、05）。
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -90,6 +90,34 @@ async fn execute(pool: &SqlitePool, request: Request<Body>) -> (StatusCode, Valu
     (status, json)
 }
 
+/// 以 `oneshot` 發送 GET；回傳狀態碼與原始內容（CSV 回應用）。
+async fn send_bytes(pool: &SqlitePool, uri: &str) -> (StatusCode, Vec<u8>) {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("建立請求");
+
+    let response = app(AppState::new(
+        pool.clone(),
+        std::env::temp_dir().join("asset-nest-test-no-dist"),
+    ))
+    .oneshot(request)
+    .await
+    .expect("執行請求");
+
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("讀取回應內容")
+        .to_bytes()
+        .to_vec();
+
+    (status, bytes)
+}
+
 const BOUNDARY: &str = "asset-nest-subnet-import-boundary";
 
 /// 以 multipart（檔案欄位 `file`）呼叫匯入端點；`dry_run` 為 `None` 時不帶查詢參數。
@@ -120,10 +148,10 @@ async fn post_csv(pool: &SqlitePool, dry_run: Option<bool>, bytes: &[u8]) -> (St
     .await
 }
 
-/// 匯入 CSV 標題列（6 欄，順序同 ADR-0009）。
-const HEADERS: &str = "名稱,CIDR,Gateway,Kea subnet-id,位址池,備註";
+/// 匯入 CSV 標題列（7 欄，順序同 ADR-0009／0020）。
+const HEADERS: &str = "名稱,CIDR,Gateway,Kea subnet-id,位址池,排除範圍,備註";
 
-/// 6 欄資料列；預設僅填 CIDR，其餘留空。
+/// 7 欄資料列；預設僅填 CIDR，其餘留空。
 #[derive(Default)]
 struct CsvRow {
     name: String,
@@ -131,6 +159,7 @@ struct CsvRow {
     gateway: String,
     kea_subnet_id: String,
     pools: String,
+    exclusions: String,
     note: String,
 }
 
@@ -142,19 +171,20 @@ impl CsvRow {
         }
     }
 
-    fn fields(&self) -> [&str; 6] {
+    fn fields(&self) -> [&str; 7] {
         [
             &self.name,
             &self.cidr,
             &self.gateway,
             &self.kea_subnet_id,
             &self.pools,
+            &self.exclusions,
             &self.note,
         ]
     }
 }
 
-/// 以標準 6 欄標題組出 CSV 文字。
+/// 以標準 7 欄標題組出 CSV 文字。
 fn build_csv(rows: &[CsvRow]) -> String {
     let mut text = String::from(HEADERS);
     for row in rows {
@@ -286,8 +316,9 @@ async fn import_route_is_static_and_defaults_to_dry_run() {
 async fn headers_are_trimmed_case_insensitive_and_order_free() {
     let pool = test_pool().await;
 
-    // 未知標題忽略、英文不分大小寫、順序不拘、單元格 trim、CIDR 正規化。
-    let text = " 名稱 ,數量, CIDR , gateway ,KEA SUBNET-ID,位址池,備註\n 核心 ,3, 10.0.0.5/24 , 10.0.0.1 , 7 , 10.0.0.100-10.0.0.150 , 主要 \n";
+    // 未知標題忽略、英文不分大小寫、順序不拘、單元格 trim、CIDR 正規化；
+    // 「排除範圍」欄缺席視為未填、出現時解析段與用途說明。
+    let text = " 名稱 ,排除範圍,數量, CIDR , gateway ,KEA SUBNET-ID,位址池,備註\n 核心 , 10.0.0.30-10.0.0.40#NAT 對外 ,3, 10.0.0.5/24 , 10.0.0.1 , 7 , 10.0.0.100-10.0.0.150 , 主要 \n";
     let (status, report) = post_csv(&pool, Some(true), text.as_bytes()).await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["ignored_headers"], json!(["數量"]));
@@ -300,6 +331,11 @@ async fn headers_are_trimmed_case_insensitive_and_order_free() {
     assert_eq!(row["data"]["gateway"], "10.0.0.1");
     assert_eq!(row["data"]["kea_subnet_id"], 7);
     assert_eq!(row["data"]["pools"], json!(["10.0.0.100-10.0.0.150"]));
+    assert_eq!(
+        row["data"]["exclusions"],
+        json!(["10.0.0.30-10.0.0.40#NAT 對外"]),
+        "7 欄標題順序不拘；用途說明 trim"
+    );
     assert_eq!(row["data"]["note"], "主要");
 }
 
@@ -432,7 +468,7 @@ async fn column_count_mismatch_is_a_row_error() {
 
     let mut csv = String::from(HEADERS);
     csv.push_str("\n10.0.0.0/24\n"); // 欄位過少
-    csv.push_str("10.0.1.0/24,網段,10.0.1.1,1,10.0.1.10-10.0.1.20,備註,多餘\n"); // 欄位過多
+    csv.push_str("10.0.1.0/24,網段,10.0.1.1,1,10.0.1.10-10.0.1.20,,備註,多餘\n"); // 欄位過多
 
     let (status, report) = post_csv(&pool, Some(false), csv.as_bytes()).await;
     assert_eq!(status, StatusCode::OK, "{report}");
@@ -443,7 +479,12 @@ async fn column_count_mismatch_is_a_row_error() {
     let row = row_at(&report, 2);
     assert_eq!(row["status"], "error");
     assert!(has_code(row, "column_count_mismatch"));
-    assert!(message_of(row, "column_count_mismatch").contains("6"));
+    assert!(message_of(row, "column_count_mismatch").contains("7"));
+    assert_eq!(
+        row["data"]["exclusions"],
+        json!([]),
+        "mismatch_data 一併填入排除範圍"
+    );
 
     // 整批不匯入，無殘留。
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnets").await, 0);
@@ -717,6 +758,203 @@ async fn validates_pool_rules() {
 }
 
 #[tokio::test]
+async fn validates_exclusion_rules() {
+    let pool = test_pool().await;
+
+    let mut multi = CsvRow::new("10.0.0.0/24");
+    multi.exclusions = "10.0.0.30-10.0.0.40#NAT 對外|10.0.0.50-10.0.0.50#說明#含井號".to_string(); // 列 2
+
+    let mut malformed = CsvRow::new("10.0.1.0/24");
+    malformed.exclusions = "10.0.1.30".to_string(); // 列 3
+
+    let mut empty_segment = CsvRow::new("10.0.2.0/24");
+    empty_segment.exclusions = "10.0.2.30-10.0.2.40|".to_string(); // 列 4
+
+    let mut reversed = CsvRow::new("10.0.3.0/24");
+    reversed.exclusions = "10.0.3.40-10.0.3.30".to_string(); // 列 5
+
+    let mut outside = CsvRow::new("10.0.4.0/24");
+    outside.exclusions = "10.0.5.10-10.0.5.20".to_string(); // 列 6
+
+    let mut overlap_each_other = CsvRow::new("10.0.6.0/24");
+    overlap_each_other.exclusions = "10.0.6.10-10.0.6.20|10.0.6.15-10.0.6.30".to_string(); // 列 7
+
+    let mut overlap_pool = CsvRow::new("10.0.7.0/24");
+    overlap_pool.pools = "10.0.7.10-10.0.7.20".to_string();
+    overlap_pool.exclusions = "10.0.7.15-10.0.7.25".to_string(); // 列 8
+
+    let csv = build_csv(&[
+        multi,
+        malformed,
+        empty_segment,
+        reversed,
+        outside,
+        overlap_each_other,
+        overlap_pool,
+    ]);
+    let (status, report) = post_csv(&pool, Some(true), csv.as_bytes()).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["summary"]["ok"], 1);
+    assert_eq!(report["summary"]["errors"], 6);
+
+    let row = row_at(&report, 2);
+    assert_eq!(row["status"], "ok");
+    assert_eq!(
+        row["data"]["exclusions"],
+        json!([
+            "10.0.0.30-10.0.0.40#NAT 對外",
+            "10.0.0.50-10.0.0.50#說明#含井號"
+        ]),
+        "多段以 | 分隔；note 可含 #（以第一個 # 分隔）"
+    );
+
+    for (row_number, fragment) in [
+        (3, "格式錯誤"),
+        (4, "空段"),
+        (5, "不可大於終點"),
+        (6, "不在網段"),
+        (7, "重疊"),
+        (8, "不得與 DHCP 位址池重疊"),
+    ] {
+        let row = row_at(&report, row_number);
+        assert_eq!(row["status"], "error", "第 {row_number} 列：{row}");
+        assert!(has_code(row, "invalid_exclusions"), "{row}");
+        assert_eq!(
+            row["issues"][0]["field"], "exclusions",
+            "問題欄位一律映射為 exclusions：{row}"
+        );
+        assert!(
+            message_of(row, "invalid_exclusions").contains(fragment),
+            "第 {row_number} 列訊息應含 {fragment}：{row}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn v6_exclusions_are_rejected() {
+    let pool = test_pool().await;
+
+    let mut v6 = CsvRow::new("fd00::/64");
+    v6.exclusions = "fd00::10-fd00::20#NAT".to_string(); // 列 2
+
+    // 空字串視為未填：v6 可正常匯入。
+    let empty = CsvRow::new("fd01::/64"); // 列 3
+
+    let csv = build_csv(&[v6, empty]);
+    let (status, report) = post_csv(&pool, Some(true), csv.as_bytes()).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["summary"]["ok"], 1);
+    assert_eq!(report["summary"]["errors"], 1);
+
+    let row = row_at(&report, 2);
+    assert_eq!(row["status"], "error");
+    assert!(has_code(row, "exclusions_for_v6"), "{row}");
+    assert_eq!(row["issues"][0]["field"], "exclusions");
+    assert_eq!(
+        row["data"]["exclusions"],
+        json!(["fd00::10-fd00::20#NAT"]),
+        "v6 錯誤列以原始段呈現"
+    );
+
+    assert_eq!(row_at(&report, 3)["status"], "ok", "v6 無排除範圍可建立");
+}
+
+#[tokio::test]
+async fn legacy_six_column_csv_still_imports() {
+    let pool = test_pool().await;
+
+    // 舊檔：標題無「排除範圍」，欄位缺席視為未填。
+    let text = "名稱,CIDR,Gateway,Kea subnet-id,位址池,備註\n\
+                核心,10.0.0.0/24,10.0.0.1,1,10.0.0.100-10.0.0.150,主力\n\
+                v6,fd00::/64,fd00::1,,,\n";
+    let (status, report) = post_csv(&pool, Some(false), text.as_bytes()).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["summary"]["ok"], 2, "{report}");
+    assert_eq!(report["summary"]["errors"], 0);
+    assert_eq!(report["created"], json!({ "subnets": 2 }));
+    assert_eq!(
+        row_at(&report, 2)["data"]["exclusions"],
+        json!([]),
+        "欄位缺席視為未填"
+    );
+
+    // 正式寫入後僅既有欄位落地，無排除範圍。
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnets").await, 2);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnet_pools").await, 1);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM subnet_exclusions").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn export_then_import_round_trip_with_exclusions() {
+    let source = test_pool().await;
+
+    // 來源：多段排除範圍；用途說明含 `#`（往返以第一個 `#` 分隔）。
+    create_subnet(
+        &source,
+        json!({
+            "cidr": "10.0.0.0/24",
+            "name": "辦公區",
+            "note": "三樓",
+            "gateway": "10.0.0.1",
+            "kea_subnet_id": 1,
+            "pools": [{ "start_ip": "10.0.0.100", "end_ip": "10.0.0.150" }],
+            "exclusions": [
+                { "start_ip": "10.0.0.30", "end_ip": "10.0.0.40", "note": "NAT #1" },
+                { "start_ip": "10.0.0.50", "end_ip": "10.0.0.50" }
+            ]
+        }),
+    )
+    .await;
+    create_subnet(&source, json!({ "cidr": "fd00::/64", "name": "v6 區" })).await;
+
+    let (status, bytes) = send_bytes(&source, "/api/v1/subnets/export").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "須有 UTF-8 BOM");
+    let csv = std::str::from_utf8(&bytes[3..]).expect("匯出內容為 UTF-8");
+
+    // 匯入至全新資料庫：全數成功，排除範圍與用途說明正確還原。
+    let target = test_pool().await;
+    let (status, report) = post_csv(&target, Some(false), csv.as_bytes()).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["summary"]["ok"], 2, "{report}");
+    assert_eq!(report["summary"]["errors"], 0);
+    assert_eq!(report["created"], json!({ "subnets": 2 }));
+
+    let row = row_at(&report, 2);
+    assert_eq!(
+        row["data"]["exclusions"],
+        json!(["10.0.0.30-10.0.0.40#NAT #1", "10.0.0.50-10.0.0.50"]),
+        "匯出→匯入往返：note 以第一個 # 分隔"
+    );
+
+    let (status, list) = send(&target, Method::GET, "/api/v1/subnets", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let id = list["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .find(|item| item["cidr"] == json!("10.0.0.0/24"))
+        .and_then(|item| item["id"].as_i64())
+        .expect("匯入後存在 10.0.0.0/24");
+
+    let (status, detail) = send(&target, Method::GET, &format!("/api/v1/subnets/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["name"], "辦公區");
+    assert_eq!(detail["note"], "三樓");
+    let exclusions = detail["exclusions"].as_array().expect("exclusions 為陣列");
+    assert_eq!(exclusions.len(), 2, "{detail}");
+    assert_eq!(exclusions[0]["start_ip"], "10.0.0.30");
+    assert_eq!(exclusions[0]["end_ip"], "10.0.0.40");
+    assert_eq!(exclusions[0]["note"], "NAT #1");
+    assert_eq!(exclusions[1]["start_ip"], "10.0.0.50");
+    assert_eq!(exclusions[1]["end_ip"], "10.0.0.50");
+    assert!(exclusions[1]["note"].is_null(), "無用途說明者為 null");
+}
+
+#[tokio::test]
 async fn dry_run_preview_does_not_write() {
     let pool = test_pool().await;
 
@@ -725,6 +963,7 @@ async fn dry_run_preview_does_not_write() {
     first.gateway = "10.0.0.1".to_string();
     first.kea_subnet_id = "1".to_string();
     first.pools = "10.0.0.100-10.0.0.150".to_string();
+    first.exclusions = "10.0.0.30-10.0.0.40#NAT 對外".to_string();
 
     let second = CsvRow::new("fd00::/64");
     let csv = build_csv(&[first, second]);
@@ -741,6 +980,10 @@ async fn dry_run_preview_does_not_write() {
 
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnets").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnet_pools").await, 0);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM subnet_exclusions").await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -752,6 +995,7 @@ async fn imports_subnets_in_one_transaction() {
     full.gateway = "10.0.0.1".to_string();
     full.kea_subnet_id = "1".to_string();
     full.pools = "10.0.0.100-10.0.0.150|10.0.0.200-10.0.0.250".to_string();
+    full.exclusions = "10.0.0.30-10.0.0.40#NAT 對外|10.0.0.50-10.0.0.50".to_string();
     full.note = "主力".to_string();
 
     let mut v6 = CsvRow::new("fd00::/64");
@@ -777,6 +1021,10 @@ async fn imports_subnets_in_one_transaction() {
 
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnets").await, 3);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnet_pools").await, 2);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM subnet_exclusions").await,
+        2
+    );
 
     // 以既有 GET 端點驗證落地內容。
     let (status, list) = send(&pool, Method::GET, "/api/v1/subnets", None).await;
@@ -819,6 +1067,30 @@ async fn imports_subnets_in_one_transaction() {
         pools,
         ["10.0.0.100-10.0.0.150", "10.0.0.200-10.0.0.250"],
         "pool 順序與輸入一致"
+    );
+
+    let exclusions: Vec<String> = detail["exclusions"]
+        .as_array()
+        .expect("exclusions 為陣列")
+        .iter()
+        .map(|exclusion| match exclusion["note"].as_str() {
+            Some(note) => format!(
+                "{}-{}#{}",
+                exclusion["start_ip"].as_str().unwrap(),
+                exclusion["end_ip"].as_str().unwrap(),
+                note
+            ),
+            None => format!(
+                "{}-{}",
+                exclusion["start_ip"].as_str().unwrap(),
+                exclusion["end_ip"].as_str().unwrap()
+            ),
+        })
+        .collect();
+    assert_eq!(
+        exclusions,
+        ["10.0.0.30-10.0.0.40#NAT 對外", "10.0.0.50-10.0.0.50"],
+        "排除範圍與用途說明落地且順序與輸入一致"
     );
 
     let (status, detail) = send(
@@ -864,6 +1136,10 @@ async fn failed_import_writes_nothing() {
     // 全有全無：無任何殘留。
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnets").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM subnet_pools").await, 0);
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM subnet_exclusions").await,
+        0
+    );
 }
 
 #[tokio::test]

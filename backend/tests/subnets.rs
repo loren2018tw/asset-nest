@@ -719,6 +719,137 @@ async fn v6_rejects_pools_and_kea_subnet_id() {
 }
 
 #[tokio::test]
+async fn subnet_exclusions_lifecycle() {
+    let pool = test_pool().await;
+
+    // 建立：多段排除範圍（含用途說明；單一位址以起=迄表示）
+    let created = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/24",
+            "exclusions": [
+                { "start_ip": "10.0.0.30", "end_ip": "10.0.0.40", "note": "NAT 對外" },
+                { "start_ip": "10.0.0.50", "end_ip": "10.0.0.50" }
+            ]
+        }),
+    )
+    .await;
+    let id = created["id"].as_i64().expect("回應含 id");
+
+    let exclusions = created["exclusions"].as_array().expect("exclusions 為陣列");
+    assert_eq!(exclusions.len(), 2);
+    assert!(exclusions[0]["id"].as_i64().is_some_and(|value| value > 0));
+    assert_eq!(exclusions[0]["start_ip"], "10.0.0.30");
+    assert_eq!(exclusions[0]["end_ip"], "10.0.0.40");
+    assert_eq!(exclusions[0]["note"], "NAT 對外");
+    assert_eq!(exclusions[1]["start_ip"], "10.0.0.50");
+    assert_eq!(exclusions[1]["end_ip"], "10.0.0.50");
+    assert!(exclusions[1]["note"].is_null(), "用途說明選填");
+
+    // 讀回一致（依 id 升冪，即輸入順序）
+    let (status, fetched) = send(&pool, Method::GET, &format!("/api/v1/subnets/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["exclusions"], created["exclusions"]);
+
+    // PATCH 未提供 exclusions：沿用原值（含用途說明）
+    let (status, kept) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{id}"),
+        Some(json!({ "name": "辦公區" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未提供 exclusions 維持原值：{kept}");
+    assert_eq!(
+        kept["exclusions"]
+            .as_array()
+            .expect("exclusions 為陣列")
+            .len(),
+        2
+    );
+    assert_eq!(kept["exclusions"][0]["note"], "NAT 對外");
+
+    // PATCH 整批取代
+    let (status, replaced) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{id}"),
+        Some(json!({
+            "exclusions": [
+                { "start_ip": "10.0.0.100", "end_ip": "10.0.0.120", "note": "設備" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let exclusions = replaced["exclusions"]
+        .as_array()
+        .expect("exclusions 為陣列");
+    assert_eq!(exclusions.len(), 1);
+    assert_eq!(exclusions[0]["start_ip"], "10.0.0.100");
+    assert_eq!(exclusions[0]["end_ip"], "10.0.0.120");
+    assert_eq!(exclusions[0]["note"], "設備");
+
+    // PATCH 空陣列清空
+    let (status, cleared) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{id}"),
+        Some(json!({ "exclusions": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cleared["exclusions"], json!([]));
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subnet_exclusions")
+        .fetch_one(&pool)
+        .await
+        .expect("查詢排除範圍");
+    assert_eq!(remaining, 0, "整批取代後資料庫不留舊列");
+}
+
+#[tokio::test]
+async fn exclusions_reject_pool_overlap_and_v6() {
+    let pool = test_pool().await;
+
+    // 與 pool 重疊 → 400 validation_error，field exclusions
+    let body = reject_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/24",
+            "pools": [{ "start_ip": "10.0.0.10", "end_ip": "10.0.0.20" }],
+            "exclusions": [{ "start_ip": "10.0.0.15", "end_ip": "10.0.0.25" }]
+        }),
+    )
+    .await;
+    assert_eq!(body["details"]["field"], "exclusions");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("不得與 DHCP 位址池重疊")),
+        "訊息說明與 pool 重疊：{}",
+        body["message"]
+    );
+
+    // v6 帶排除範圍 → 400
+    let body = reject_subnet(
+        &pool,
+        json!({
+            "cidr": "fd00::/64",
+            "exclusions": [{ "start_ip": "fd00::10", "end_ip": "fd00::20" }]
+        }),
+    )
+    .await;
+    assert_eq!(body["details"]["field"], "exclusions");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("IPv6")),
+        "訊息說明 v6 不支援：{}",
+        body["message"]
+    );
+}
+
+#[tokio::test]
 async fn kea_subnet_id_is_unique_among_v4() {
     let pool = test_pool().await;
 
@@ -797,6 +928,10 @@ async fn export_subnets_returns_ordered_csv_with_bom() {
             "pools": [
                 { "start_ip": "10.0.0.100", "end_ip": "10.0.0.150" },
                 { "start_ip": "10.0.0.200", "end_ip": "10.0.0.220" }
+            ],
+            "exclusions": [
+                { "start_ip": "10.0.0.30", "end_ip": "10.0.0.40", "note": "NAT 對外" },
+                { "start_ip": "10.0.0.50", "end_ip": "10.0.0.50" }
             ]
         }),
     )
@@ -832,7 +967,15 @@ async fn export_subnets_returns_ordered_csv_with_bom() {
         .collect();
     assert_eq!(
         csv_headers,
-        ["名稱", "CIDR", "Gateway", "Kea subnet-id", "位址池", "備註"]
+        [
+            "名稱",
+            "CIDR",
+            "Gateway",
+            "Kea subnet-id",
+            "位址池",
+            "排除範圍",
+            "備註"
+        ]
     );
 
     let rows: Vec<csv::StringRecord> = reader
@@ -854,7 +997,7 @@ async fn export_subnets_returns_ordered_csv_with_bom() {
         "v4 先、v6 後；同族依 CIDR 網路位址數值"
     );
 
-    // v4：完整欄位、多段 pool 以 | 分隔、含逗號備註經引號往返
+    // v4：完整欄位、多段 pool 以 | 分隔、排除範圍含 # 用途說明、含逗號備註經引號往返
     assert_eq!(rows[0].get(0), Some("辦公區"));
     assert_eq!(rows[0].get(2), Some("10.0.0.1"));
     assert_eq!(rows[0].get(3), Some("10"));
@@ -862,20 +1005,27 @@ async fn export_subnets_returns_ordered_csv_with_bom() {
         rows[0].get(4),
         Some("10.0.0.100-10.0.0.150|10.0.0.200-10.0.0.220")
     );
-    assert_eq!(rows[0].get(5), Some("三樓,近電梯"));
+    assert_eq!(
+        rows[0].get(5),
+        Some("10.0.0.30-10.0.0.40#NAT 對外|10.0.0.50-10.0.0.50"),
+        "多段排除範圍以 | 分隔；有用途說明時以 # 接續"
+    );
+    assert_eq!(rows[0].get(6), Some("三樓,近電梯"));
 
     // v4：選填欄位缺值為空字串
-    for column in [0, 2, 3, 4, 5] {
+    for column in [0, 2, 3, 4, 5, 6] {
         assert_eq!(rows[1].get(column), Some(""), "選填欄位缺值留空");
     }
 
-    // v6：Kea subnet-id 與位址池留空；名稱／gateway 照常輸出
+    // v6：Kea subnet-id、位址池與排除範圍留空；名稱／gateway／備註照常輸出
     assert_eq!(rows[2].get(0), Some("v6 一"));
     assert_eq!(rows[2].get(2), Some("2001:db8::1"));
     assert_eq!(rows[2].get(3), Some(""), "v6 的 Kea subnet-id 留空");
     assert_eq!(rows[2].get(4), Some(""), "v6 的位址池留空");
+    assert_eq!(rows[2].get(5), Some(""), "v6 的排除範圍留空");
     assert_eq!(rows[3].get(0), Some("v6 二"));
     assert_eq!(rows[3].get(2), Some("fd00::1"));
     assert_eq!(rows[3].get(3), Some(""));
     assert_eq!(rows[3].get(4), Some(""));
+    assert_eq!(rows[3].get(5), Some(""), "v6 的排除範圍留空");
 }

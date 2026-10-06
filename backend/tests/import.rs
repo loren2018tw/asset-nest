@@ -651,12 +651,26 @@ async fn validates_mac_format_and_normalizes() {
 #[tokio::test]
 async fn validates_ipv4_rules() {
     let pool = test_pool().await;
-    create_subnet(&pool, "10.0.0.0/24", Some(("10.0.0.100", "10.0.0.150"))).await;
+    let subnet_id = create_subnet(&pool, "10.0.0.0/24", Some(("10.0.0.100", "10.0.0.150"))).await;
+    // 排除範圍（例如 NAT）：資產匯入的新指派同樣不可使用（spec §7）。
+    let (status, json) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{subnet_id}"),
+        Some(json!({
+            "exclusions": [
+                { "start_ip": "10.0.0.200", "end_ip": "10.0.0.210", "note": "NAT" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "設定排除範圍應成功：{json}");
 
-    let cases: [(&str, &str); 5] = [
+    let cases: [(&str, &str); 6] = [
         ("10.0.0.0", "ipv4_not_host"),
         ("10.0.0.255", "ipv4_not_host"),
         ("10.0.0.120", "ipv4_in_pool"),
+        ("10.0.0.205", "ipv4_in_exclusion"),
         ("10.9.9.9", "ipv4_out_of_subnet"),
         ("999.1.1.1", "invalid_ipv4"),
     ];

@@ -521,3 +521,36 @@ async fn empty_subnet_can_be_deleted_with_pools() {
         assert_eq!(body["error"], "not_found");
     }
 }
+
+#[tokio::test]
+async fn empty_subnet_can_be_deleted_with_exclusions() {
+    let pool = test_pool().await;
+
+    // 有排除範圍但無指派：可刪，subnet_exclusions 連動刪除
+    let subnet_id = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.14.0.0/29",
+            "exclusions": [
+                { "start_ip": "10.14.0.1", "end_ip": "10.14.0.2", "note": "NAT 對外" }
+            ]
+        }),
+    )
+    .await;
+
+    let (status, body) = send(
+        &pool,
+        Method::DELETE,
+        &format!("/api/v1/subnets/{subnet_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subnet_exclusions")
+        .fetch_one(&pool)
+        .await
+        .expect("查詢排除範圍");
+    assert_eq!(remaining, 0, "刪除網段連動刪除 subnet_exclusions");
+}

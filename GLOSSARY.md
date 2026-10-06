@@ -14,7 +14,7 @@ Asset 的網路介面，可有 MAC 位址（可空）。MAC 為空的 Interface 
 一段連續的 IP 位址範圍（CIDR），位址族為 IPv4 或 IPv6。一個 Subnet 包含多個 IpAddress；一個 IpAddress 只屬於唯一 Subnet。單一 Subnet 為單一地址族，雙棧環境以兩筆 Subnet 表示。DHCP 位址池與 Reservation 本階段僅支援 IPv4。可設選填 gateway；gateway 僅為標記，該位址仍可被指派。
 
 **IpAddress（IP 位址）**
-Subnet 中的一個位址，是獨立實體（不是 Asset 的附屬欄位）。用途為下列之一：可用（available）、手動設定（static）、DHCPv4 保留（reservation）。是否落在 DHCP 位址池內由 Subnet 的池範圍推導；池內位址不可指派。IPv6 位址採登錄制（僅已指派者存在），不枚舉空閒位址。
+Subnet 中的一個位址，是獨立實體（不是 Asset 的附屬欄位）。用途為下列之一：可用（available）、手動設定（static）、DHCPv4 保留（reservation）、排除（excluded）。是否落在 DHCP 位址池內由 Subnet 的池範圍推導；池內位址不可指派。IPv6 位址採登錄制（僅已指派者存在），不枚舉空閒位址。
 
 **Assignment（指派）**
 IpAddress 與 Interface 的對應關係（見 ADR-0005）。同一 Interface 在同一 Subnet 至多一個 IpAddress；跨 Subnet（含 v4、v6 並存）可各有一個。UI 由 Interface 推導所屬 Asset 顯示描述與位置。僅記目前指派，不留歷程；換介面或換 IP 即為取消後重新指派。
@@ -29,6 +29,10 @@ Kea 動態配發的結果記錄。真實來源是 Kea；asset-nest 僅唯讀檢�
 **DHCP 位址池（pool）**
 Subnet 內保留給 Kea 動態配發的位址範圍，可多段；本階段僅 IPv4。池內位址不可指派給 Interface。
 
+**排除範圍（excluded range）**
+Subnet 內不可指派給 Interface 的位址範圍，供其他機制使用（如 NAT 對外位址）；可多段。與 Reservation 不同：不綁定任何 Interface，且不得與 DHCP 位址池重疊；本階段僅 IPv4。
+_Avoid_: 保留區
+
 ## 欄位詞彙
 
 **位置（location）**
@@ -40,11 +44,12 @@ _Avoid_: 序號
 
 ## 狀態詞彙
 
-**可用（available）**：未被指派、無 Reservation、未被租用，且不在 DHCP 位址池內的位址。
+**可用（available）**：未被指派、無 Reservation、未被租用，且不在 DHCP 位址池與排除範圍內的位址。
 **手動（static）**：已指派給 Interface、由人工在設備端設定的位址；不經 Kea。
 **保留（reserved）**：存在對應 Reservation 的位址。
 **動態（dynamic）**：目前由 Lease 佔用的位址。
 **池內（in-pool）**：落在 DHCP 位址池範圍內的位址；不可指派。
+**排除（excluded）**：落在排除範圍內的位址；不可指派。
 **衝突（conflict）**：資料互相矛盾的情形（見下方衝突詞彙）。
 
 衝突是標記，不是狀態；以標記呈現，不阻擋儲存與編輯。結構性規則（如網段重疊、同網段重複指派）則直接阻擋，兩層分界見 ADR-0006。
@@ -61,7 +66,11 @@ _Avoid_: 序號
 觀測衍生（新增，見 ADR-0014）：
 
 - **ObservedMacMismatch**：已指派的位址被觀測到由非宣告 MAC 使用。
-- **ObservedOnUnassigned**：未指派且非池內的位址被觀測到有主；UI 顯示為「非法佔用 IP」。
+- **ObservedOnUnassigned**：未指派、非池內且非排除範圍的位址被觀測到有主；UI 顯示為「非法佔用 IP」。
+
+排除範圍衍生（新增）：
+
+- **IpInExcludedRange**：已指派的 IP 落在排除範圍內。
 
 ## 同步詞彙
 

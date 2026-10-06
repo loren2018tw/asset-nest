@@ -206,6 +206,18 @@
           >
             <q-tooltip>池內位址不可指派</q-tooltip>
           </q-btn>
+          <!-- 排除範圍內且未指派：不可指派（見 spec §10.2、ADR-0020） -->
+          <q-btn
+            v-else-if="props.row.status === 'excluded' && !props.row.assignment"
+            flat
+            dense
+            round
+            icon="edit"
+            disable
+            aria-label="指派"
+          >
+            <q-tooltip>排除範圍內位址不可指派</q-tooltip>
+          </q-btn>
           <q-btn
             v-else
             flat
@@ -342,6 +354,7 @@ const statusOptions = computed<{ label: string; value: IpStatus }[]>(() =>
     : [
         { label: "可用", value: "available" },
         { label: "池內", value: "in_pool" },
+        { label: "排除", value: "excluded" },
         { label: "手動設定", value: "static" },
         { label: "保留", value: "reservation" }
       ]
@@ -400,6 +413,10 @@ const conflictInfo: Record<string, { label: string; hint: string }> = {
     label: "池內",
     hint: "指派的位址落在 DHCP 位址池內（僅提示，不阻擋）"
   },
+  IpInExcludedRange: {
+    label: "排除範圍",
+    hint: "指派的位址落在排除範圍內（僅提示，不阻擋）"
+  },
   IpOutOfSubnet: {
     label: "出界",
     hint: "指派的位址不在網段 CIDR 內（僅提示，不阻擋）"
@@ -414,7 +431,7 @@ const conflictInfo: Record<string, { label: string; hint: string }> = {
   },
   ObservedOnUnassigned: {
     label: "非法佔用 IP",
-    hint: "未指派且非池內位址被觀測到有主（非法佔用；僅提示，不阻擋、不自動回收）"
+    hint: "未指派、非池內且非排除範圍的位址被觀測到有主（非法佔用；僅提示，不阻擋、不自動回收）"
   }
 };
 
@@ -436,6 +453,8 @@ function statusLabel(status: IpStatus): string {
       return "可用";
     case "in_pool":
       return "池內";
+    case "excluded":
+      return "排除";
     case "static":
       return "手動設定";
     case "reservation":
@@ -449,6 +468,8 @@ function statusColor(status: IpStatus): string {
       return "positive";
     case "in_pool":
       return "blue-grey";
+    case "excluded":
+      return "orange";
     case "static":
       return "primary";
     case "reservation":

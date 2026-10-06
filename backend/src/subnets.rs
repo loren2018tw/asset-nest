@@ -1,7 +1,8 @@
 //! 網段（Subnet）領域模組：CIDR 正規化、結構驗證與資料庫存取。
 //!
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.3、§3.1。
-//! 單一網段為單一地址族，雙棧以兩筆表示；pool 與 kea_subnet_id 僅支援 IPv4。
+//! 單一網段為單一地址族，雙棧以兩筆表示；pool、排除範圍（見 ADR-0020）
+//! 與 kea_subnet_id 僅支援 IPv4。
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -51,6 +52,25 @@ struct PoolJoinRow {
     end_ip: String,
 }
 
+/// `subnet_exclusions` 資料表列。
+#[derive(Debug, FromRow)]
+struct ExclusionRow {
+    id: i64,
+    start_ip: String,
+    end_ip: String,
+    note: Option<String>,
+}
+
+/// 一次讀取全部排除範圍用的列；附所屬網段 id（匯出避免 N+1）。
+#[derive(Debug, FromRow)]
+struct ExclusionJoinRow {
+    subnet_id: i64,
+    id: i64,
+    start_ip: String,
+    end_ip: String,
+    note: Option<String>,
+}
+
 /// API 回傳的 DHCP 位址池（僅 IPv4；見 spec §2.3）。
 #[derive(Debug, Clone, Serialize)]
 pub struct Pool {
@@ -59,7 +79,17 @@ pub struct Pool {
     pub end_ip: String,
 }
 
-/// API 回傳的網段（含 pools）。
+/// API 回傳的排除範圍（僅 IPv4；見 ADR-0020）。
+#[derive(Debug, Clone, Serialize)]
+pub struct Exclusion {
+    pub id: i64,
+    pub start_ip: String,
+    pub end_ip: String,
+    /// 選填用途說明（如「NAT 對外」）。
+    pub note: Option<String>,
+}
+
+/// API 回傳的網段（含 pools 與排除範圍）。
 #[derive(Debug, Clone, Serialize)]
 pub struct Subnet {
     pub id: i64,
@@ -70,6 +100,7 @@ pub struct Subnet {
     pub gateway: Option<String>,
     pub kea_subnet_id: Option<i64>,
     pub pools: Vec<Pool>,
+    pub exclusions: Vec<Exclusion>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -99,6 +130,14 @@ pub struct PoolInput {
     pub end_ip: Option<String>,
 }
 
+/// 新增網段的排除範圍輸入；缺漏欄位視為未填。
+#[derive(Debug, Default, Deserialize)]
+pub struct ExclusionInput {
+    pub start_ip: Option<String>,
+    pub end_ip: Option<String>,
+    pub note: Option<String>,
+}
+
 /// 新增網段的輸入；缺漏欄位視為未填。
 #[derive(Debug, Default, Deserialize)]
 pub struct SubnetInput {
@@ -109,12 +148,15 @@ pub struct SubnetInput {
     pub kea_subnet_id: Option<i64>,
     #[serde(default)]
     pub pools: Vec<PoolInput>,
+    #[serde(default)]
+    pub exclusions: Vec<ExclusionInput>,
 }
 
 /// 編輯網段的輸入。
 ///
 /// 外層 `None`＝欄位未提供（維持原值）；`Some(None)`＝顯式 `null`（清除）；
-/// `Some(Some(..))`＝設定新值。`pools` 提供時整批取代（空陣列＝清空）。
+/// `Some(Some(..))`＝設定新值。`pools`／`exclusions` 提供時整批取代
+/// （空陣列＝清空）；未提供時沿用原值（排除範圍含用途說明）。
 #[derive(Debug, Default, Deserialize)]
 pub struct SubnetPatch {
     pub cidr: Option<String>,
@@ -127,6 +169,7 @@ pub struct SubnetPatch {
     #[serde(default, deserialize_with = "double_option")]
     pub kea_subnet_id: Option<Option<i64>>,
     pub pools: Option<Vec<PoolInput>>,
+    pub exclusions: Option<Vec<ExclusionInput>>,
 }
 
 /// 已驗證的網段內容。
@@ -138,6 +181,7 @@ pub struct ValidSubnet {
     gateway: Option<IpAddr>,
     kea_subnet_id: Option<i64>,
     pools: Vec<ValidPool>,
+    exclusions: Vec<ValidExclusion>,
 }
 
 /// 已驗證的 pool 範圍（僅 IPv4）。
@@ -145,6 +189,14 @@ pub struct ValidSubnet {
 struct ValidPool {
     start: Ipv4Addr,
     end: Ipv4Addr,
+}
+
+/// 已驗證的排除範圍（僅 IPv4；見 ADR-0020）。
+#[derive(Debug, Clone)]
+struct ValidExclusion {
+    start: Ipv4Addr,
+    end: Ipv4Addr,
+    note: Option<String>,
 }
 
 impl SubnetInput {
@@ -157,6 +209,7 @@ impl SubnetInput {
             self.gateway,
             self.kea_subnet_id,
             self.pools,
+            self.exclusions,
         )
     }
 }
@@ -175,6 +228,18 @@ impl SubnetPatch {
                 })
                 .collect(),
         };
+        let exclusions = match self.exclusions {
+            Some(exclusions) => exclusions,
+            None => existing
+                .exclusions
+                .iter()
+                .map(|exclusion| ExclusionInput {
+                    start_ip: Some(exclusion.start_ip.clone()),
+                    end_ip: Some(exclusion.end_ip.clone()),
+                    note: exclusion.note.clone(),
+                })
+                .collect(),
+        };
 
         validate_fields(
             Some(self.cidr.unwrap_or_else(|| existing.cidr.clone())),
@@ -183,6 +248,7 @@ impl SubnetPatch {
             self.gateway.unwrap_or_else(|| existing.gateway.clone()),
             self.kea_subnet_id.unwrap_or(existing.kea_subnet_id),
             pools,
+            exclusions,
         )
     }
 }
@@ -195,6 +261,7 @@ fn validate_fields(
     gateway: Option<String>,
     kea_subnet_id: Option<i64>,
     pools: Vec<PoolInput>,
+    exclusions: Vec<ExclusionInput>,
 ) -> Result<ValidSubnet, ApiError> {
     let cidr = normalize_cidr(cidr)?;
     let is_v4 = cidr.addr().is_ipv4();
@@ -220,6 +287,9 @@ fn validate_fields(
     }
     if !is_v4 && !pools.is_empty() {
         return Err(ApiError::validation("IPv6 網段不支援 pool").field("pools"));
+    }
+    if !is_v4 && !exclusions.is_empty() {
+        return Err(ApiError::validation("IPv6 網段不支援排除範圍").field("exclusions"));
     }
 
     let mut valid_pools = Vec::with_capacity(pools.len());
@@ -256,6 +326,70 @@ fn validate_fields(
         }
     }
 
+    let mut valid_exclusions = Vec::with_capacity(exclusions.len());
+    for (index, exclusion) in exclusions.into_iter().enumerate() {
+        let label = format!("exclusions[{index}]");
+        let start = require_exclusion_address(exclusion.start_ip, &label, "start_ip")?;
+        let end = require_exclusion_address(exclusion.end_ip, &label, "end_ip")?;
+
+        if start > end {
+            return Err(
+                ApiError::validation(format!("{label} 起點 {start} 不可大於終點 {end}"))
+                    .field(&format!("{label}.start_ip")),
+            );
+        }
+        if !cidr.contains(&IpAddr::V4(start)) || !cidr.contains(&IpAddr::V4(end)) {
+            return Err(ApiError::validation(format!(
+                "{label} 範圍 {start}–{end} 不在網段 {cidr} 內"
+            ))
+            .field(&format!("{label}.start_ip")));
+        }
+
+        valid_exclusions.push(ValidExclusion {
+            start,
+            end,
+            note: optional_text(exclusion.note),
+        });
+    }
+
+    for (index, exclusion) in valid_exclusions.iter().enumerate() {
+        for (other_index, other) in valid_exclusions.iter().enumerate().skip(index + 1) {
+            if exclusion.overlaps(other) {
+                return Err(ApiError::validation(format!(
+                    "exclusions[{index}]（{}–{}）與 exclusions[{other_index}]（{}–{}）重疊",
+                    exclusion.start, exclusion.end, other.start, other.end
+                ))
+                .field("exclusions"));
+            }
+        }
+    }
+
+    // 與 pool 互斥保證 Kea 不會把排除位址動態配發出去（見 ADR-0020）。
+    for (index, exclusion) in valid_exclusions.iter().enumerate() {
+        for (pool_index, pool) in valid_pools.iter().enumerate() {
+            if exclusion.overlaps_pool(pool) {
+                return Err(ApiError::validation(format!(
+                    "exclusions[{index}]（{}–{}）與 pools[{pool_index}]（{}–{}）重疊\
+                     （排除範圍不得與 DHCP 位址池重疊）",
+                    exclusion.start, exclusion.end, pool.start, pool.end
+                ))
+                .field("exclusions"));
+            }
+        }
+    }
+
+    // 用途說明不得含 CSV 分隔符 `|`（trim 後判定）；`#` 允許（見 spec §4、§9）。
+    for (index, exclusion) in valid_exclusions.iter().enumerate() {
+        if exclusion
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains('|'))
+        {
+            return Err(ApiError::validation("用途說明不可包含 |")
+                .field(&format!("exclusions[{index}].note")));
+        }
+    }
+
     Ok(ValidSubnet {
         cidr,
         name: optional_text(name),
@@ -263,6 +397,7 @@ fn validate_fields(
         gateway,
         kea_subnet_id,
         pools: valid_pools,
+        exclusions: valid_exclusions,
     })
 }
 
@@ -270,6 +405,18 @@ impl ValidPool {
     /// 兩段 pool 是否重疊（端點皆含）。
     fn overlaps(&self, other: &ValidPool) -> bool {
         self.start <= other.end && other.start <= self.end
+    }
+}
+
+impl ValidExclusion {
+    /// 兩段排除範圍是否重疊（端點皆含）。
+    fn overlaps(&self, other: &ValidExclusion) -> bool {
+        self.start <= other.end && other.start <= self.end
+    }
+
+    /// 排除範圍與 pool 是否重疊（端點皆含）。
+    fn overlaps_pool(&self, pool: &ValidPool) -> bool {
+        self.start <= pool.end && pool.start <= self.end
     }
 }
 
@@ -296,6 +443,18 @@ fn require_pool_address(
         .ok_or_else(|| ApiError::validation(format!("{label} 的 {key} 為必填")).field(&field))?;
     text.parse()
         .map_err(|_| ApiError::validation(format!("pool 位址格式錯誤：{text}")).field(&field))
+}
+
+/// 排除範圍端點：必填且須為 IPv4 位址（缺漏與格式錯誤共用同一訊息，見 spec §4）。
+fn require_exclusion_address(
+    value: Option<String>,
+    label: &str,
+    key: &str,
+) -> Result<Ipv4Addr, ApiError> {
+    let field = format!("{label}.{key}");
+    let text = optional_text(value).unwrap_or_default();
+    text.parse()
+        .map_err(|_| ApiError::validation(format!("排除範圍位址格式錯誤：{text}")).field(&field))
 }
 
 /// 結構衝突檢查：與既有網段重疊（含完全相同、嵌套）、kea_subnet_id 重複。
@@ -355,8 +514,8 @@ fn describe(cidr: &str, name: Option<&str>) -> String {
 
 /// 網段清單：依建立順序（id 升冪），附已用／總數／衝突數統計（見票 07）。
 ///
-/// 統計即時計算、無快取：逐網段讀取 pools 與指派並偵測衝突；網段編輯
-/// （縮小 CIDR、擴大 pool）或指派異動後，下一次讀取即反映最新結果。
+/// 統計即時計算、無快取：逐網段讀取 pools、排除範圍與指派並偵測衝突；網段
+/// 編輯（縮小 CIDR、擴大 pool）或指派異動後，下一次讀取即反映最新結果。
 pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
     let rows =
         sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
@@ -369,7 +528,10 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
         let pools = fetch_pools(pool, row.id)
             .await
             .map_err(|error| ApiError::internal("讀取網段 pools 失敗", error))?;
-        let subnet = row.into_subnet(pools);
+        let exclusions = fetch_exclusions(pool, row.id)
+            .await
+            .map_err(|error| ApiError::internal("讀取網段排除範圍失敗", error))?;
+        let subnet = row.into_subnet(pools, exclusions);
 
         let assignments = assignments::list_for_subnet(pool, subnet.id)
             .await
@@ -397,9 +559,10 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
     Ok(summaries)
 }
 
-/// 讀取全部網段（含 pools）；供匯出使用。
+/// 讀取全部網段（含 pools 與排除範圍）；供匯出使用。
 ///
-/// 兩筆查詢完成（網段＋全部 pools 後依 subnet_id 分組），避免逐網段 N+1。
+/// 三筆查詢完成（網段＋全部 pools＋全部排除範圍後依 subnet_id 分組），
+/// 避免逐網段 N+1。
 pub async fn list_full(pool: &SqlitePool) -> sqlx::Result<Vec<Subnet>> {
     let rows =
         sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
@@ -424,19 +587,39 @@ pub async fn list_full(pool: &SqlitePool) -> sqlx::Result<Vec<Subnet>> {
             });
     }
 
+    let exclusion_rows = sqlx::query_as::<_, ExclusionJoinRow>(
+        "SELECT subnet_id, id, start_ip, end_ip, note FROM subnet_exclusions ORDER BY id ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut exclusions_by_subnet: HashMap<i64, Vec<Exclusion>> = HashMap::new();
+    for row in exclusion_rows {
+        exclusions_by_subnet
+            .entry(row.subnet_id)
+            .or_default()
+            .push(Exclusion {
+                id: row.id,
+                start_ip: row.start_ip,
+                end_ip: row.end_ip,
+                note: row.note,
+            });
+    }
+
     Ok(rows
         .into_iter()
         .map(|row| {
             let pools = pools_by_subnet.remove(&row.id).unwrap_or_default();
-            row.into_subnet(pools)
+            let exclusions = exclusions_by_subnet.remove(&row.id).unwrap_or_default();
+            row.into_subnet(pools, exclusions)
         })
         .collect())
 }
 
-/// 全部網段轉 CSV（UTF-8 BOM＋標題列；格式見 ADR-0009）。
+/// 全部網段轉 CSV（UTF-8 BOM＋標題列；格式見 ADR-0009、ADR-0020）。
 ///
 /// 列排序：v4 先、v6 後；同族依 CIDR 網路位址數值升冪。v6 的
-/// Kea subnet-id 與位址池一律留空；選填欄位缺值為空字串。
+/// Kea subnet-id、位址池與排除範圍一律留空；選填欄位缺值為空字串。
 pub fn export_csv(subnets: &[Subnet]) -> Result<Vec<u8>, ApiError> {
     let mut ordered: Vec<(&Subnet, IpNet)> = Vec::with_capacity(subnets.len());
     for subnet in subnets {
@@ -450,7 +633,15 @@ pub fn export_csv(subnets: &[Subnet]) -> Result<Vec<u8>, ApiError> {
 
     let mut writer = csv::Writer::from_writer(Vec::new());
     writer
-        .write_record(["名稱", "CIDR", "Gateway", "Kea subnet-id", "位址池", "備註"])
+        .write_record([
+            "名稱",
+            "CIDR",
+            "Gateway",
+            "Kea subnet-id",
+            "位址池",
+            "排除範圍",
+            "備註",
+        ])
         .map_err(write_error)?;
 
     for (subnet, network) in ordered {
@@ -474,6 +665,19 @@ pub fn export_csv(subnets: &[Subnet]) -> Result<Vec<u8>, ApiError> {
         } else {
             String::new()
         };
+        let exclusions = if is_v4 {
+            subnet
+                .exclusions
+                .iter()
+                .map(|exclusion| match &exclusion.note {
+                    Some(note) => format!("{}-{}#{}", exclusion.start_ip, exclusion.end_ip, note),
+                    None => format!("{}-{}", exclusion.start_ip, exclusion.end_ip),
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        } else {
+            String::new()
+        };
 
         writer
             .write_record([
@@ -482,6 +686,7 @@ pub fn export_csv(subnets: &[Subnet]) -> Result<Vec<u8>, ApiError> {
                 subnet.gateway.as_deref().unwrap_or(""),
                 kea_subnet_id.as_str(),
                 pools.as_str(),
+                exclusions.as_str(),
                 subnet.note.as_deref().unwrap_or(""),
             ])
             .map_err(write_error)?;
@@ -512,16 +717,17 @@ fn compare_networks(a: &IpNet, b: &IpNet) -> Ordering {
     }
 }
 
-/// 讀取單一網段（含 pools）；不存在回傳 `None`。
+/// 讀取單一網段（含 pools 與排除範圍）；不存在回傳 `None`。
 pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Subnet>> {
     let Some(row) = fetch_row(pool, id).await? else {
         return Ok(None);
     };
     let pools = fetch_pools(pool, id).await?;
-    Ok(Some(row.into_subnet(pools)))
+    let exclusions = fetch_exclusions(pool, id).await?;
+    Ok(Some(row.into_subnet(pools, exclusions)))
 }
 
-/// 依位址尋找所屬網段（含 pools）；找不到回傳 `None`。
+/// 依位址尋找所屬網段（含 pools 與排除範圍）；找不到回傳 `None`。
 ///
 /// 網段不得重疊（見 spec §3.1），故至多一個網段包含該位址。供資產端指派
 /// 由位址反推網段（見票 10）；位址若因網段縮小而出界，將找不到所屬網段。
@@ -544,14 +750,18 @@ pub async fn find_by_address(
             let pools = fetch_pools(pool, row.id)
                 .await
                 .map_err(|error| ApiError::internal("讀取網段 pools 失敗", error))?;
-            return Ok(Some(row.into_subnet(pools)));
+            let exclusions = fetch_exclusions(pool, row.id)
+                .await
+                .map_err(|error| ApiError::internal("讀取網段排除範圍失敗", error))?;
+            return Ok(Some(row.into_subnet(pools, exclusions)));
         }
     }
 
     Ok(None)
 }
 
-/// 於既有連線（可為交易）內新增網段與其 pools，回傳新列 id；不讀回完整資料。
+/// 於既有連線（可為交易）內新增網段、其 pools 與排除範圍，回傳新列 id；
+/// 不讀回完整資料。
 ///
 /// 供匯入在同一交易內建立網段（見票 02）；一般建立路徑走 [`create`]。
 pub(crate) async fn insert_subnet(
@@ -572,10 +782,11 @@ pub(crate) async fn insert_subnet(
 
     let id = result.last_insert_rowid();
     insert_pools(connection, id, &valid.pools).await?;
+    insert_exclusions(connection, id, &valid.exclusions).await?;
     Ok(id)
 }
 
-/// 新增網段與其 pools（同一交易）。
+/// 新增網段與其 pools、排除範圍（同一交易）。
 pub async fn create(pool: &SqlitePool, valid: ValidSubnet) -> sqlx::Result<Subnet> {
     let mut transaction = pool.begin().await?;
     let id = insert_subnet(&mut transaction, valid).await?;
@@ -584,7 +795,7 @@ pub async fn create(pool: &SqlitePool, valid: ValidSubnet) -> sqlx::Result<Subne
     get(pool, id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
-/// 編輯網段；pools 一律以新內容整批取代。不存在回傳 `None`。
+/// 編輯網段；pools 與排除範圍一律以新內容整批取代。不存在回傳 `None`。
 pub async fn update(
     pool: &SqlitePool,
     id: i64,
@@ -615,6 +826,13 @@ pub async fn update(
         .execute(&mut *transaction)
         .await?;
     insert_pools(&mut transaction, id, &valid.pools).await?;
+
+    sqlx::query("DELETE FROM subnet_exclusions WHERE subnet_id = ?")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    insert_exclusions(&mut transaction, id, &valid.exclusions).await?;
+
     transaction.commit().await?;
 
     get(pool, id).await
@@ -640,7 +858,8 @@ pub async fn ensure_deletable(pool: &SqlitePool, subnet: &Subnet) -> Result<(), 
     Ok(())
 }
 
-/// 刪除網段；pools 連動刪除。有指派時呼叫端須先經 [`ensure_deletable`] 阻擋。
+/// 刪除網段；pools 與排除範圍連動刪除。有指派時呼叫端須先經
+/// [`ensure_deletable`] 阻擋。
 pub async fn delete(pool: &SqlitePool, id: i64) -> sqlx::Result<bool> {
     let result = sqlx::query("DELETE FROM subnets WHERE id = ?")
         .bind(id)
@@ -693,8 +912,50 @@ async fn insert_pools(
     Ok(())
 }
 
+/// 讀取某網段的排除範圍；依 id 升冪（即輸入順序）。
+async fn fetch_exclusions(pool: &SqlitePool, subnet_id: i64) -> sqlx::Result<Vec<Exclusion>> {
+    let rows = sqlx::query_as::<_, ExclusionRow>(
+        "SELECT id, start_ip, end_ip, note FROM subnet_exclusions
+          WHERE subnet_id = ? ORDER BY id ASC",
+    )
+    .bind(subnet_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| Exclusion {
+            id: row.id,
+            start_ip: row.start_ip,
+            end_ip: row.end_ip,
+            note: row.note,
+        })
+        .collect())
+}
+
+/// 寫入排除範圍；呼叫端負責交易。
+async fn insert_exclusions(
+    connection: &mut SqliteConnection,
+    subnet_id: i64,
+    exclusions: &[ValidExclusion],
+) -> sqlx::Result<()> {
+    for exclusion in exclusions {
+        sqlx::query(
+            "INSERT INTO subnet_exclusions (subnet_id, start_ip, end_ip, note)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(subnet_id)
+        .bind(exclusion.start.to_string())
+        .bind(exclusion.end.to_string())
+        .bind(exclusion.note.as_deref())
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
 impl SubnetRow {
-    fn into_subnet(self, pools: Vec<Pool>) -> Subnet {
+    fn into_subnet(self, pools: Vec<Pool>, exclusions: Vec<Exclusion>) -> Subnet {
         Subnet {
             id: self.id,
             cidr: self.cidr,
@@ -703,6 +964,7 @@ impl SubnetRow {
             gateway: self.gateway,
             kea_subnet_id: self.kea_subnet_id,
             pools,
+            exclusions,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -720,7 +982,40 @@ mod tests {
 
     /// 便捷呼叫：僅給 CIDR 的最小驗證。
     fn validate_cidr(cidr: &str) -> Result<ValidSubnet, ApiError> {
-        validate_fields(Some(cidr.to_string()), None, None, None, None, vec![])
+        validate_fields(
+            Some(cidr.to_string()),
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+    }
+
+    /// 便捷呼叫：僅給 CIDR 與排除範圍的驗證。
+    fn validate_exclusions(
+        cidr: &str,
+        exclusions: Vec<ExclusionInput>,
+    ) -> Result<ValidSubnet, ApiError> {
+        validate_fields(
+            Some(cidr.to_string()),
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            exclusions,
+        )
+    }
+
+    /// 測試用排除範圍輸入（無用途說明）。
+    fn exclusion(start: &str, end: &str) -> ExclusionInput {
+        ExclusionInput {
+            start_ip: Some(start.to_string()),
+            end_ip: Some(end.to_string()),
+            note: None,
+        }
     }
 
     #[test]
@@ -734,7 +1029,7 @@ mod tests {
 
     #[test]
     fn cidr_is_required_and_validated() {
-        assert!(validate_fields(None, None, None, None, None, vec![]).is_err());
+        assert!(validate_fields(None, None, None, None, None, vec![], vec![]).is_err());
         assert!(validate_cidr("192.168.1.0").is_err(), "缺前綴長度");
         assert!(validate_cidr("192.168.1.0/33").is_err(), "前綴超界");
         assert!(validate_cidr("not-a-cidr").is_err());
@@ -751,6 +1046,7 @@ mod tests {
                 Some("10.0.0.1".to_string()),
                 None,
                 vec![],
+                vec![],
             )
             .is_ok()
         );
@@ -761,6 +1057,7 @@ mod tests {
                 None,
                 Some("10.0.1.1".to_string()),
                 None,
+                vec![],
                 vec![],
             )
             .is_err(),
@@ -773,6 +1070,7 @@ mod tests {
                 None,
                 Some("10.0.0.1".to_string()),
                 None,
+                vec![],
                 vec![],
             )
             .is_err(),
@@ -790,6 +1088,7 @@ mod tests {
                 None,
                 Some(1),
                 vec![],
+                vec![],
             )
             .is_err()
         );
@@ -804,6 +1103,7 @@ mod tests {
                     start_ip: Some("fd00::10".to_string()),
                     end_ip: Some("fd00::20".to_string()),
                 }],
+                vec![],
             )
             .is_err()
         );
@@ -814,6 +1114,7 @@ mod tests {
                 None,
                 None,
                 None,
+                vec![],
                 vec![],
             )
             .is_ok(),
@@ -836,6 +1137,7 @@ mod tests {
                 None,
                 None,
                 vec![pool("10.0.0.10", "10.0.0.20")],
+                vec![],
             )
             .is_ok()
         );
@@ -847,6 +1149,7 @@ mod tests {
                 None,
                 None,
                 vec![pool("10.0.1.10", "10.0.1.20")],
+                vec![],
             )
             .is_err(),
             "pool 不在 CIDR 內"
@@ -859,6 +1162,7 @@ mod tests {
                 None,
                 None,
                 vec![pool("10.0.0.20", "10.0.0.10")],
+                vec![],
             )
             .is_err(),
             "起點大於終點"
@@ -874,6 +1178,7 @@ mod tests {
                     pool("10.0.0.10", "10.0.0.20"),
                     pool("10.0.0.20", "10.0.0.30")
                 ],
+                vec![],
             )
             .is_err(),
             "共用端點視為重疊"
@@ -889,9 +1194,209 @@ mod tests {
                     pool("10.0.0.10", "10.0.0.19"),
                     pool("10.0.0.20", "10.0.0.30")
                 ],
+                vec![],
             )
             .is_ok(),
             "相鄰不重疊"
+        );
+    }
+
+    #[test]
+    fn v6_rejects_exclusions() {
+        let error = validate_exclusions("fd00::/64", vec![exclusion("fd00::10", "fd00::20")])
+            .expect_err("v6 帶排除範圍應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions"));
+        assert_eq!(error.message(), "IPv6 網段不支援排除範圍");
+    }
+
+    #[test]
+    fn exclusion_endpoints_are_required_and_v4() {
+        // 缺起點
+        let error = validate_exclusions(
+            "10.0.0.0/24",
+            vec![ExclusionInput {
+                start_ip: None,
+                end_ip: Some("10.0.0.20".to_string()),
+                note: None,
+            }],
+        )
+        .expect_err("缺少起點應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions[0].start_ip"));
+
+        // 缺終點
+        let error = validate_exclusions(
+            "10.0.0.0/24",
+            vec![ExclusionInput {
+                start_ip: Some("10.0.0.10".to_string()),
+                end_ip: None,
+                note: None,
+            }],
+        )
+        .expect_err("缺少終點應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions[0].end_ip"));
+
+        // 非 IPv4 位址
+        let error = validate_exclusions("10.0.0.0/24", vec![exclusion("10.0.0.10", "fd00::20")])
+            .expect_err("非 v4 位址應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions[0].end_ip"));
+        assert!(
+            error.message().contains("排除範圍位址格式錯誤"),
+            "訊息：{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn exclusion_start_must_not_exceed_end() {
+        let error = validate_exclusions("10.0.0.0/24", vec![exclusion("10.0.0.20", "10.0.0.10")])
+            .expect_err("起點大於終點應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions[0].start_ip"));
+        assert!(
+            error.message().contains("不可大於終點"),
+            "訊息：{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn exclusion_range_must_be_inside_cidr() {
+        let error = validate_exclusions("10.0.0.0/24", vec![exclusion("10.0.0.10", "10.0.1.20")])
+            .expect_err("端點出界應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions[0].start_ip"));
+        assert!(
+            error.message().contains("不在網段"),
+            "訊息：{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn exclusion_ranges_must_not_overlap_each_other() {
+        let error = validate_exclusions(
+            "10.0.0.0/24",
+            vec![
+                exclusion("10.0.0.10", "10.0.0.20"),
+                exclusion("10.0.0.15", "10.0.0.30"),
+            ],
+        )
+        .expect_err("重疊應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions"));
+        assert!(
+            error.message().contains("exclusions[1]"),
+            "訊息指出另一段：{}",
+            error.message()
+        );
+
+        // 共用端點視為重疊
+        let error = validate_exclusions(
+            "10.0.0.0/24",
+            vec![
+                exclusion("10.0.0.10", "10.0.0.20"),
+                exclusion("10.0.0.20", "10.0.0.30"),
+            ],
+        )
+        .expect_err("共用端點應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions"));
+
+        // 相鄰不重疊
+        assert!(
+            validate_exclusions(
+                "10.0.0.0/24",
+                vec![
+                    exclusion("10.0.0.10", "10.0.0.19"),
+                    exclusion("10.0.0.20", "10.0.0.30"),
+                ],
+            )
+            .is_ok(),
+            "相鄰不重疊"
+        );
+    }
+
+    #[test]
+    fn exclusions_must_not_overlap_pools() {
+        let pool = |start: &str, end: &str| PoolInput {
+            start_ip: Some(start.to_string()),
+            end_ip: Some(end.to_string()),
+        };
+
+        let error = validate_fields(
+            Some("10.0.0.0/24".to_string()),
+            None,
+            None,
+            None,
+            None,
+            vec![pool("10.0.0.10", "10.0.0.20")],
+            vec![exclusion("10.0.0.15", "10.0.0.25")],
+        )
+        .expect_err("與 pool 重疊應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions"));
+        assert!(
+            error.message().contains("pools[0]"),
+            "訊息指出 pool：{}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("不得與 DHCP 位址池重疊"),
+            "訊息：{}",
+            error.message()
+        );
+
+        // 排除範圍涵蓋整個 pool 亦重疊
+        let error = validate_fields(
+            Some("10.0.0.0/24".to_string()),
+            None,
+            None,
+            None,
+            None,
+            vec![pool("10.0.0.10", "10.0.0.20")],
+            vec![exclusion("10.0.0.5", "10.0.0.25")],
+        )
+        .expect_err("涵蓋 pool 應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions"));
+
+        // 相鄰不重疊
+        assert!(
+            validate_fields(
+                Some("10.0.0.0/24".to_string()),
+                None,
+                None,
+                None,
+                None,
+                vec![pool("10.0.0.10", "10.0.0.20")],
+                vec![exclusion("10.0.0.21", "10.0.0.30")],
+            )
+            .is_ok(),
+            "與 pool 相鄰不重疊"
+        );
+    }
+
+    #[test]
+    fn exclusion_note_rejects_pipe_and_allows_hash() {
+        let error = validate_exclusions(
+            "10.0.0.0/24",
+            vec![ExclusionInput {
+                start_ip: Some("10.0.0.10".to_string()),
+                end_ip: Some("10.0.0.20".to_string()),
+                note: Some("NAT | 對外".to_string()),
+            }],
+        )
+        .expect_err("用途說明含 | 應阻擋");
+        assert_eq!(error.field_name(), Some("exclusions[0].note"));
+        assert_eq!(error.message(), "用途說明不可包含 |");
+
+        let valid = validate_exclusions(
+            "10.0.0.0/24",
+            vec![ExclusionInput {
+                start_ip: Some("10.0.0.10".to_string()),
+                end_ip: Some("10.0.0.20".to_string()),
+                note: Some(" NAT #1 ".to_string()),
+            }],
+        )
+        .expect("含 # 允許");
+        assert_eq!(
+            valid.exclusions[0].note.as_deref(),
+            Some("NAT #1"),
+            "用途說明 trim 後儲存"
         );
     }
 
@@ -908,6 +1413,7 @@ mod tests {
         gateway: Option<&str>,
         kea_subnet_id: Option<i64>,
         pools: &[(&str, &str)],
+        exclusions: &[(&str, &str, Option<&str>)],
         note: Option<&str>,
     ) -> Subnet {
         Subnet {
@@ -926,6 +1432,16 @@ mod tests {
                     end_ip: end.to_string(),
                 })
                 .collect(),
+            exclusions: exclusions
+                .iter()
+                .enumerate()
+                .map(|(index, (start, end, note))| Exclusion {
+                    id: index as i64 + 1,
+                    start_ip: start.to_string(),
+                    end_ip: end.to_string(),
+                    note: note.map(str::to_string),
+                })
+                .collect(),
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -940,14 +1456,16 @@ mod tests {
                 Some("fd00::1"),
                 None,
                 &[],
+                &[],
                 Some("v6 備註"),
             ),
-            export_subnet("192.168.0.0/24", None, None, None, &[], None),
+            export_subnet("192.168.0.0/24", None, None, None, &[], &[], None),
             export_subnet(
                 "2001:db8::/64",
                 Some("v6 一"),
                 Some("2001:db8::1"),
                 None,
+                &[],
                 &[],
                 None,
             ),
@@ -957,6 +1475,10 @@ mod tests {
                 Some("10.0.0.1"),
                 Some(10),
                 &[("10.0.0.100", "10.0.0.150"), ("10.0.0.200", "10.0.0.220")],
+                &[
+                    ("10.0.0.30", "10.0.0.40", Some("NAT 對外")),
+                    ("10.0.0.60", "10.0.0.60", None),
+                ],
                 Some("三樓,近電梯"),
             ),
         ];
@@ -973,7 +1495,15 @@ mod tests {
             .collect();
         assert_eq!(
             headers,
-            ["名稱", "CIDR", "Gateway", "Kea subnet-id", "位址池", "備註"]
+            [
+                "名稱",
+                "CIDR",
+                "Gateway",
+                "Kea subnet-id",
+                "位址池",
+                "排除範圍",
+                "備註"
+            ]
         );
 
         let rows: Vec<csv::StringRecord> = reader
@@ -991,10 +1521,15 @@ mod tests {
             Some("10.0.0.100-10.0.0.150|10.0.0.200-10.0.0.220"),
             "多段 pool 以 | 分隔、每段 起點-終點"
         );
-        assert_eq!(rows[0].get(5), Some("三樓,近電梯"), "含逗號欄位經引號往返");
+        assert_eq!(
+            rows[0].get(5),
+            Some("10.0.0.30-10.0.0.40#NAT 對外|10.0.0.60-10.0.0.60"),
+            "多段排除範圍以 | 分隔；有用途說明時以 # 接續"
+        );
+        assert_eq!(rows[0].get(6), Some("三樓,近電梯"), "含逗號欄位經引號往返");
 
         assert_eq!(rows[1].get(1), Some("192.168.0.0/24"));
-        for column in [0, 2, 3, 4, 5] {
+        for column in [0, 2, 3, 4, 5, 6] {
             assert_eq!(rows[1].get(column), Some(""), "選填欄位缺值為空字串");
         }
 
@@ -1007,23 +1542,26 @@ mod tests {
         assert_eq!(rows[2].get(2), Some("2001:db8::1"));
         assert_eq!(rows[2].get(3), Some(""));
         assert_eq!(rows[2].get(4), Some(""));
+        assert_eq!(rows[2].get(5), Some(""), "v6 的排除範圍留空");
         assert_eq!(rows[3].get(1), Some("fd00::/64"));
         assert_eq!(rows[3].get(0), Some("v6 二"));
         assert_eq!(rows[3].get(2), Some("fd00::1"));
         assert_eq!(rows[3].get(3), Some(""));
         assert_eq!(rows[3].get(4), Some(""));
-        assert_eq!(rows[3].get(5), Some("v6 備註"));
+        assert_eq!(rows[3].get(5), Some(""), "v6 的排除範圍留空");
+        assert_eq!(rows[3].get(6), Some("v6 備註"));
     }
 
     #[test]
-    fn export_csv_leaves_v6_kea_and_pools_empty() {
-        // 防禦性：v6 資料即使異常帶值，輸出仍依 ADR-0009 留空。
+    fn export_csv_leaves_v6_kea_pools_and_exclusions_empty() {
+        // 防禦性：v6 資料即使異常帶值，輸出仍依 ADR-0009／0020 留空。
         let subnet = export_subnet(
             "fd00::/64",
             None,
             None,
             Some(9),
             &[("fd00::10", "fd00::20")],
+            &[("fd00::30", "fd00::40", Some("異常值"))],
             None,
         );
         let bytes = export_csv(&[subnet]).expect("匯出成功");
@@ -1032,6 +1570,7 @@ mod tests {
         let row = reader.records().next().expect("資料列").expect("資料列");
         assert_eq!(row.get(3), Some(""), "v6 的 Kea subnet-id 留空");
         assert_eq!(row.get(4), Some(""), "v6 的位址池留空");
+        assert_eq!(row.get(5), Some(""), "v6 的排除範圍留空");
     }
 
     /// 建立測試資料庫並套用 migrations（比照 `backend/tests/` 整合測試）。
@@ -1050,7 +1589,7 @@ mod tests {
         pool
     }
 
-    /// 測試用已驗證網段（含一段 pool）。
+    /// 測試用已驗證網段（含一段 pool 與一段排除範圍）。
     fn valid_subnet() -> ValidSubnet {
         validate_fields(
             Some("10.0.0.0/24".to_string()),
@@ -1061,6 +1600,11 @@ mod tests {
             vec![PoolInput {
                 start_ip: Some("10.0.0.10".to_string()),
                 end_ip: Some("10.0.0.20".to_string()),
+            }],
+            vec![ExclusionInput {
+                start_ip: Some("10.0.0.30".to_string()),
+                end_ip: Some("10.0.0.40".to_string()),
+                note: Some("NAT 對外".to_string()),
             }],
         )
         .expect("有效網段")
@@ -1085,9 +1629,16 @@ mod tests {
                 .fetch_one(&mut *transaction)
                 .await
                 .expect("同交易讀取 pools");
+        let exclusions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM subnet_exclusions WHERE subnet_id = ?")
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await
+                .expect("同交易讀取排除範圍");
 
         assert_eq!(count, 1, "原語建立後同交易可見");
         assert_eq!(pools, 1, "pools 於同一交易寫入");
+        assert_eq!(exclusions, 1, "排除範圍於同一交易寫入");
     }
 
     #[tokio::test]
@@ -1108,8 +1659,13 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("回滾後讀取 pools");
+        let exclusions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subnet_exclusions")
+            .fetch_one(&pool)
+            .await
+            .expect("回滾後讀取排除範圍");
 
         assert_eq!(count, 0, "回滾後不留下網段");
         assert_eq!(pools, 0, "回滾後不留下 pools");
+        assert_eq!(exclusions, 0, "回滾後不留下排除範圍");
     }
 }

@@ -2,8 +2,13 @@ import { apiDelete, apiGet, apiPost, apiPut } from "@/api/client";
 import type { Warning } from "@/api/interfaces";
 import type { KeaSyncState } from "@/api/kea";
 
-/** IP 狀態：可用、池內、手動設定（static）或保留（reservation）。 */
-export type IpStatus = "available" | "in_pool" | "static" | "reservation";
+/** IP 狀態：可用、池內、排除、手動設定（static）或保留（reservation）。 */
+export type IpStatus =
+  | "available"
+  | "in_pool"
+  | "excluded"
+  | "static"
+  | "reservation";
 
 /** 指派用途：手動設定或 DHCPv4 保留；未指派為 null。 */
 export type IpPurpose = "static" | "reservation";
@@ -38,8 +43,9 @@ export interface IpEntry {
   purpose: IpPurpose | null;
   /** 指派對象（資產描述／位置、介面名稱／MAC）；未指派為 null。 */
   assignment: IpAssignmentTarget | null;
-  /** 衝突標記：命中的語意規則代碼（IpInPool／IpOutOfSubnet／DuplicateHwAddress／
-   *  ObservedMacMismatch／ObservedOnUnassigned；僅標記、不阻擋，見 ADR-0006、0014）。 */
+  /** 衝突標記：命中的語意規則代碼（IpInPool／IpOutOfSubnet／IpInExcludedRange／
+   *  DuplicateHwAddress／ObservedMacMismatch／ObservedOnUnassigned；僅標記、不阻擋，
+   *  見 ADR-0006、0014、0020）。 */
   conflicts: string[];
   /** 最後可見時間（UTC）；從未上線為 null（見票 02）。 */
   last_seen_at: string | null;

@@ -82,10 +82,24 @@ impl PoolRange {
     }
 }
 
+/// 解析後的排除範圍；端點皆含（見 ADR-0020）。
+#[derive(Debug, Clone, Copy)]
+struct ExclusionRange {
+    start: Ipv4Addr,
+    end: Ipv4Addr,
+}
+
+impl ExclusionRange {
+    fn contains(&self, address: Ipv4Addr) -> bool {
+        self.start <= address && address <= self.end
+    }
+}
+
 /// IP 清單的搜尋、排序與分頁條件（見 spec §4.3、§5、票 14）。
 #[derive(Debug, Default)]
 pub struct IpFilter {
-    /// 關鍵字：可解析為完整位址時精確比對，否則對位址文字與指派對象
+    /// 關鍵字：完整 v4 位址以位址文字前綴比對（`10.1.1.6` 命中 `10.1.1.6`
+    /// 與 `10.1.1.60–69`，見票 10），否則對位址文字與指派對象
     /// （資產描述／位置／介面名稱／MAC）做子字串比對。
     pub q: Option<String>,
     /// 狀態／用途篩選；未提供即全部。
@@ -150,6 +164,7 @@ impl IpSortDir {
 pub enum IpStatusFilter {
     Available,
     InPool,
+    Excluded,
     Static,
     Reservation,
 }
@@ -160,6 +175,7 @@ impl IpStatusFilter {
         match value {
             "available" => Some(Self::Available),
             "in_pool" => Some(Self::InPool),
+            "excluded" => Some(Self::Excluded),
             "static" => Some(Self::Static),
             "reservation" => Some(Self::Reservation),
             _ => None,
@@ -170,6 +186,7 @@ impl IpStatusFilter {
         match self {
             Self::Available => "available",
             Self::InPool => "in_pool",
+            Self::Excluded => "excluded",
             Self::Static => "static",
             Self::Reservation => "reservation",
         }
@@ -248,8 +265,8 @@ pub fn list(
 
 /// v4：由網段範圍枚舉一頁 IP 列；回傳（當頁列、符合總數）。
 ///
-/// 預設排序（`address` 升冪）維持既有快速路徑：精確位址搜尋至多一筆、
-/// 無篩選時以算術位移取當頁、其餘情況線性掃描並即時分頁。
+/// 預設排序（`address` 升冪）：無關鍵字時以算術位移取當頁、其餘情況線性掃描
+/// 並即時分頁（完整位址的前綴展開亦走掃描，見票 10）。
 /// 非預設排序須完整掃描符合篩選的位址後排序再取當頁；成本與關鍵字搜尋同級、
 /// 不設位址數上限（已定案取捨，見 spec §7、票 14）。
 fn list_v4(
@@ -260,6 +277,7 @@ fn list_v4(
     observation: &ObservationView,
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
     let pools = parse_pools(subnet)?;
+    let exclusions = parse_exclusions(subnet)?;
     let range = HostRange::of(network);
     // 語意衝突＋觀測衍生衝突（即時計算；觀測碼僅在 IP 清單列呈現，見票 07）。
     let conflicts = merged_conflicts(subnet, assignments, &observation.presence)?;
@@ -289,6 +307,7 @@ fn list_v4(
     // v4 清單共用輸入：指派、衝突與觀測現況（見票 02、票 07）。
     let context = V4Context {
         pools: &pools,
+        exclusions: &exclusions,
         assignments: &by_address,
         conflicts: &conflicts,
         presence: &observation.presence,
@@ -303,24 +322,8 @@ fn list_v4(
         .saturating_mul(per_page);
     let query = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
 
-    // 預設排序（address 升冪）：維持既有快速路徑與串流掃描（見票 14）。
+    // 預設排序（address 升冪）：維持算術快速路徑與串流掃描（見票 14）。
     if filter.sort == IpSortField::Address && filter.dir == IpSortDir::Asc {
-        // 完整位址且無狀態／觀測篩選：精確比對，最多一筆（不掃描整個網段）。
-        if filter.status.is_none() && filter.observed.is_none() {
-            if let Some(q) = query {
-                if let Ok(exact) = q.parse::<Ipv4Addr>() {
-                    let total =
-                        u64::from(range.contains(exact) || extras.binary_search(&exact).is_ok());
-                    let items = if offset == 0 && total == 1 {
-                        vec![entry_v4(exact, &context)]
-                    } else {
-                        Vec::new()
-                    };
-                    return Ok((items, total));
-                }
-            }
-        }
-
         // 無條件且無出界列：以算術位移取得當頁（比照票 04）。
         if query.is_none()
             && filter.status.is_none()
@@ -435,7 +438,7 @@ fn push_sort_key_v4(
         .and_then(|presence| presence.last_seen_at.as_deref());
     keys.push(SortKey::new(
         u128::from(address.to_bits()),
-        status_of(context.pools, address, assignment),
+        status_of(context.pools, context.exclusions, address, assignment),
         assignment,
         last_seen,
     ));
@@ -444,7 +447,7 @@ fn push_sort_key_v4(
 /// v4 位址是否符合狀態／關鍵字／觀測篩選；供串流掃描與排序路徑共用。
 ///
 /// 觀測篩選規則（見票 07、ADR-0014）：
-/// - `unassigned_seen`：無指派、非池內，且現況 `last_seen_mac` 非空。
+/// - `unassigned_seen`：無指派、非池內、非排除範圍，且現況 `last_seen_mac` 非空。
 /// - `unknown_mac`：現況 `last_seen_mac` 非空且不在已登錄 MAC 集合（不分大小寫）。
 fn matches_v4_filters(
     context: &V4Context,
@@ -455,7 +458,7 @@ fn matches_v4_filters(
     query_lower: Option<&str>,
 ) -> bool {
     if let Some(status) = status {
-        if status_of(context.pools, address, assignment) != status.as_str() {
+        if status_of(context.pools, context.exclusions, address, assignment) != status.as_str() {
             return false;
         }
     }
@@ -473,6 +476,10 @@ fn matches_v4_filters(
             IpObservedFilter::UnassignedSeen => {
                 assignment.is_none()
                     && !context.pools.iter().any(|pool| pool.contains(address))
+                    && !context
+                        .exclusions
+                        .iter()
+                        .any(|exclusion| exclusion.contains(address))
                     && seen_mac.is_some()
             }
             IpObservedFilter::UnknownMac => seen_mac.is_some_and(|mac| {
@@ -491,6 +498,8 @@ fn matches_v4_filters(
 /// （見票 02、票 07）。
 struct V4Context<'a> {
     pools: &'a [PoolRange],
+    /// 排除範圍（見 ADR-0020）；v4 來源為 Subnet 載入值。
+    exclusions: &'a [ExclusionRange],
     assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
     conflicts: &'a HashMap<String, Vec<&'static str>>,
     presence: &'a HashMap<String, Presence>,
@@ -536,7 +545,7 @@ impl V4Scanner<'_> {
     }
 }
 
-/// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool 內為「可用」；
+/// 建立一列 v4；狀態由指派資料推導，未指派且不在 pool／排除範圍內為「可用」；
 /// 觀測現況由 `(subnet_id, address)` 左併（見票 02）；
 /// `conflicts` 為指派語意碼＋觀測衍生碼（見票 07）。
 fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
@@ -547,7 +556,7 @@ fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
     IpEntry {
         address: IpAddr::V4(address),
         in_pool,
-        status: status_of(context.pools, address, assignment),
+        status: status_of(context.pools, context.exclusions, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
         // 未指派列亦可能有觀測碼（ObservedOnUnassigned），故以位址取衝突。
@@ -693,15 +702,22 @@ fn entry_v6(
     }
 }
 
-/// 列狀態：已指派以用途為準，未指派則區分池內與可用。
+/// 列狀態：已指派以用途為準；未指派依序區分池內、排除範圍與可用（見 ADR-0020）。
 fn status_of(
     pools: &[PoolRange],
+    exclusions: &[ExclusionRange],
     address: Ipv4Addr,
     assignment: Option<&ListedAssignment>,
 ) -> &'static str {
     match assignment {
         Some(item) => purpose_str(&item.purpose),
         None if pools.iter().any(|pool| pool.contains(address)) => "in_pool",
+        None if exclusions
+            .iter()
+            .any(|exclusion| exclusion.contains(address)) =>
+        {
+            "excluded"
+        }
         None => "available",
     }
 }
@@ -715,13 +731,14 @@ fn purpose_str(purpose: &str) -> &'static str {
     }
 }
 
-/// 狀態排序的固定序：可用→池內→手動設定→保留（升冪；見 spec §4.3）。
+/// 狀態排序的固定序：可用→池內→排除→手動設定→保留（升冪；見 spec §5）。
 fn status_rank(status: &str) -> u8 {
     match status {
         "available" => 0,
         "in_pool" => 1,
-        "static" => 2,
-        "reservation" => 3,
+        "excluded" => 2,
+        "static" => 3,
+        "reservation" => 4,
         // 呼叫端狀態必為上述之一；防禦性排在最後。
         _ => u8::MAX,
     }
@@ -811,12 +828,26 @@ fn compare_optional_text(a: Option<&str>, b: Option<&str>, dir: IpSortDir) -> Or
 
 /// 關鍵字比對：位址文字或指派對象（資產描述／位置／介面名稱／MAC）子字串，
 /// 皆不分大小寫（見 spec §4.3）。
+///
+/// 完整 v4 位址查詢（見票 10）以位址文字前綴比對——`10.1.1.6` 命中
+/// `10.1.1.6`、`10.1.1.60–69`；帶結尾點的四段（`10.1.1.6.`）為精確比對
+/// （與指派候選一致）；其餘查詢維持子字串比對。
 fn matches_query(
     assignment: Option<&ListedAssignment>,
     address_text: &str,
     query_lower: &str,
 ) -> bool {
-    if address_text.to_lowercase().contains(query_lower) {
+    let address_matched = if query_lower.parse::<Ipv4Addr>().is_ok() {
+        address_text.starts_with(query_lower)
+    } else if let Some(exact) = query_lower
+        .strip_suffix('.')
+        .and_then(|text| text.parse::<Ipv4Addr>().ok())
+    {
+        address_text == exact.to_string()
+    } else {
+        address_text.to_lowercase().contains(query_lower)
+    };
+    if address_matched {
         return true;
     }
 
@@ -862,6 +893,21 @@ fn parse_pools(subnet: &Subnet) -> Result<Vec<PoolRange>, ApiError> {
         .collect()
 }
 
+/// 解析網段的所有排除範圍（見 ADR-0020）；資料庫內容經結構驗證，
+/// 格式異常視為內部錯誤。
+fn parse_exclusions(subnet: &Subnet) -> Result<Vec<ExclusionRange>, ApiError> {
+    subnet
+        .exclusions
+        .iter()
+        .map(|exclusion| {
+            Ok(ExclusionRange {
+                start: parse_stored_address(&exclusion.start_ip)?,
+                end: parse_stored_address(&exclusion.end_ip)?,
+            })
+        })
+        .collect()
+}
+
 /// 解析資料庫中已驗證過的 v4 位址文字。
 fn parse_stored_address(text: &str) -> Result<Ipv4Addr, ApiError> {
     text.parse()
@@ -871,7 +917,7 @@ fn parse_stored_address(text: &str) -> Result<Ipv4Addr, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subnets::Pool;
+    use crate::subnets::{Exclusion, Pool};
 
     /// 測試用位址。
     fn addr(text: &str) -> Ipv4Addr {
@@ -896,9 +942,31 @@ mod tests {
                     end_ip: end.to_string(),
                 })
                 .collect(),
+            exclusions: vec![],
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    /// 測試用網段：附排除範圍（僅 v4；見 ADR-0020）。
+    fn subnet_with_exclusions(
+        cidr: &str,
+        gateway: Option<&str>,
+        pools: &[(&str, &str)],
+        exclusions: &[(&str, &str)],
+    ) -> Subnet {
+        let mut subnet = subnet(cidr, gateway, pools);
+        subnet.exclusions = exclusions
+            .iter()
+            .enumerate()
+            .map(|(index, (start, end))| Exclusion {
+                id: index as i64 + 1,
+                start_ip: start.to_string(),
+                end_ip: end.to_string(),
+                note: None,
+            })
+            .collect();
+        subnet
     }
 
     /// 測試用篩選條件。
@@ -1065,17 +1133,84 @@ mod tests {
     }
 
     #[test]
-    fn search_matches_exact_address_or_substring() {
-        let subnet = subnet("10.0.0.0/28", None, &[]);
+    fn exclusion_is_marked_filtered_and_not_available() {
+        // pool .2–.3、排除範圍 .4–.5（結構互斥；見 ADR-0020）
+        let subnet = subnet_with_exclusions(
+            "10.0.0.0/29",
+            None,
+            &[("10.0.0.2", "10.0.0.3")],
+            &[("10.0.0.4", "10.0.0.5")],
+        );
+        let (items, total) = list_entries(&subnet, &filter(None, 1, 50)).expect("推導成功");
+        assert_eq!(total, 6);
 
-        // 完整位址：精確比對，僅一筆（不誤含 .100 等子字串候選）。
+        let entry = |address: &str| {
+            items
+                .iter()
+                .find(|entry| entry.address == addr(address))
+                .expect("位址存在")
+        };
+
+        // 排除列：狀態 excluded、非池內、無指派用途
+        assert_eq!(entry("10.0.0.4").status, "excluded");
+        assert!(!entry("10.0.0.4").in_pool);
+        assert_eq!(entry("10.0.0.4").purpose, None);
+        assert_eq!(entry("10.0.0.5").status, "excluded");
+        assert!(entry("10.0.0.4").conflicts.is_empty(), "無指派不標記衝突");
+
+        // 狀態篩選：excluded 僅回排除列
         let (items, total) =
-            list_entries(&subnet, &filter(Some("10.0.0.10"), 1, 50)).expect("推導成功");
+            list_entries(&subnet, &status_filter(IpStatusFilter::Excluded)).expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["10.0.0.4", "10.0.0.5"]);
+
+        // available 不含排除範圍
+        let (items, total) =
+            list_entries(&subnet, &status_filter(IpStatusFilter::Available)).expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["10.0.0.1", "10.0.0.6"]);
+    }
+
+    #[test]
+    fn search_matches_address_prefix_or_substring() {
+        let narrow = subnet("10.0.0.0/28", None, &[]);
+
+        // 完整 v4 位址：位址文字前綴（/28 僅 .10 一筆）。
+        let (items, total) =
+            list_entries(&narrow, &filter(Some("10.0.0.10"), 1, 50)).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.10"]);
+
+        // 完整 v4 位址在較大網段：前綴展開（.10 → .10 與 .100–.109）。
+        let wider = subnet("10.0.0.0/24", None, &[]);
+        let (items, total) =
+            list_entries(&wider, &filter(Some("10.0.0.10"), 1, 50)).expect("推導成功");
+        assert_eq!(total, 11);
+        assert_eq!(
+            addresses(&items),
+            [
+                "10.0.0.10",
+                "10.0.0.100",
+                "10.0.0.101",
+                "10.0.0.102",
+                "10.0.0.103",
+                "10.0.0.104",
+                "10.0.0.105",
+                "10.0.0.106",
+                "10.0.0.107",
+                "10.0.0.108",
+                "10.0.0.109"
+            ]
+        );
+
+        // 帶結尾點：精確單一筆（不展開）。
+        let (items, total) =
+            list_entries(&wider, &filter(Some("10.0.0.10."), 1, 50)).expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.10"]);
 
         // 部分關鍵字：位址文字子字串比對（.1x 的六個位址），維持數值排序。
-        let (items, total) = list_entries(&subnet, &filter(Some(".1"), 1, 50)).expect("推導成功");
+        let (items, total) = list_entries(&narrow, &filter(Some(".1"), 1, 50)).expect("推導成功");
         assert_eq!(total, 6);
         assert_eq!(
             addresses(&items),
@@ -1090,13 +1225,13 @@ mod tests {
         );
 
         // 子字串搜尋亦分頁（第 2 頁、每頁 2 筆）。
-        let (items, total) = list_entries(&subnet, &filter(Some(".1"), 2, 2)).expect("推導成功");
+        let (items, total) = list_entries(&narrow, &filter(Some(".1"), 2, 2)).expect("推導成功");
         assert_eq!(total, 6);
         assert_eq!(addresses(&items), ["10.0.0.11", "10.0.0.12"]);
 
         // 完整位址不在範圍內：空結果。
         let (items, total) =
-            list_entries(&subnet, &filter(Some("10.0.1.1"), 1, 50)).expect("推導成功");
+            list_entries(&narrow, &filter(Some("10.0.1.1"), 1, 50)).expect("推導成功");
         assert_eq!(total, 0);
         assert!(items.is_empty());
     }
@@ -1373,6 +1508,10 @@ mod tests {
         assert_eq!(
             IpStatusFilter::parse("in_pool"),
             Some(IpStatusFilter::InPool)
+        );
+        assert_eq!(
+            IpStatusFilter::parse("excluded"),
+            Some(IpStatusFilter::Excluded)
         );
         assert_eq!(
             IpStatusFilter::parse("static"),
@@ -1766,6 +1905,52 @@ mod tests {
     }
 
     #[test]
+    fn status_sort_places_excluded_between_pool_and_assigned() {
+        // /29：pool .2–.3、排除 .4–.5、.1 static、.6 reservation
+        let subnet = subnet_with_exclusions(
+            "10.0.0.0/29",
+            None,
+            &[("10.0.0.2", "10.0.0.3")],
+            &[("10.0.0.4", "10.0.0.5")],
+        );
+        let assignments = [
+            listed("10.0.0.1", "static", "A", Some("eth0"), None),
+            listed("10.0.0.6", "reservation", "B", Some("eth1"), None),
+        ];
+
+        let (items, total) = list(
+            &subnet,
+            &sort_filter(IpSortField::Status, IpSortDir::Asc),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
+        assert_eq!(total, 6);
+        assert_eq!(
+            addresses(&items),
+            [
+                "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.1", "10.0.0.6"
+            ],
+            "可用→池內→排除→手動設定→保留；同鍵位址升冪（見 spec §5）"
+        );
+
+        let (items, _) = list(
+            &subnet,
+            &sort_filter(IpSortField::Status, IpSortDir::Desc),
+            &assignments,
+            &no_observation(),
+        )
+        .expect("推導成功");
+        assert_eq!(
+            addresses(&items),
+            [
+                "10.0.0.6", "10.0.0.1", "10.0.0.4", "10.0.0.5", "10.0.0.2", "10.0.0.3"
+            ],
+            "降冪反轉狀態序，同鍵仍位址升冪"
+        );
+    }
+
+    #[test]
     fn sort_by_location_and_assignment_is_case_insensitive_with_blanks_last() {
         let subnet = subnet("10.0.0.0/29", None, &[]);
         let assignments = [
@@ -2094,5 +2279,53 @@ mod tests {
         let (items, total) = list(&subnet, &unknown, &assignments, &view).expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.5"]);
+    }
+
+    #[test]
+    fn unassigned_seen_ignores_exclusion_addresses() {
+        // /29、排除範圍 .4–.5；.3 可用有現況、.4／.5 排除有現況（見 ADR-0020）
+        let subnet = subnet_with_exclusions("10.0.0.0/29", None, &[], &[("10.0.0.4", "10.0.0.5")]);
+        let view = observation(
+            &[
+                (
+                    "10.0.0.3",
+                    Some("aa:bb:cc:dd:ee:03"),
+                    Some("2026-10-06T10:00:00Z"),
+                ),
+                (
+                    "10.0.0.4",
+                    Some("aa:bb:cc:dd:ee:04"),
+                    Some("2026-10-06T10:00:00Z"),
+                ),
+                (
+                    "10.0.0.5",
+                    Some("aa:bb:cc:dd:ee:05"),
+                    Some("2026-10-06T10:00:00Z"),
+                ),
+            ],
+            &[],
+        );
+
+        // 列標記：排除範圍內不標 ObservedOnUnassigned。
+        let (items, _) = list(&subnet, &filter(None, 1, 50), &[], &view).expect("推導成功");
+        let entry = |address: &str| {
+            items
+                .iter()
+                .find(|entry| entry.address == addr(address))
+                .expect("列存在")
+        };
+        assert_eq!(
+            entry("10.0.0.3").conflicts,
+            vec![conflicts::OBSERVED_ON_UNASSIGNED]
+        );
+        assert!(entry("10.0.0.4").conflicts.is_empty(), "排除範圍不標記");
+        assert!(entry("10.0.0.5").conflicts.is_empty(), "排除範圍不標記");
+
+        // 篩選：unassigned_seen 不列入排除範圍。
+        let mut observed_filter = filter(None, 1, 50);
+        observed_filter.observed = Some(IpObservedFilter::UnassignedSeen);
+        let (items, total) = list(&subnet, &observed_filter, &[], &view).expect("推導成功");
+        assert_eq!(total, 1);
+        assert_eq!(addresses(&items), ["10.0.0.3"]);
     }
 }

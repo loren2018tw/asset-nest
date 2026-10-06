@@ -23,15 +23,54 @@
             {{ errorMessage }}
           </q-banner>
 
-          <q-input
+          <!-- 位址欄：輸入前綴即時查詢候選，仍可自由輸入（如移轉既有指派） -->
+          <q-select
             v-model="address"
+            :options="candidates"
+            option-label="address"
+            option-value="address"
+            map-options
+            emit-value
+            use-input
+            hide-selected
+            fill-input
+            input-debounce="300"
             outlined
             dense
             label="IP 位址 *"
             hint="IPv4／IPv6 皆可；位址須落在既有網段內"
             :rules="[addressRule]"
             lazy-rules
-          />
+            @filter="onFilterCandidates"
+            @input="onAddressInput"
+          >
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps">
+                <q-item-section>
+                  <q-item-label class="text-mono">{{
+                    scope.opt.address
+                  }}</q-item-label>
+                  <q-item-label caption>{{
+                    candidateSubnetLabel(scope.opt)
+                  }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+            <template #no-option>
+              <q-item v-if="candidatesSearched">
+                <q-item-section class="text-grey-6">
+                  此範圍無可用位址
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+          <div
+            v-if="queryStatusHint !== null"
+            class="text-caption"
+            :class="queryStatusHint.color"
+          >
+            {{ queryStatusHint.message }}
+          </div>
 
           <!-- 由介面列進入：目標介面固定；否則選介面或當場新增 -->
           <q-input
@@ -203,9 +242,18 @@ import { fetchAsset, type Asset, type AssetAssignment } from "@/api/assets";
 import { assignFromAsset, type AssetAssignmentSaved } from "@/api/assignments";
 import { ApiError } from "@/api/client";
 import { createInterface, type Interface } from "@/api/interfaces";
+import {
+  findIpCandidates,
+  type IpCandidate,
+  type IpQueryStatus
+} from "@/api/ipCandidates";
 import { cancelAssignment, type IpPurpose } from "@/api/ips";
 import PeerMacHint from "@/components/PeerMacHint.vue";
-import { parseAddress } from "@/utils/cidr";
+import {
+  parseAddress,
+  parseIpv4Prefix,
+  type ParsedIpv4Prefix
+} from "@/utils/cidr";
 import { assetLabel } from "@/utils/assetLabel";
 import { notifyKeaSync } from "@/utils/keaSync";
 
@@ -229,6 +277,16 @@ const open = computed({
 });
 
 const address = ref("");
+/** 位址欄候選（`@filter` 查詢結果；上限 20 筆）。 */
+const candidates = ref<IpCandidate[]>([]);
+/** 最近一次有效前綴查詢已完成（含 0 筆）；供「此範圍無可用位址」顯示。 */
+const candidatesSearched = ref(false);
+/** 完整 v4 位址的後端查詢狀態；`available` 不顯示。 */
+const queryStatus = ref<IpQueryStatus | null>(null);
+/** `queryStatus` 對應的查詢字串；與目前輸入不符即不顯示（兼防過期回應）。 */
+const queryStatusFor = ref("");
+/** 供候選查詢丟棄過期回應。 */
+let candidatesToken = 0;
 const interfaces = ref<Interface[]>([]);
 const loadingInterfaces = ref(false);
 const selectedInterfaceId = ref<number | null>(null);
@@ -308,6 +366,45 @@ const purposeOptions = computed<
   }
 ]);
 
+/**
+ * `query_status` 提示（見 spec §10.3）：`available` 不顯示；與目前輸入
+ * 不符（使用者已續打）即先隱藏，待新查詢結果補上。
+ */
+const queryStatusHint = computed<{ message: string; color: string } | null>(
+  () => {
+    const status = queryStatus.value;
+    if (status === null || queryStatusFor.value !== address.value.trim()) {
+      return null;
+    }
+
+    switch (status.status) {
+      case "in_pool":
+        return {
+          message: "此位址在 DHCP 位址池內，不可指派",
+          color: "text-negative"
+        };
+      case "excluded":
+        return {
+          message: "此位址在排除範圍內，不可指派",
+          color: "text-negative"
+        };
+      case "static":
+      case "reservation":
+        return {
+          message: "此位址已指派；送出後可確認移轉",
+          color: "text-grey-7"
+        };
+      case "out_of_subnet":
+        return {
+          message: "此位址不在任何網段可指派的範圍內",
+          color: "text-negative"
+        };
+      default:
+        return null;
+    }
+  }
+);
+
 // immediate：由父層以 v-if 掛載並直接開啟時（modelValue 初始為 true）也要載入
 watch(
   () => props.modelValue,
@@ -332,11 +429,19 @@ watch(isV6, value => {
   }
 });
 
+// 輸入不再是可查詢前綴（含 v6）時立即清空候選與提示；有效前綴交由 @filter 查詢。
+watch(address, value => {
+  if (parseIpv4Prefix(value) === null) {
+    clearCandidates();
+  }
+});
+
 async function prepare() {
   const token = ++loadToken;
   errorMessage.value = "";
   newInterfaceError.value = "";
   address.value = "";
+  clearCandidates();
   hostname.value = "";
   purpose.value = "static";
   showNewInterface.value = false;
@@ -414,6 +519,81 @@ async function createNewInterface() {
   } finally {
     savingInterface.value = false;
   }
+}
+
+/**
+ * 自由輸入同步：q-select 的 `input-debounce` 只延後 `filter` 與
+ * `update:input-value`，未選候選、未按 Enter 直接送出時仍須取得目前文字。
+ * `input` 非 QSelect 宣告的事件，由 fallthrough 監聽控制項容器、隨原生
+ * 事件冒泡觸發（含行動版 dialog 控制項）。
+ */
+function onAddressInput(event: Event) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement) {
+    address.value = target.value;
+  }
+}
+
+/** 清空候選與查詢狀態，並丟棄進行中的過期回應。 */
+function clearCandidates() {
+  candidatesToken += 1;
+  candidates.value = [];
+  candidatesSearched.value = false;
+  queryStatus.value = null;
+  queryStatusFor.value = "";
+}
+
+/**
+ * `@filter`：輸入達 2 個完整 v4 octet 才查候選（見 spec §8、§10.3）；
+ * 請求失敗與過期回應皆靜默，不阻擋輸入與送出。
+ */
+function onFilterCandidates(
+  input: string,
+  update: (callback: () => void) => void,
+  abort: () => void
+) {
+  const parsed = parseIpv4Prefix(input);
+  if (parsed === null) {
+    clearCandidates();
+    abort();
+    return;
+  }
+
+  const token = ++candidatesToken;
+  void loadCandidates(parsed, token, update, abort);
+}
+
+async function loadCandidates(
+  parsed: ParsedIpv4Prefix,
+  token: number,
+  update: (callback: () => void) => void,
+  abort: () => void
+) {
+  try {
+    const result = await findIpCandidates(parsed.query);
+    if (token !== candidatesToken) {
+      return;
+    }
+    update(() => {
+      candidates.value = result.items;
+      candidatesSearched.value = true;
+      queryStatus.value = result.query_status;
+      queryStatusFor.value = parsed.query;
+    });
+  } catch {
+    if (token !== candidatesToken) {
+      return;
+    }
+    clearCandidates();
+    abort();
+  }
+}
+
+/** 候選次要文字：網段名｜CIDR；未命名網段僅顯示 CIDR。 */
+function candidateSubnetLabel(candidate: IpCandidate): string {
+  return candidate.subnet_name === null
+    ? candidate.subnet_cidr
+    : `${candidate.subnet_name}｜${candidate.subnet_cidr}`;
 }
 
 async function submit() {

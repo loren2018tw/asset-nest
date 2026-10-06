@@ -18,6 +18,15 @@ export interface SubnetPool {
   end_ip: string;
 }
 
+/** 排除範圍（僅 IPv4；見 ADR-0020）。 */
+export interface SubnetExclusion {
+  id: number;
+  start_ip: string;
+  end_ip: string;
+  /** 選填用途說明（如「NAT 對外」）。 */
+  note: string | null;
+}
+
 /** 網段（見 spec §2.3）。 */
 export interface Subnet {
   id: number;
@@ -28,6 +37,7 @@ export interface Subnet {
   gateway: string | null;
   kea_subnet_id: number | null;
   pools: SubnetPool[];
+  exclusions: SubnetExclusion[];
   created_at: string;
   updated_at: string;
 }
@@ -52,7 +62,14 @@ export interface SubnetPoolInput {
   end_ip: string;
 }
 
-/** 新增／編輯內容；`null` 代表清除選填欄位；`pools` 提供時整批取代。 */
+/** 排除範圍輸入（僅 IPv4）；`note` 為 null 代表未填。 */
+export interface SubnetExclusionInput {
+  start_ip: string;
+  end_ip: string;
+  note: string | null;
+}
+
+/** 新增／編輯內容；`null` 代表清除選填欄位；`pools`、`exclusions` 提供時整批取代。 */
 export interface SubnetInput {
   cidr: string;
   name: string | null;
@@ -60,6 +77,7 @@ export interface SubnetInput {
   gateway: string | null;
   kea_subnet_id: number | null;
   pools: SubnetPoolInput[];
+  exclusions: SubnetExclusionInput[];
 }
 
 /** 匯入列問題（見 spec §5、ADR-0009）。 */
@@ -71,7 +89,7 @@ export interface SubnetImportIssue {
   message: string;
 }
 
-/** 匯入列 6 欄正規化值；無法正規化者為 null。 */
+/** 匯入列 7 欄正規化值；無法正規化者為 null。 */
 export interface SubnetImportRowData {
   name: string | null;
   cidr: string | null;
@@ -79,6 +97,8 @@ export interface SubnetImportRowData {
   kea_subnet_id: number | null;
   /** 正規化位址池：每段 `起點-終點`。 */
   pools: string[];
+  /** 正規化排除範圍：每段 `起-迄` 或 `起-迄#用途說明`。 */
+  exclusions: string[];
   note: string | null;
 }
 

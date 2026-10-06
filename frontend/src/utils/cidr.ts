@@ -19,6 +19,14 @@ export interface ParsedCidr extends ParsedAddress {
   prefix: number;
 }
 
+/** 解析後的 v4 查詢前綴（指派候選用；見 spec §8）。 */
+export interface ParsedIpv4Prefix {
+  /** 完整 octet 數（2–3；結尾帶點時 2–4）；無結尾點時最後一段為前綴段。 */
+  completeOctets: number;
+  /** 傳給候選 API 的查詢字串（trim 後原樣）。 */
+  query: string;
+}
+
 const IPV4_BITS = 32;
 const IPV6_BITS = 128;
 
@@ -62,6 +70,49 @@ export function parseCidr(text: string): ParsedCidr | null {
   }
 
   return { ...address, prefix };
+}
+
+/**
+ * 解析指派候選查詢用的 v4 前綴；語意與後端 `spec §8` 相同，但不足兩個
+ * 完整 octet 或格式錯誤一律回傳 `null`（代表尚不可查詢；後端仍為權威）。
+ *
+ * - 以 `.` 分段；結尾帶點＝所有段皆為完整 octet；無結尾點時最後一段一律
+ *   為前綴段（四段亦然：`10.1.1.6` 查前綴、`10.1.1.6.` 查該位址）。
+ * - 完整 octet 須 0–255、前綴段限 1–3 位數字（不比對 255 上限）。
+ * - 超過 4 段、空段、非數字回 `null`。
+ */
+export function parseIpv4Prefix(text: string): ParsedIpv4Prefix | null {
+  const value = text.trim();
+  if (value === "") {
+    return null;
+  }
+
+  const trailingDot = value.endsWith(".");
+  const segments = value.split(".");
+  if (trailingDot) {
+    segments.pop();
+  }
+
+  if (
+    segments.length > 4 ||
+    segments.some(segment => !/^\d{1,3}$/.test(segment))
+  ) {
+    return null;
+  }
+
+  // 結尾帶點＝所有段皆為完整 octet；否則最後一段為前綴段。
+  const completeCount = trailingDot ? segments.length : segments.length - 1;
+  if (completeCount < 2) {
+    return null;
+  }
+
+  for (const segment of segments.slice(0, completeCount)) {
+    if (Number(segment) > 255) {
+      return null;
+    }
+  }
+
+  return { completeOctets: completeCount, query: value };
 }
 
 /** 兩個 CIDR 是否重疊（含完全相同與嵌套）。 */

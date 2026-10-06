@@ -139,7 +139,7 @@ async fn list_subnet_ips(
         .filter(|s| !s.is_empty())
     {
         Some(value) => Some(IpStatusFilter::parse(value).ok_or_else(|| {
-            ApiError::validation("狀態篩選須為 available、in_pool、static 或 reservation")
+            ApiError::validation("狀態篩選須為 available、in_pool、excluded、static 或 reservation")
                 .field("status")
         })?),
         None => None,

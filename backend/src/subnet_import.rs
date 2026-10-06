@@ -14,14 +14,14 @@ use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::api::ApiError;
-use crate::subnets::{self, PoolInput, SubnetInput, ValidSubnet};
+use crate::subnets::{self, ExclusionInput, PoolInput, SubnetInput, ValidSubnet};
 
 /// 檔案大小上限：5 MB（見 spec §2）。
 pub(crate) const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
 /// 資料列數上限：5,000 列（見 spec §2）。
 pub(crate) const MAX_DATA_ROWS: usize = 5_000;
 
-/// CSV 欄位（6 欄；順序與 ADR-0009 總表一致）。
+/// CSV 欄位（7 欄；順序與 ADR-0009／0020 總表一致）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Name = 0,
@@ -29,11 +29,12 @@ enum Field {
     Gateway,
     KeaSubnetId,
     Pools,
+    Exclusions,
     Note,
 }
 
-/// 欄位總數（見 ADR-0009）。
-const FIELD_COUNT: usize = 6;
+/// 欄位總數（見 ADR-0009／0020）。
+const FIELD_COUNT: usize = 7;
 
 impl Field {
     /// 由標題字串（trim、英文已折為小寫）對應欄位；未知標題回傳 `None`。
@@ -44,6 +45,7 @@ impl Field {
             "gateway" => Self::Gateway,
             "kea subnet-id" => Self::KeaSubnetId,
             "位址池" => Self::Pools,
+            "排除範圍" => Self::Exclusions,
             "備註" => Self::Note,
             _ => return None,
         })
@@ -57,6 +59,7 @@ impl Field {
             Self::Gateway => "gateway",
             Self::KeaSubnetId => "kea_subnet_id",
             Self::Pools => "pools",
+            Self::Exclusions => "exclusions",
             Self::Note => "note",
         }
     }
@@ -115,7 +118,7 @@ impl Issue {
     }
 }
 
-/// 每列 6 欄的正規化值（無法正規化者為 `None`／空陣列）。
+/// 每列 7 欄的正規化值（無法正規化者為 `None`／空陣列）。
 #[derive(Debug, Default, Serialize)]
 pub struct RowData {
     pub name: Option<String>,
@@ -125,6 +128,8 @@ pub struct RowData {
     pub kea_subnet_id: Option<i64>,
     /// 正規化位址池：每段 `起點-終點`。
     pub pools: Vec<String>,
+    /// 正規化排除範圍：每段 `起-迄` 或 `起-迄#用途說明`。
+    pub exclusions: Vec<String>,
     pub note: Option<String>,
 }
 
@@ -437,7 +442,7 @@ fn file_error(message: impl Into<String>) -> ApiError {
     ApiError::validation(message).field("file")
 }
 
-/// 逐列驗證：6 欄正規化與結構規則（任一列錯誤即整批不寫入）。
+/// 逐列驗證：7 欄正規化與結構規則（任一列錯誤即整批不寫入）。
 ///
 /// 欄位驗證重用 [`SubnetInput::validate`]；CIDR 重複／重疊與 Kea subnet-id
 /// 重複為匯入特有的跨列規則，於此逐列比對既有資料與檔內較前列。
@@ -473,6 +478,7 @@ fn validate_row(
     let gateway_text = raw.text(Field::Gateway);
     let kea_text = raw.text(Field::KeaSubnetId);
     let pools_text = raw.text(Field::Pools);
+    let exclusions_text = raw.text(Field::Exclusions);
 
     // CIDR：必填、正規化並收斂 host bits（重用領域原語）；無法解析即無地址族。
     let normalized = match subnets::normalize_cidr(cidr_text.clone()) {
@@ -563,6 +569,39 @@ fn validate_row(
         }
     }
 
+    // 排除範圍：`|` 分隔、每段 `起-迄` 或 `起-迄#用途說明`（以第一個 `#`
+    // 分割）、僅 IPv4；重疊等跨段規則交由領域驗證（見 ADR-0020）。
+    let mut exclusion_pairs: Vec<(Ipv4Addr, Ipv4Addr, Option<String>)> = Vec::new();
+    let mut exclusion_inputs: Vec<ExclusionInput> = Vec::new();
+    if let Some(text) = &exclusions_text {
+        if is_v4 == Some(false) {
+            issues.push(Issue::error(
+                "exclusions_for_v6",
+                Some(Field::Exclusions),
+                "IPv6 網段不支援排除範圍（請留空）",
+            ));
+        } else {
+            for segment in text.split('|') {
+                let segment = segment.trim();
+                match parse_exclusion_segment(segment) {
+                    Ok((start, end, note)) => {
+                        exclusion_inputs.push(ExclusionInput {
+                            start_ip: Some(start.to_string()),
+                            end_ip: Some(end.to_string()),
+                            note: note.clone(),
+                        });
+                        exclusion_pairs.push((start, end, note));
+                    }
+                    Err(message) => issues.push(Issue::error(
+                        "invalid_exclusions",
+                        Some(Field::Exclusions),
+                        message,
+                    )),
+                }
+            }
+        }
+    }
+
     // 欄位驗證一律走領域驗證（單一驗證權威）；CIDR 無效時無從續驗。
     let mut valid_subnet = None;
     if normalized.is_some() {
@@ -573,6 +612,7 @@ fn validate_row(
             gateway: gateway.map(|address| address.to_string()),
             kea_subnet_id,
             pools: pool_inputs,
+            exclusions: exclusion_inputs,
         };
         match input.validate() {
             Ok(valid) => valid_subnet = Some(valid),
@@ -668,13 +708,24 @@ fn validate_row(
         Some(valid_subnet.ok_or_else(|| ApiError::internal("匯入列驗證失敗", "缺少已驗證網段"))?)
     };
 
-    // v6 列的 pool 一律以原始段落呈現（規則不允許，供問題列辨識）。
+    // v6 列的 pool／排除範圍一律以原始段落呈現（規則不允許，供問題列辨識）。
     let data_pools = if is_v4 == Some(false) {
-        raw_pools(pools_text)
+        raw_segments(pools_text)
     } else {
         pool_pairs
             .iter()
             .map(|(start, end)| format!("{start}-{end}"))
+            .collect()
+    };
+    let data_exclusions = if is_v4 == Some(false) {
+        raw_segments(exclusions_text)
+    } else {
+        exclusion_pairs
+            .iter()
+            .map(|(start, end, note)| match note {
+                Some(note) => format!("{start}-{end}#{note}"),
+                None => format!("{start}-{end}"),
+            })
             .collect()
     };
 
@@ -684,6 +735,7 @@ fn validate_row(
         gateway: gateway.map(|address| address.to_string()),
         kea_subnet_id: parsed_kea,
         pools: data_pools,
+        exclusions: data_exclusions,
         note,
     };
 
@@ -724,6 +776,37 @@ fn pool_format_message(segment: &str) -> String {
     format!("位址池格式錯誤：{segment}（每段須為 起點-終點，例：10.0.0.100-10.0.0.200）")
 }
 
+/// 單段排除範圍解析：`起-迄` 或 `起-迄#用途說明`（以**第一個** `#` 分割；
+/// note trim 後空字串視為無；範圍解析重用 [`parse_pool_segment`]）。
+fn parse_exclusion_segment(segment: &str) -> Result<(Ipv4Addr, Ipv4Addr, Option<String>), String> {
+    if segment.is_empty() {
+        return Err("排除範圍含空段（請以 | 分隔多段，每段 起-迄[#用途說明]）".to_string());
+    }
+
+    let (range, note) = match segment.split_once('#') {
+        Some((range, note)) => (
+            range.trim(),
+            Some(note.trim()).filter(|text| !text.is_empty()),
+        ),
+        None => (segment, None),
+    };
+    let note = note.map(str::to_string);
+
+    match parse_pool_segment(range) {
+        Ok((start, end)) => Ok((start, end, note)),
+        Err(_) => Err(exclusion_format_message(segment)),
+    }
+}
+
+/// 排除範圍段落格式錯誤的訊息（格式見 spec §9）。
+fn exclusion_format_message(segment: &str) -> String {
+    format!(
+        "排除範圍格式錯誤：{segment}\
+         （每段須為 起-迄 或 起-迄#用途說明，例：10.0.0.100-10.0.0.200 或 \
+         10.0.0.100-10.0.0.200#NAT）"
+    )
+}
+
 /// 將 `SubnetInput::validate` 的錯誤轉為逐列問題（欄位對應代碼）。
 fn validate_issue(error: ApiError) -> Issue {
     let code = match error.field_name() {
@@ -731,6 +814,9 @@ fn validate_issue(error: ApiError) -> Issue {
         Some("gateway") => "invalid_gateway",
         Some("kea_subnet_id") => "invalid_kea_subnet_id",
         Some(field) if field == "pools" || field.starts_with("pools[") => "invalid_pools",
+        Some(field) if field == "exclusions" || field.starts_with("exclusions[") => {
+            "invalid_exclusions"
+        }
         _ => "invalid_subnet",
     };
     let field = match error.field_name() {
@@ -738,6 +824,9 @@ fn validate_issue(error: ApiError) -> Issue {
         Some("gateway") => Some("gateway"),
         Some("kea_subnet_id") => Some("kea_subnet_id"),
         Some(field) if field == "pools" || field.starts_with("pools[") => Some("pools"),
+        Some(field) if field == "exclusions" || field.starts_with("exclusions[") => {
+            Some("exclusions")
+        }
         _ => None,
     };
     Issue {
@@ -765,13 +854,14 @@ fn mismatch_data(raw: &RawRow) -> RowData {
         kea_subnet_id: raw
             .text(Field::KeaSubnetId)
             .and_then(|value| value.parse::<i64>().ok()),
-        pools: raw_pools(raw.text(Field::Pools)),
+        pools: raw_segments(raw.text(Field::Pools)),
+        exclusions: raw_segments(raw.text(Field::Exclusions)),
         note: raw.text(Field::Note),
     }
 }
 
-/// 原始位址池文字以 `|` 切段（trim、略過空段；不做格式驗證）。
-fn raw_pools(text: Option<String>) -> Vec<String> {
+/// 原始多值欄位文字以 `|` 切段（trim、略過空段；不做格式驗證）。
+fn raw_segments(text: Option<String>) -> Vec<String> {
     text.map(|text| {
         text.split('|')
             .map(str::trim)
@@ -851,7 +941,7 @@ mod tests {
     #[test]
     fn parse_csv_maps_headers_case_insensitively_in_any_order() {
         let parsed = parse_csv(
-            " KEA SUBNET-ID ,名稱,Gateway,備註,CIDR,位址池\n1,核心,10.0.0.1,主力,10.0.0.0/24,10.0.0.100-10.0.0.200\n",
+            " KEA SUBNET-ID ,名稱,排除範圍,Gateway,備註,CIDR,位址池\n1,核心,10.0.0.30-10.0.0.40#NAT,10.0.0.1,主力,10.0.0.0/24,10.0.0.100-10.0.0.200\n",
         )
         .expect("解析成功");
         assert!(parsed.ignored_headers.is_empty());
@@ -865,6 +955,10 @@ mod tests {
         assert_eq!(
             row.text(Field::Pools).as_deref(),
             Some("10.0.0.100-10.0.0.200")
+        );
+        assert_eq!(
+            row.text(Field::Exclusions).as_deref(),
+            Some("10.0.0.30-10.0.0.40#NAT")
         );
         assert_eq!(row.text(Field::Note).as_deref(), Some("主力"));
     }
@@ -940,6 +1034,46 @@ mod tests {
             "fd00::1-fd00::2",
         ] {
             assert!(parse_pool_segment(segment).is_err(), "{segment} 應拒絕");
+        }
+    }
+
+    #[test]
+    fn parse_exclusion_segment_splits_note_at_first_hash() {
+        // 無用途說明。
+        assert_eq!(
+            parse_exclusion_segment("10.0.0.10-10.0.0.20").expect("合法"),
+            (
+                Ipv4Addr::new(10, 0, 0, 10),
+                Ipv4Addr::new(10, 0, 0, 20),
+                None
+            )
+        );
+
+        // 有用途說明：trim；`#` 可再出現於說明，以第一個 `#` 分隔。
+        assert_eq!(
+            parse_exclusion_segment(" 10.0.0.10 - 10.0.0.20 # NAT #1 ").expect("合法"),
+            (
+                Ipv4Addr::new(10, 0, 0, 10),
+                Ipv4Addr::new(10, 0, 0, 20),
+                Some("NAT #1".to_string())
+            )
+        );
+
+        // 說明為空白視為無。
+        assert_eq!(
+            parse_exclusion_segment("10.0.0.10-10.0.0.20#  ").expect("合法"),
+            (
+                Ipv4Addr::new(10, 0, 0, 10),
+                Ipv4Addr::new(10, 0, 0, 20),
+                None
+            )
+        );
+
+        for segment in ["", "10.0.0.10", "a-b", "#note", "fd00::1-fd00::2"] {
+            assert!(
+                parse_exclusion_segment(segment).is_err(),
+                "{segment} 應拒絕"
+            );
         }
     }
 }

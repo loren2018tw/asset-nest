@@ -73,8 +73,8 @@
                     <q-icon name="view_column" color="primary" />
                   </q-item-section>
                   <q-item-section>
-                    第一列為標題，共 6 欄（名稱／CIDR／Gateway／Kea
-                    subnet-id／位址池／備註）；欄位順序不拘，未知欄位會忽略
+                    第一列為標題，共 7 欄（名稱／CIDR／Gateway／Kea
+                    subnet-id／位址池／排除範圍／備註）；欄位順序不拘，未知欄位會忽略
                   </q-item-section>
                 </q-item>
                 <q-item>
@@ -93,6 +93,15 @@
                   <q-item-section>
                     位址池以「|」分隔多段，每段「起點-終點」（例：
                     10.0.0.100-10.0.0.200|10.0.0.250-10.0.0.253），僅 IPv4
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section avatar>
+                    <q-icon name="block" color="primary" />
+                  </q-item-section>
+                  <q-item-section>
+                    排除範圍（選填）亦以「|」分隔多段，每段「起-迄#用途說明」
+                    （說明選填、以第一個 # 分隔），僅 IPv4
                   </q-item-section>
                 </q-item>
                 <q-item>
@@ -462,6 +471,13 @@ const columns: QTableProps["columns"] = [
     label: "位址池",
     field: (row: SubnetImportRow) =>
       row.data.pools.length === 0 ? "—" : row.data.pools.join("|"),
+    align: "left"
+  },
+  {
+    name: "exclusions",
+    label: "排除範圍",
+    field: (row: SubnetImportRow) =>
+      row.data.exclusions.length === 0 ? "—" : row.data.exclusions.join("|"),
     align: "left"
   },
   {

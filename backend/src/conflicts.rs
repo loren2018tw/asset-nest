@@ -1,8 +1,10 @@
-//! 語意衝突（semantic conflict）領域模組：IpInPool、IpOutOfSubnet、
-//! DuplicateHwAddress 的偵測、列標記與儲存警示；另提供 IP 清單列專用的
-//! 觀測衍生衝突（ObservedMacMismatch、ObservedOnUnassigned；見 ADR-0014）。
+//! 語意衝突（semantic conflict）領域模組：IpInPool、IpInExcludedRange、
+//! IpOutOfSubnet、DuplicateHwAddress 的偵測、列標記與儲存警示；另提供 IP
+//! 清單列專用的觀測衍生衝突（ObservedMacMismatch、ObservedOnUnassigned；
+//! 見 ADR-0014）。
 //!
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §3.2，
+//! 排除範圍見 `.scratch/subnet-exclusions/spec.md` §6 與 ADR-0020，
 //! 決策見 ADR-0006：衝突是標記、不是狀態——僅提示、不阻擋儲存。
 //! IpInUse 已由「同網段不重複指派」的結構規則涵蓋，不在此偵測。
 //! 觀測碼即時計算、不落地，且不計入網段衝突數與指派儲存警示（見票 07）。
@@ -20,18 +22,21 @@ use crate::subnets::Subnet;
 
 /// IpInPool：指派位址落在該網段任一 DHCP 位址池內（僅 v4；pool 僅 v4 有）。
 pub const IP_IN_POOL: &str = "IpInPool";
+/// IpInExcludedRange：指派位址落在該網段任一排除範圍內（僅 v4；見 ADR-0020）。
+pub const IP_IN_EXCLUDED_RANGE: &str = "IpInExcludedRange";
 /// IpOutOfSubnet：指派位址不在該網段 CIDR 內（v4／v6 皆適用）。
 pub const IP_OUT_OF_SUBNET: &str = "IpOutOfSubnet";
 /// DuplicateHwAddress：同一網段同 MAC 出現多筆保留（purpose=reservation）。
 pub const DUPLICATE_HW_ADDRESS: &str = "DuplicateHwAddress";
 /// ObservedMacMismatch：已指派位址被觀測到由非宣告 MAC 使用（見 ADR-0014）。
 pub const OBSERVED_MAC_MISMATCH: &str = "ObservedMacMismatch";
-/// ObservedOnUnassigned：未指派且非池內位址被觀測到有主
-/// （UI 顯示「非法佔用 IP」；見 ADR-0014）。
+/// ObservedOnUnassigned：未指派、非池內且非排除範圍的位址被觀測到有主
+/// （UI 顯示「非法佔用 IP」；見 ADR-0014、ADR-0020）。
 pub const OBSERVED_ON_UNASSIGNED: &str = "ObservedOnUnassigned";
 
 /// 一筆指派命中的衝突；`codes` 僅含命中者，依固定順序排列
-/// （IpOutOfSubnet、IpInPool、DuplicateHwAddress），確保列標記與警示穩定。
+/// （IpOutOfSubnet、IpInPool、IpInExcludedRange、DuplicateHwAddress），
+/// 確保列標記與警示穩定。pool 與排除範圍結構互斥，不會同時命中。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentConflicts {
     pub address: String,
@@ -51,6 +56,7 @@ pub fn detect(
         .parse()
         .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))?;
     let pools = parse_pools(subnet)?;
+    let exclusions = parse_exclusions(subnet)?;
 
     // DuplicateHwAddress：僅「保留」參與；同一 MAC 多筆保留時全部標記。
     // 同一 MAC 可能跨多介面（全系統 MAC 重複僅提示），故以 MAC 計數而非介面。
@@ -77,6 +83,12 @@ pub fn detect(
         if let IpAddr::V4(v4) = address {
             if pools.iter().any(|(start, end)| *start <= v4 && v4 <= *end) {
                 codes.push(IP_IN_POOL);
+            }
+            if exclusions
+                .iter()
+                .any(|(start, end)| *start <= v4 && v4 <= *end)
+            {
+                codes.push(IP_IN_EXCLUDED_RANGE);
             }
         }
         if assignment.purpose == "reservation"
@@ -118,8 +130,9 @@ pub fn by_address(
 /// 規則（`presence` 以位址文字索引）：
 /// - [`OBSERVED_MAC_MISMATCH`]：位址已指派、宣告介面 MAC 非空，且現況
 ///   `last_seen_mac` 與其不同（不分大小寫）。
-/// - [`OBSERVED_ON_UNASSIGNED`]：位址未指派、不在該網段任一 pool 內，
-///   且現況 `last_seen_mac` 非空；池內位址可能由 DHCP 正常使用，不標記。
+/// - [`OBSERVED_ON_UNASSIGNED`]：位址未指派、不在該網段任一 pool 或排除範圍內，
+///   且現況 `last_seen_mac` 非空；池內位址可能由 DHCP 正常使用，排除範圍內
+///   位址（如 NAT 對外）則由其他機制使用，皆不標記（見 ADR-0020）。
 ///
 /// 回傳僅含命中者；呼叫端先放既有語意碼、再附加觀測碼（固定順序）。
 pub fn observed_codes(
@@ -128,6 +141,7 @@ pub fn observed_codes(
     presence: &HashMap<String, Presence>,
 ) -> Result<HashMap<String, Vec<&'static str>>, ApiError> {
     let pools = parse_pools(subnet)?;
+    let exclusions = parse_exclusions(subnet)?;
     let mut by_address: HashMap<&str, &ListedAssignment> =
         HashMap::with_capacity(assignments.len());
     for assignment in assignments {
@@ -157,7 +171,10 @@ pub fn observed_codes(
                 let in_pool = pools
                     .iter()
                     .any(|(start, end)| *start <= parsed && parsed <= *end);
-                if !in_pool {
+                let in_exclusion = exclusions
+                    .iter()
+                    .any(|(start, end)| *start <= parsed && parsed <= *end);
+                if !in_pool && !in_exclusion {
                     result.insert(address.clone(), vec![OBSERVED_ON_UNASSIGNED]);
                 }
             }
@@ -204,6 +221,9 @@ fn message_of(code: &str, address: &str, cidr: &str, mac: Option<&str>) -> Strin
         IP_IN_POOL => {
             format!("位址 {address} 落在 DHCP 位址池內（僅提示，不阻擋儲存）")
         }
+        IP_IN_EXCLUDED_RANGE => {
+            format!("位址 {address} 落在排除範圍內（僅提示，不阻擋儲存）")
+        }
         DUPLICATE_HW_ADDRESS => format!(
             "MAC {} 在同一網段出現多筆保留（僅提示，不阻擋儲存）",
             mac.unwrap_or("（未知）")
@@ -231,10 +251,30 @@ fn parse_pools(subnet: &Subnet) -> Result<Vec<(Ipv4Addr, Ipv4Addr)>, ApiError> {
         .collect()
 }
 
+/// 解析網段所有排除範圍（v4；見 ADR-0020）；資料庫內容經結構驗證，
+/// 格式異常視為內部錯誤。
+fn parse_exclusions(subnet: &Subnet) -> Result<Vec<(Ipv4Addr, Ipv4Addr)>, ApiError> {
+    subnet
+        .exclusions
+        .iter()
+        .map(|exclusion| {
+            let start = exclusion
+                .start_ip
+                .parse()
+                .map_err(|error| ApiError::internal("排除範圍位址格式錯誤", error))?;
+            let end = exclusion
+                .end_ip
+                .parse()
+                .map_err(|error| ApiError::internal("排除範圍位址格式錯誤", error))?;
+            Ok((start, end))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subnets::Pool;
+    use crate::subnets::{Exclusion, Pool};
 
     /// 測試用網段；pools 以（起點、終點）表示。
     fn subnet(cidr: &str, pools: &[(&str, &str)]) -> Subnet {
@@ -254,9 +294,30 @@ mod tests {
                     end_ip: end.to_string(),
                 })
                 .collect(),
+            exclusions: vec![],
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    /// 測試用網段：附排除範圍（僅 v4；見 ADR-0020）。
+    fn subnet_with_exclusions(
+        cidr: &str,
+        pools: &[(&str, &str)],
+        exclusions: &[(&str, &str)],
+    ) -> Subnet {
+        let mut subnet = subnet(cidr, pools);
+        subnet.exclusions = exclusions
+            .iter()
+            .enumerate()
+            .map(|(index, (start, end))| Exclusion {
+                id: index as i64 + 1,
+                start_ip: start.to_string(),
+                end_ip: end.to_string(),
+                note: None,
+            })
+            .collect();
+        subnet
     }
 
     /// 測試用指派列；僅 address／purpose／mac 參與衝突偵測。
@@ -322,6 +383,49 @@ mod tests {
                 address: "10.0.0.10".to_string(),
                 codes: vec![IP_IN_POOL],
             }]
+        );
+    }
+
+    #[test]
+    fn ip_in_excluded_range_is_detected_for_assigned_v4_addresses() {
+        let subnet = subnet_with_exclusions("10.0.0.0/24", &[], &[("10.0.0.100", "10.0.0.110")]);
+        let assignments = [
+            listed("10.0.0.100", "static", None),
+            listed("10.0.0.110", "reservation", Some("aa:bb:cc:dd:ee:ff")),
+            listed("10.0.0.111", "static", None),
+        ];
+        let conflicts = detect(&subnet, &assignments).expect("偵測成功");
+        assert_eq!(
+            conflicts,
+            vec![
+                AssignmentConflicts {
+                    address: "10.0.0.100".to_string(),
+                    codes: vec![IP_IN_EXCLUDED_RANGE],
+                },
+                AssignmentConflicts {
+                    address: "10.0.0.110".to_string(),
+                    codes: vec![IP_IN_EXCLUDED_RANGE],
+                },
+            ],
+            "端點皆含；範圍外不標記（見 ADR-0020）"
+        );
+    }
+
+    #[test]
+    fn ip_in_excluded_range_orders_with_other_codes() {
+        // /25（host .1–.126）的排除範圍 .199–.201 涵蓋出界保留：可與出界、
+        // MAC 重複並存，依固定順序 IpOutOfSubnet → IpInExcludedRange →
+        // DuplicateHwAddress（見 ADR-0020）。
+        let subnet = subnet_with_exclusions("10.0.0.0/25", &[], &[("10.0.0.199", "10.0.0.201")]);
+        let assignments = [
+            listed("10.0.0.200", "reservation", Some("aa:bb:cc:dd:ee:ff")),
+            listed("10.0.0.201", "reservation", Some("aa:bb:cc:dd:ee:ff")),
+        ];
+        let conflicts = detect(&subnet, &assignments).expect("偵測成功");
+        assert_eq!(
+            conflicts[0].codes,
+            vec![IP_OUT_OF_SUBNET, IP_IN_EXCLUDED_RANGE, DUPLICATE_HW_ADDRESS],
+            "出界、排除範圍與 MAC 重複依固定順序並存"
         );
     }
 
@@ -401,6 +505,38 @@ mod tests {
     }
 
     #[test]
+    fn observed_on_unassigned_does_not_flag_exclusion_addresses() {
+        let subnet = subnet_with_exclusions(
+            "10.0.0.0/24",
+            &[("10.0.0.10", "10.0.0.20")],
+            &[("10.0.0.30", "10.0.0.40")],
+        );
+        let presence: HashMap<String, Presence> = [
+            ("10.0.0.3", Some("aa:bb:cc:dd:ee:03")), // 未指派且非池內、非排除
+            ("10.0.0.10", Some("aa:bb:cc:dd:ee:10")), // 池內
+            ("10.0.0.30", Some("aa:bb:cc:dd:ee:30")), // 排除範圍起點
+            ("10.0.0.40", Some("aa:bb:cc:dd:ee:40")), // 排除範圍終點
+        ]
+        .into_iter()
+        .map(|(address, mac)| {
+            (
+                address.to_string(),
+                Presence {
+                    last_seen_mac: mac.map(str::to_string),
+                    ..Presence::default()
+                },
+            )
+        })
+        .collect();
+
+        let codes = observed_codes(&subnet, &[], &presence).expect("偵測成功");
+        assert_eq!(codes.get("10.0.0.3"), Some(&vec![OBSERVED_ON_UNASSIGNED]));
+        assert_eq!(codes.get("10.0.0.10"), None, "池內位址不標記");
+        assert_eq!(codes.get("10.0.0.30"), None, "排除範圍內不標記");
+        assert_eq!(codes.get("10.0.0.40"), None, "排除範圍內不標記");
+    }
+
+    #[test]
     fn by_address_and_warnings_use_canonical_messages() {
         let subnet = subnet("10.0.0.0/24", &[("10.0.0.10", "10.0.0.20")]);
         let assignments = [listed("10.0.0.10", "static", None)];
@@ -417,6 +553,22 @@ mod tests {
 
         let none = warnings_for(&subnet, &assignments, "10.0.0.11").expect("偵測成功");
         assert!(none.is_empty(), "無衝突時無警示");
+    }
+
+    #[test]
+    fn ip_in_excluded_range_warning_uses_canonical_message() {
+        let subnet = subnet_with_exclusions("10.0.0.0/24", &[], &[("10.0.0.100", "10.0.0.110")]);
+        let assignments = [listed("10.0.0.100", "static", None)];
+
+        let map = by_address(&subnet, &assignments).expect("偵測成功");
+        assert_eq!(map.get("10.0.0.100"), Some(&vec![IP_IN_EXCLUDED_RANGE]));
+        assert_eq!(map.get("10.0.0.111"), None, "範圍外無衝突");
+
+        let warnings = warnings_for(&subnet, &assignments, "10.0.0.100").expect("偵測成功");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, IP_IN_EXCLUDED_RANGE);
+        assert!(warnings[0].message.contains("排除範圍"));
+        assert!(warnings[0].message.contains("不阻擋"));
     }
 
     #[test]

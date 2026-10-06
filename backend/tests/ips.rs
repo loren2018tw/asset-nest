@@ -329,12 +329,135 @@ async fn pool_flags_are_reported() {
 }
 
 #[tokio::test]
-async fn search_matches_exact_address_or_substring() {
+async fn exclusion_rows_are_reported_filtered_and_not_available() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/29",
+            "exclusions": [
+                { "start_ip": "10.0.0.4", "end_ip": "10.0.0.5", "note": "NAT 對外" }
+            ]
+        }),
+    )
+    .await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    // 排除列：狀態 excluded、非池內、無指派用途、無衝突
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(page["total"], 6);
+    for address in ["10.0.0.4", "10.0.0.5"] {
+        assert_eq!(row(&page, address)["status"], "excluded", "{address}");
+        assert_eq!(row(&page, address)["in_pool"], false, "{address}");
+        assert!(row(&page, address)["purpose"].is_null(), "{address}");
+        assert_eq!(row(&page, address)["conflicts"], json!([]), "{address}");
+    }
+
+    // ?status=excluded：僅回排除列（見 spec §5）
+    let page = list_ips(&pool, id, "?status=excluded").await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.4", "10.0.0.5"]);
+
+    // available 不含排除範圍
+    let page = list_ips(&pool, id, "?status=available").await;
+    assert_eq!(page["total"], 4);
+    assert_eq!(
+        addresses(&page),
+        ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.6"]
+    );
+
+    // 狀態白名單錯誤訊息列出 excluded（見 spec §5）
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?status=dhcp"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "status");
+    let message = body["message"].as_str().expect("訊息為字串");
+    assert!(
+        message.contains("excluded"),
+        "錯誤訊息應列出 excluded：{message}"
+    );
+}
+
+#[tokio::test]
+async fn assignment_covered_by_later_exclusion_keeps_status_and_flags_conflict() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let asset = create_asset(&pool, "NAT 主機", "機房 A").await;
+    let interface = create_interface(&pool, asset, json!({ "name": "eth0" })).await;
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.4",
+        json!({ "interface_id": interface, "purpose": "static" }),
+    )
+    .await;
+
+    // 先指派、後 PATCH 網段加排除範圍：不阻擋、不解除既有指派（見 ADR-0020）。
+    let (status, updated) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{id}"),
+        Some(json!({
+            "exclusions": [{ "start_ip": "10.0.0.4", "end_ip": "10.0.0.5" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "加排除範圍不阻擋：{updated}");
+
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(
+        row(&page, "10.0.0.4")["status"],
+        "static",
+        "指派優先於排除：狀態仍為指派用途"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.4")["conflicts"],
+        json!(["IpInExcludedRange"]),
+        "既有指派被排除範圍覆蓋：標記語意衝突（僅提示）"
+    );
+    assert!(
+        !row(&page, "10.0.0.4")["assignment"].is_null(),
+        "既有指派不自動解除"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.5")["status"],
+        "excluded",
+        "未指派列落在排除範圍：狀態 excluded"
+    );
+
+    // 網段衝突數計入 IpInExcludedRange（走 detect，見 spec §6）。
+    let (status, subnets) = send(&pool, Method::GET, "/api/v1/subnets", None).await;
+    assert_eq!(status, StatusCode::OK, "讀取網段列表應成功");
+    let summary = subnets["items"]
+        .as_array()
+        .expect("網段列表為陣列")
+        .iter()
+        .find(|summary| summary["id"] == id)
+        .expect("列表含此網段");
+    assert_eq!(summary["conflicts"], 1, "語意衝突計入網段衝突數");
+
+    // 指派優先：status=static 仍回該列；status=excluded 不含已指派位址。
+    let page = list_ips(&pool, id, "?status=static").await;
+    assert_eq!(addresses(&page), ["10.0.0.4"]);
+    let page = list_ips(&pool, id, "?status=excluded").await;
+    assert_eq!(addresses(&page), ["10.0.0.5"]);
+}
+
+#[tokio::test]
+async fn search_matches_address_prefix_or_substring() {
     let pool = test_pool().await;
     let subnet = create_subnet(&pool, json!({ "cidr": "10.0.0.0/28" })).await;
     let id = subnet["id"].as_i64().expect("回應含 id");
 
-    // 完整位址：精確比對，僅一筆
+    // 完整 v4 位址：位址文字前綴（/28 僅 .10 一筆）
     let page = list_ips(&pool, id, "?q=10.0.0.10").await;
     assert_eq!(page["total"], 1);
     assert_eq!(addresses(&page), ["10.0.0.10"]);
@@ -367,6 +490,43 @@ async fn search_matches_exact_address_or_substring() {
     // 無符合的子字串：空結果
     let page = list_ips(&pool, id, "?q=255").await;
     assert_eq!(page["total"], 0);
+}
+
+#[tokio::test]
+async fn search_complete_address_expands_last_octet_prefix() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(&pool, json!({ "cidr": "10.0.9.0/24" })).await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    // 10.0.9.6 命中 10.0.9.6 與 10.0.9.60–69（見票 10）。
+    let page = list_ips(&pool, id, "?q=10.0.9.6&per_page=50").await;
+    assert_eq!(page["total"], 11);
+    assert_eq!(
+        addresses(&page),
+        [
+            "10.0.9.6",
+            "10.0.9.60",
+            "10.0.9.61",
+            "10.0.9.62",
+            "10.0.9.63",
+            "10.0.9.64",
+            "10.0.9.65",
+            "10.0.9.66",
+            "10.0.9.67",
+            "10.0.9.68",
+            "10.0.9.69"
+        ]
+    );
+
+    // 展開結果同樣伺服器端分頁與排序。
+    let page = list_ips(&pool, id, "?q=10.0.9.6&sort=address&dir=desc&per_page=3").await;
+    assert_eq!(page["total"], 11);
+    assert_eq!(addresses(&page), ["10.0.9.69", "10.0.9.68", "10.0.9.67"]);
+
+    // 完整位址帶結尾點：精確單一筆（避免展開）。
+    let page = list_ips(&pool, id, &format!("?q={}", encode("10.0.9.6."))).await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["10.0.9.6"]);
 }
 
 #[tokio::test]
@@ -1268,6 +1428,46 @@ async fn observed_on_unassigned_does_not_flag_pool_or_assigned_addresses() {
         json!([]),
         "池內位址不標 ObservedOnUnassigned"
     );
+}
+
+#[tokio::test]
+async fn observed_filters_ignore_exclusion_addresses() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/29",
+            "exclusions": [{ "start_ip": "10.0.0.4", "end_ip": "10.0.0.5" }]
+        }),
+    )
+    .await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    // .3 可用有現況 → 非法佔用 IP；.4／.5 排除範圍有現況 → 不標記（見 ADR-0020）。
+    insert_presence(&pool, id, "10.0.0.3", "aa:bb:cc:dd:ee:03").await;
+    insert_presence(&pool, id, "10.0.0.4", "aa:bb:cc:dd:ee:04").await;
+    insert_presence(&pool, id, "10.0.0.5", "aa:bb:cc:dd:ee:05").await;
+
+    let page = list_ips(&pool, id, "").await;
+    assert_eq!(
+        row(&page, "10.0.0.3")["conflicts"],
+        json!(["ObservedOnUnassigned"])
+    );
+    assert_eq!(
+        row(&page, "10.0.0.4")["conflicts"],
+        json!([]),
+        "排除範圍不標 ObservedOnUnassigned"
+    );
+    assert_eq!(
+        row(&page, "10.0.0.5")["conflicts"],
+        json!([]),
+        "排除範圍不標 ObservedOnUnassigned"
+    );
+
+    // unassigned_seen 篩選不列入排除範圍位址。
+    let page = list_ips(&pool, id, "?observed=unassigned_seen").await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(addresses(&page), ["10.0.0.3"]);
 }
 
 #[tokio::test]

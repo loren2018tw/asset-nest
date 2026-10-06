@@ -465,6 +465,186 @@ async fn address_must_be_v4_host_inside_subnet_and_out_of_pool() {
 }
 
 #[tokio::test]
+async fn excluded_address_is_blocked_through_subnet_endpoint() {
+    let pool = test_pool().await;
+    let asset_id = create_asset(&pool, "測試主機", "機房 A").await;
+    let interface_id = create_interface(&pool, asset_id, json!({ "name": "eth0" })).await;
+    let subnet_id = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/29",
+            "exclusions": [{ "start_ip": "10.0.0.4", "end_ip": "10.0.0.5" }]
+        }),
+    )
+    .await;
+
+    let static_input = json!({ "interface_id": interface_id, "purpose": "static" });
+
+    // 排除範圍端點皆含：起點與終點皆不可新指派（見 spec §7、ADR-0020）
+    for address in ["10.0.0.4", "10.0.0.5"] {
+        let (status, body) = put_assignment(&pool, subnet_id, address, static_input.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{address} 應被阻擋");
+        assert_eq!(body["error"], "validation_error");
+        assert_eq!(body["details"]["field"], "address");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("排除範圍")),
+            "訊息說明排除範圍不可指派：{}",
+            body["message"]
+        );
+    }
+    assert_eq!(assignment_count(&pool).await, 0, "驗證失敗不寫入");
+
+    // 範圍外仍可指派
+    let (status, created) = put_assignment(&pool, subnet_id, "10.0.0.6", static_input).await;
+    assert_eq!(status, StatusCode::OK, "範圍外可指派：{created}");
+    assert_eq!(assignment_count(&pool).await, 1);
+}
+
+#[tokio::test]
+async fn excluded_address_is_blocked_through_asset_endpoint() {
+    let pool = test_pool().await;
+    let asset_id = create_asset(&pool, "測試主機", "機房 A").await;
+    let interface_id = create_interface(&pool, asset_id, json!({ "name": "eth0" })).await;
+    let _subnet_id = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.1.0/29",
+            "exclusions": [{ "start_ip": "10.0.1.2", "end_ip": "10.0.1.2" }]
+        }),
+    )
+    .await;
+
+    // 未指派位址的新指派：即使帶 transfer=true（僅適用已指派位址）仍須阻擋
+    for transfer in [false, true] {
+        let (status, body) = send(
+            &pool,
+            Method::PUT,
+            &format!("/api/v1/assets/{asset_id}/assignments"),
+            Some(json!({
+                "address": "10.0.1.2",
+                "interface_id": interface_id,
+                "purpose": "static",
+                "transfer": transfer
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "transfer={transfer} 應被阻擋：{body}"
+        );
+        assert_eq!(body["error"], "validation_error");
+        assert_eq!(body["details"]["field"], "address");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("排除範圍")),
+            "訊息說明排除範圍不可指派：{}",
+            body["message"]
+        );
+    }
+    assert_eq!(assignment_count(&pool).await, 0, "驗證失敗不寫入");
+}
+
+#[tokio::test]
+async fn later_exclusion_does_not_block_existing_assignment_update() {
+    let pool = test_pool().await;
+    let asset_id = create_asset(&pool, "資料庫主機", "機房 A").await;
+    let interface_id = create_interface(
+        &pool,
+        asset_id,
+        json!({ "name": "eth0", "mac": "AA:BB:CC:DD:EE:FF" }),
+    )
+    .await;
+    let subnet_id = create_subnet(&pool, json!({ "cidr": "10.0.0.0/29" })).await;
+
+    // 先指派
+    let (status, _) = put_assignment(
+        &pool,
+        subnet_id,
+        "10.0.0.2",
+        json!({ "interface_id": interface_id, "purpose": "static" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 後 PATCH 加排除範圍，覆蓋既有指派（不阻擋網段儲存）
+    let (status, updated_subnet) = send(
+        &pool,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{subnet_id}"),
+        Some(json!({
+            "exclusions": [{ "start_ip": "10.0.0.2", "end_ip": "10.0.0.3" }]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "加排除範圍不阻擋網段儲存：{updated_subnet}"
+    );
+    assert_eq!(updated_subnet["exclusions"][0]["start_ip"], "10.0.0.2");
+
+    // 同介面同位址更新用途：不重驗排除範圍 → 200，以語意衝突標記提示
+    let (status, updated) = put_assignment(
+        &pool,
+        subnet_id,
+        "10.0.0.2",
+        json!({
+            "interface_id": interface_id,
+            "purpose": "reservation",
+            "hostname": "db-1"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "既有指派更新不因排除範圍阻擋：{updated}"
+    );
+    assert_eq!(updated["purpose"], "reservation");
+    assert_eq!(updated["hostname"], "db-1");
+    assert_eq!(
+        updated["warnings"][0]["code"], "IpInExcludedRange",
+        "以語意衝突標記呈現：{}",
+        updated["warnings"]
+    );
+    assert!(
+        updated["warnings"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("排除範圍")),
+        "警示說明排除範圍：{}",
+        updated["warnings"]
+    );
+    assert_eq!(assignment_count(&pool).await, 1, "更新既有列而非新增");
+}
+
+#[tokio::test]
+async fn v6_registration_is_unaffected_by_exclusion_block() {
+    let pool = test_pool().await;
+    let asset_id = create_asset(&pool, "v6 主機", "機房 C").await;
+    let interface_id = create_interface(&pool, asset_id, json!({ "name": "eth0" })).await;
+    let subnet_id = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+
+    // v6 登錄（新增即指派）仍成功；排除範圍為 v4 限定（見 spec §7）
+    let (status, created) = send(
+        &pool,
+        Method::POST,
+        &format!("/api/v1/subnets/{subnet_id}/ips"),
+        Some(json!({ "address": "fd00::5", "interface_id": interface_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "v6 登錄應成功：{created}");
+    assert_eq!(created["subnet_id"], subnet_id);
+    assert_eq!(created["address"], "fd00::5");
+    assert_eq!(created["interface_id"], interface_id);
+    assert_eq!(created["purpose"], "static");
+    assert_eq!(assignment_count(&pool).await, 1);
+}
+
+#[tokio::test]
 async fn duplicate_address_and_same_interface_rules() {
     let pool = test_pool().await;
     let first_asset = create_asset(&pool, "設備一", "機房 A").await;

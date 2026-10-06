@@ -939,7 +939,8 @@ fn asset_issue(error: ApiError) -> Issue {
     }
 }
 
-/// IPv4 結構錯誤的細分代碼：host 範圍／pool／其他（重用 [`HostRange`] 與 pool 判定）。
+/// IPv4 結構錯誤的細分代碼：host 範圍／pool／排除範圍／其他
+/// （重用 [`HostRange`] 與 pool／排除範圍判定）。
 fn ipv4_rule_code(subnet: &subnets::Subnet, address: Ipv4Addr) -> Result<&'static str, ApiError> {
     let network: IpNet = subnet
         .cidr
@@ -952,6 +953,9 @@ fn ipv4_rule_code(subnet: &subnets::Subnet, address: Ipv4Addr) -> Result<&'stati
     }
     if assignments::is_in_pool(subnet, address)? {
         return Ok("ipv4_in_pool");
+    }
+    if assignments::is_in_exclusion(subnet, address)? {
+        return Ok("ipv4_in_exclusion");
     }
     Ok("invalid_ipv4")
 }

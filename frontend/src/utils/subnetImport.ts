@@ -1,7 +1,7 @@
 import { saveBlob } from "@/api/client";
 import type { SubnetImportReport, SubnetImportRow } from "@/api/subnets";
 
-/** 問題列報告欄位＝列號＋6 欄＋原因（見 spec §3、ADR-0009）。 */
+/** 問題列報告欄位＝列號＋7 欄＋原因（見 spec §3、ADR-0009）。 */
 const ISSUE_REPORT_HEADERS = [
   "列號",
   "名稱",
@@ -9,6 +9,7 @@ const ISSUE_REPORT_HEADERS = [
   "Gateway",
   "Kea subnet-id",
   "位址池",
+  "排除範圍",
   "備註",
   "原因"
 ];
@@ -23,7 +24,7 @@ function csvCell(value: string): string {
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-/** 欄位值轉字串：null 空字串、位址池以「|」串接（與匯入格式一致）。 */
+/** 欄位值轉字串：null 空字串、位址池／排除範圍以「|」串接（與匯入格式一致）。 */
 function cellText(value: string | number | string[] | null): string {
   if (value === null) {
     return "";
@@ -44,6 +45,7 @@ export function buildIssueReportCsv(report: SubnetImportReport): string {
       cellText(data.gateway),
       cellText(data.kea_subnet_id),
       cellText(data.pools),
+      cellText(data.exclusions),
       cellText(data.note),
       row.issues.map(issue => issue.message).join("；")
     ];

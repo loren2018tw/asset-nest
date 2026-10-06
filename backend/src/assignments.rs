@@ -546,11 +546,13 @@ pub async fn find(
         .map(AssignmentRow::into_assignment))
 }
 
-/// 位址結構驗證：地址族須與網段相符、落在 CIDR 內（v4 另扣 network/broadcast
-/// 與 pool）；v6 用途固定 static（見 spec §2.4、§7）。
+/// 位址結構驗證：地址族須與網段相符、落在 CIDR 內（v4 新指派依序另扣
+/// network/broadcast、pool 與排除範圍）；v6 用途固定 static
+/// （見 spec §2.4、§7、ADR-0020）。
 ///
-/// `existing`＝同介面同位址的更新：出界／落池為語意衝突（網段編輯造成），
-/// 不重驗、由標記呈現（見 ADR-0006、票 07）；地址族與 v6 用途仍為結構規則。
+/// `existing`＝同介面同位址的更新：出界／落池／落在排除範圍為語意衝突
+/// （網段編輯造成），不重驗、由標記呈現（見 ADR-0006、ADR-0020、票 07）；
+/// 地址族與 v6 用途仍為結構規則。
 ///
 /// 供匯入以「新指派」情境（`existing = false`）重用（見票 01）。
 pub(crate) fn validate_address(
@@ -577,6 +579,13 @@ pub(crate) fn validate_address(
                 if is_in_pool(subnet, address)? {
                     return Err(ApiError::validation(format!(
                         "位址 {address} 落在 DHCP 位址池內，不可指派"
+                    ))
+                    .field("address"));
+                }
+
+                if is_in_exclusion(subnet, address)? {
+                    return Err(ApiError::validation(format!(
+                        "位址 {address} 落在排除範圍內，不可指派"
                     ))
                     .field("address"));
                 }
@@ -947,6 +956,25 @@ pub(crate) fn is_in_pool(subnet: &Subnet, address: Ipv4Addr) -> Result<bool, Api
             .end_ip
             .parse()
             .map_err(|error| ApiError::internal("pool 位址格式錯誤", error))?;
+        if start <= address && address <= end {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 位址是否落在網段任一排除範圍內（端點皆含）；新指派須先通過此檢查
+/// （見 spec §7、ADR-0020）。
+pub(crate) fn is_in_exclusion(subnet: &Subnet, address: Ipv4Addr) -> Result<bool, ApiError> {
+    for exclusion in &subnet.exclusions {
+        let start: Ipv4Addr = exclusion
+            .start_ip
+            .parse()
+            .map_err(|error| ApiError::internal("排除範圍位址格式錯誤", error))?;
+        let end: Ipv4Addr = exclusion
+            .end_ip
+            .parse()
+            .map_err(|error| ApiError::internal("排除範圍位址格式錯誤", error))?;
         if start <= address && address <= end {
             return Ok(true);
         }

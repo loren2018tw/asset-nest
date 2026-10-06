@@ -700,6 +700,52 @@ async fn plan_reports_add_update_delete_and_skips_conflicts() {
 }
 
 #[tokio::test]
+async fn plan_skips_reservation_covered_by_exclusion() {
+    let (state, stub) = test_state().await;
+    let subnet = create_subnet(&state, "10.0.0.0/24", Some(1)).await;
+    let asset = create_asset(&state, "排除主機").await;
+    let interface = create_interface(&state, asset, "aa:aa:aa:aa:aa:11").await;
+
+    let (status, saved) =
+        put_assignment(&state, subnet, "10.0.0.11", interface, "reservation", None).await;
+    assert_eq!(status, StatusCode::OK, "指派保留應成功：{saved}");
+
+    // 後加排除範圍覆蓋該保留：IpInExcludedRange 屬語意衝突，完整同步跳過推送。
+    let (status, json) = send(
+        &state,
+        Method::PATCH,
+        &format!("/api/v1/subnets/{subnet}"),
+        Some(json!({
+            "exclusions": [
+                { "start_ip": "10.0.0.11", "end_ip": "10.0.0.11", "note": "NAT" }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "設定排除範圍應成功：{json}");
+
+    let (status, plan) = send(&state, Method::GET, "/api/v1/kea/sync/plan", None).await;
+    assert_eq!(status, StatusCode::OK, "計畫應成功：{plan}");
+    assert_eq!(plan["totals"]["add"], 0, "排除位址的保留不推送");
+    assert_eq!(plan["totals"]["skipped"], 1);
+
+    let skipped = &plan["subnets"][0]["skipped"][0];
+    assert_eq!(skipped["ip_address"], "10.0.0.11");
+    assert!(
+        skipped["reason"]
+            .as_str()
+            .expect("reason 為字串")
+            .contains("IpInExcludedRange"),
+        "跳過原因應含衝突代碼：{skipped}"
+    );
+    assert_eq!(
+        stub.hosts(1).len(),
+        1,
+        "指派當下已推送的保留維持不動（跳過推送、不刪除）"
+    );
+}
+
+#[tokio::test]
 async fn apply_executes_plan_and_writes_config_once() {
     let (state, stub) = test_state().await;
     sync_fixture(&state, &stub).await;
