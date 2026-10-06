@@ -205,6 +205,27 @@
           >
             <q-tooltip>觀測歷史</q-tooltip>
           </q-btn>
+          <!-- 編輯綁訂資產（見票 23）：已指派介面時直接開啟該資產的編輯對話框；
+               未指派介面時停用 -->
+          <span>
+            <q-btn
+              flat
+              dense
+              round
+              icon="inventory_2"
+              :aria-label="
+                props.row.assignment
+                  ? '編輯綁訂資產'
+                  : '編輯綁訂資產（未指派介面）'
+              "
+              :disable="props.row.assignment === null"
+              :loading="assetLoadingAddress === props.row.address"
+              @click="openBoundAsset(props.row)"
+            />
+            <q-tooltip>
+              {{ props.row.assignment ? "編輯綁訂資產" : "此位址未指派介面" }}
+            </q-tooltip>
+          </span>
           <!-- 池內且未指派：不可指派（見 spec §7） -->
           <q-btn
             v-if="props.row.in_pool && !props.row.assignment"
@@ -217,26 +238,15 @@
           >
             <q-tooltip>池內位址不可指派</q-tooltip>
           </q-btn>
-          <template v-else>
-            <q-btn
-              flat
-              dense
-              round
-              icon="edit"
-              :aria-label="props.row.assignment ? '編輯指派' : '指派'"
-              @click="openAssignment(props.row)"
-            />
-            <q-btn
-              v-if="props.row.assignment"
-              flat
-              dense
-              round
-              icon="link_off"
-              color="negative"
-              aria-label="取消指派"
-              @click="confirmCancel(props.row)"
-            />
-          </template>
+          <q-btn
+            v-else
+            flat
+            dense
+            round
+            icon="edit"
+            :aria-label="props.row.assignment ? '編輯指派' : '指派'"
+            @click="openAssignment(props.row)"
+          />
         </q-td>
       </template>
       <template #no-data>
@@ -259,6 +269,13 @@
       @saved="onAssignmentSaved"
     />
 
+    <!-- 編輯綁訂資產（見票 23）：以該列的指派對象開啟資產編輯對話框 -->
+    <asset-form-dialog
+      v-model="assetDialogOpen"
+      :asset="assetEditing"
+      @saved="onBoundAssetSaved"
+    />
+
     <observation-history-dialog
       v-model="observationOpen"
       :subnet-id="subnetId"
@@ -270,11 +287,11 @@
 <script setup lang="ts">
 import type { QTableProps } from "quasar";
 import { useQuasar } from "quasar";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
+import { fetchAsset, type Asset } from "@/api/assets";
 import {
-  cancelAssignment,
   listSubnetIps,
   quickSweep,
   type IpAssignmentTarget,
@@ -289,17 +306,17 @@ import {
   type AddressFamily,
   type Subnet
 } from "@/api/subnets";
+import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
-import { notifyKeaSync } from "@/utils/keaSync";
-import { cancelAssignmentHint } from "@/utils/observationHint";
 import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
 const route = useRoute();
 
-const subnetId = Number(route.params.id);
+/** 目前網段 id；側欄快速入口直接切換路由參數，元件不重建（見票 24）。 */
+const subnetId = computed(() => Number(route.params.id));
 const subnet = ref<Subnet | null>(null);
 const ips = ref<IpEntry[]>([]);
 const loading = ref(false);
@@ -335,6 +352,11 @@ const pagination = ref<{
 
 const assignmentOpen = ref(false);
 const assignmentEntry = ref<IpEntry | null>(null);
+/** 「編輯綁訂資產」對話框（見票 23）。 */
+const assetDialogOpen = ref(false);
+const assetEditing = ref<Asset | null>(null);
+/** 讀取資產詳情中的列位址；同時間僅允許一列（供列上 loading）。 */
+const assetLoadingAddress = ref<string | null>(null);
 /** 觀測歷史對話框（見票 06）：以列位址開啟。 */
 const observationOpen = ref(false);
 const observationEntry = ref<IpEntry | null>(null);
@@ -522,10 +544,14 @@ function checkedLabel(value: string | null): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+/** 丟棄過期回應：快速切換網段時前一個請求可能較晚回來（見票 24）。 */
+let ipsLoadToken = 0;
+
 async function fetchIps() {
+  const token = ++ipsLoadToken;
   loading.value = true;
   try {
-    const page = await listSubnetIps(subnetId, {
+    const page = await listSubnetIps(subnetId.value, {
       q: filters.value.q?.trim() || undefined,
       status: filters.value.status ?? undefined,
       observed: filters.value.observed ?? undefined,
@@ -535,12 +561,19 @@ async function fetchIps() {
       per_page: pagination.value.rowsPerPage
     });
 
+    if (token !== ipsLoadToken) {
+      return;
+    }
     ips.value = page.items;
     pagination.value.rowsNumber = page.total;
   } catch (cause) {
-    $q.notify({ type: "negative", message: messageOf(cause) });
+    if (token === ipsLoadToken) {
+      $q.notify({ type: "negative", message: messageOf(cause) });
+    }
   } finally {
-    loading.value = false;
+    if (token === ipsLoadToken) {
+      loading.value = false;
+    }
   }
 }
 
@@ -608,11 +641,36 @@ function onAssignmentSaved() {
   void fetchIps();
 }
 
+/**
+ * 編輯綁訂資產（見票 23）：讀取指派對象的資產詳情後開啟編輯對話框；
+ * 未指派介面的列按鈕停用，不會進到這裡。
+ */
+async function openBoundAsset(entry: IpEntry) {
+  const target = entry.assignment;
+  if (target === null || assetLoadingAddress.value !== null) {
+    return;
+  }
+  assetLoadingAddress.value = entry.address;
+  try {
+    assetEditing.value = await fetchAsset(target.asset_id);
+    assetDialogOpen.value = true;
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    assetLoadingAddress.value = null;
+  }
+}
+
+/** 資產編輯儲存後：重載清單（描述／位置，或對話框內取消的指派）。 */
+function onBoundAssetSaved() {
+  void fetchIps();
+}
+
 /** 立即快速掃描：同步執行、回報結果後重載清單（見票 02）。 */
 async function runQuickSweep() {
   sweeping.value = true;
   try {
-    const report = await quickSweep(subnetId);
+    const report = await quickSweep(subnetId.value);
     $q.notify({
       type: "positive",
       message: `快速掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
@@ -629,7 +687,7 @@ async function runQuickSweep() {
 async function runDiscoverySweep() {
   discovering.value = true;
   try {
-    const report = await discoverySweep(subnetId);
+    const report = await discoverySweep(subnetId.value);
     const passive =
       report.passive_seen > 0 ? `｜被動看到 ${report.passive_seen}` : "";
     $q.notify({
@@ -650,43 +708,58 @@ async function runDiscoverySweep() {
   }
 }
 
-function confirmCancel(entry: IpEntry) {
-  const message = isV6.value
-    ? `確定要取消 ${entry.address} 的指派？取消後該位址將自登錄清單移除。`
-    : `確定要取消 ${entry.address} 的指派？取消後該位址回到「可用」。`;
-  // 回收防呆：附上該位址的最後可見與最後 MAC（僅提醒、不阻擋；見票 08）。
-  $q.dialog({
-    title: "取消指派",
-    message: `${message}<br>${cancelAssignmentHint(entry)}`,
-    html: true,
-    cancel: true,
-    persistent: true
-  }).onOk(() => {
-    void cancel(entry);
-  });
-}
+/** 丟棄過期回應：快速切換網段時前一個網段請求可能較晚回來（見票 24）。 */
+let subnetLoadToken = 0;
 
-async function cancel(entry: IpEntry) {
+/**
+ * 載入目前網段並重刷 IP 清單；失敗清空清單並提示。
+ * 側欄切換網段時路由僅換參數、元件不會重建，由下方 watch 再呼叫本函式（見票 24）。
+ */
+async function loadSubnet() {
+  const token = ++subnetLoadToken;
   try {
-    const result = await cancelAssignment(subnetId, entry.address);
-    notifyKeaSync($q, result.kea_sync);
-    $q.notify({ type: "positive", message: "已取消指派" });
-    await fetchIps();
+    const loaded = await fetchSubnet(subnetId.value);
+    if (token !== subnetLoadToken) {
+      return;
+    }
+    subnet.value = loaded;
   } catch (cause) {
-    $q.notify({ type: "negative", message: messageOf(cause) });
-  }
-}
-
-onMounted(async () => {
-  try {
-    subnet.value = await fetchSubnet(subnetId);
-  } catch (cause) {
+    if (token !== subnetLoadToken) {
+      return;
+    }
+    subnet.value = null;
+    ips.value = [];
+    pagination.value.rowsNumber = 0;
     $q.notify({ type: "negative", message: messageOf(cause) });
     return;
   }
 
   void fetchIps();
+}
+
+onMounted(() => {
+  void loadSubnet();
 });
+
+// 側欄快速入口切換到另一網段（/subnets/:id/ips 同一路由）：重設篩選與分頁後重載
+watch(
+  () => route.params.id,
+  (id, oldId) => {
+    if (id === oldId) {
+      return;
+    }
+    const next = Number(id);
+    // 離開網段頁時（無 id）不觸發重載
+    if (!Number.isInteger(next) || next <= 0) {
+      return;
+    }
+    subnet.value = null;
+    ips.value = [];
+    filters.value = { q: "", status: null, observed: null };
+    pagination.value.page = 1;
+    void loadSubnet();
+  }
+);
 </script>
 
 <style scoped>
