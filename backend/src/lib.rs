@@ -41,6 +41,9 @@ pub struct AppState {
     /// 探索掃描每秒最多送出的探測數（`OBSERVATION_DISCOVERY_RATE_PPS`；
     /// 手動探索路徑用，預設 1000；見票 05）。
     pub discovery_rate_pps: u32,
+    /// 探索掃描時被動 ARP 監聽窗長秒數（`OBSERVATION_PASSIVE_WINDOW_SECS`；
+    /// 0＝停用；手動與排程探索用，預設 60；見票 01、ADR-0017）。
+    pub passive_window_secs: u64,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
             kea: None,
             prober: Arc::new(SystemProber::new()),
             discovery_rate_pps: 1_000,
+            passive_window_secs: 60,
         }
     }
 
@@ -69,6 +73,12 @@ impl AppState {
     /// 設定探索掃描速率上限（正式啟動帶入設定；測試可覆寫，見票 05）。
     pub fn with_discovery_rate_pps(mut self, rate_pps: u32) -> Self {
         self.discovery_rate_pps = rate_pps;
+        self
+    }
+
+    /// 設定探索時被動監聽窗長秒數（正式啟動帶入設定；測試可覆寫，見票 01）。
+    pub fn with_passive_window_secs(mut self, window_secs: u64) -> Self {
+        self.passive_window_secs = window_secs;
         self
     }
 }

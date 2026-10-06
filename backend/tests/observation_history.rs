@@ -44,6 +44,15 @@ impl Prober for StubProber {
     fn probe(&self, _subnet: &Subnet, _targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, String)> {
         Vec::new()
     }
+
+    /// 本檔不測被動監聽；固定回空。
+    fn passive_observe(
+        &self,
+        _subnet: &Subnet,
+        _window: std::time::Duration,
+    ) -> Vec<(Ipv4Addr, String)> {
+        Vec::new()
+    }
 }
 
 /// 建立測試資料庫並套用 migrations。

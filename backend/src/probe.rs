@@ -1,12 +1,14 @@
-//! 探測邊界：本機同 L2 判定與 ARP 探測（見 spec §探測邊界、ADR-0015）。
+//! 探測邊界：本機同 L2 判定、ARP 探測與被動監聽（見 spec §探測邊界、
+//! ADR-0015、ADR-0017）。
 //!
 //! [`Prober`] 以 `Arc<dyn Prober + Send + Sync>` 掛在 [`crate::AppState`]，
 //! 測試注入 stub，任何碰真實網路者不進自動測試。實作策略（見 ADR-0015）：
 //!
 //! - `raw`：Linux `AF_PACKET` raw socket 自建／解析 ARP 框架（僅依賴 `libc`，
-//!   不依賴 libpcap）；需 `CAP_NET_RAW`。
+//!   不依賴 libpcap）；需 `CAP_NET_RAW`。被動監聽（[`Prober::passive_observe`]）
+//!   同樣只在 raw 路徑可用。
 //! - `unprivileged`：對目標丟 UDP 觸發 kernel ARP 解析，再讀 `/proc/net/arp`
-//!   （重用 [`crate::peer::mac_from_arp_table`]）。
+//!   （重用 [`crate::peer::mac_from_arp_table`]）；無法被動監聽，回空集合。
 //! - `auto`（預設）：先 raw；遇權限問題（EPERM／EACCES）或環境不可用時記錄
 //!   一次警告並降級 unprivileged。
 
@@ -58,6 +60,17 @@ pub trait Prober: Send + Sync {
     /// 回傳（位址、正規化小寫 MAC）；未回應者不出現。阻塞式；呼叫端以
     /// `spawn_blocking` 執行（見 [`crate::observation::run_quick`]）。
     fn probe(&self, subnet: &Subnet, targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, Mac)>;
+
+    /// 被動監聽 `window` 期間該網段介面上的 ARP sender（見 ADR-0017）。
+    ///
+    /// 只收不送：解析 opcode 1（request）與 2（reply）的 sender，排除
+    /// `0.0.0.0`、multicast／broadcast 與本機介面自身位址／MAC。回傳窗內
+    /// 全部合法 sender，**不去重、不濾 CIDR**（CIDR 過濾由服務層做，可測）。
+    ///
+    /// 只有 raw（含 `auto` 的 raw 路徑）能監聽；unprivileged 與降級一律回
+    /// 空集合。阻塞式；呼叫端以 `spawn_blocking` 執行（見
+    /// [`crate::observation::run_discovery`]）。
+    fn passive_observe(&self, subnet: &Subnet, window: Duration) -> Vec<(Ipv4Addr, Mac)>;
 }
 
 /// raw 模式的 ARP 回覆窗硬上限；送出全部請求後被動收集。
@@ -77,6 +90,8 @@ pub struct SystemProber {
     mode: ProbeMode,
     /// 降級警告只記一次，避免每輪掃描洗版。
     fallback_warned: AtomicBool,
+    /// 被動監聽不可用的警告只記一次（見 [`Prober::passive_observe`]）。
+    passive_warned: AtomicBool,
 }
 
 impl SystemProber {
@@ -89,6 +104,7 @@ impl SystemProber {
         Self {
             mode,
             fallback_warned: AtomicBool::new(false),
+            passive_warned: AtomicBool::new(false),
         }
     }
 
@@ -98,6 +114,14 @@ impl SystemProber {
             return;
         }
         tracing::warn!(reason = %reason, "raw ARP 不可用，改用零權限降級模式（UDP 觸發＋/proc/net/arp）");
+    }
+
+    /// 被動監聽不可用的警告僅記錄一次（unprivileged 為預期狀態，不警告）。
+    fn warn_passive_unavailable_once(&self, reason: &RawProbeError) {
+        if self.passive_warned.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        tracing::warn!(reason = %reason, "被動 ARP 監聽不可用，本次略過網段外觀測（需 raw 模式與 CAP_NET_RAW）");
     }
 }
 
@@ -130,6 +154,24 @@ impl Prober for SystemProber {
                     unprivileged_probe(targets)
                 }
             },
+        }
+    }
+
+    fn passive_observe(&self, subnet: &Subnet, window: Duration) -> Vec<(Ipv4Addr, Mac)> {
+        if window.is_zero() {
+            return Vec::new(); // 窗長 0＝停用（服務層通常已略過呼叫）
+        }
+
+        match self.mode {
+            ProbeMode::Raw | ProbeMode::Auto => match raw_passive_observe(subnet, window) {
+                Ok(senders) => senders,
+                Err(error) => {
+                    self.warn_passive_unavailable_once(&error);
+                    Vec::new()
+                }
+            },
+            // 零權限模式無法被動監聽（見 ADR-0017 §降級誠實）。
+            ProbeMode::Unprivileged => Vec::new(),
         }
     }
 }
@@ -269,10 +311,10 @@ pub fn build_arp_request(
     Some(frame)
 }
 
-/// 解析 ARP 回覆框架（純函式）；非 ARP 回覆或格式不符回 `None`。
+/// 解析 ARP 框架的共用欄位（純函式）；非 ARP 或格式不符回 `None`。
 ///
-/// 回傳（sender protocol address、sender hardware address）。
-pub fn parse_arp_reply(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
+/// 回傳（opcode、sender protocol address、sender hardware address）。
+fn parse_arp_frame(frame: &[u8]) -> Option<(u16, Ipv4Addr, Mac)> {
     // Ethernet 標頭 14 ＋ ARP（IPv4）28。
     if frame.len() < 42 {
         return None;
@@ -288,13 +330,52 @@ pub fn parse_arp_reply(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
     if arp[4] != 6 || arp[5] != 4 {
         return None; // 非預期長度
     }
-    if u16::from_be_bytes([arp[6], arp[7]]) != 2 {
-        return None; // 僅解析回覆（opcode 2）
-    }
 
+    let opcode = u16::from_be_bytes([arp[6], arp[7]]);
     let sender_mac = format_mac(&arp[8..14]);
     let sender_ip = Ipv4Addr::new(arp[14], arp[15], arp[16], arp[17]);
-    Some((sender_ip, sender_mac))
+    Some((opcode, sender_ip, sender_mac))
+}
+
+/// 解析 ARP 回覆框架（純函式）；非 ARP 回覆（opcode 2）或格式不符回 `None`。
+///
+/// 回傳（sender protocol address、sender hardware address）。主動探測專用；
+/// 被動監聽請用 [`parse_arp_sender`]。
+pub fn parse_arp_reply(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
+    match parse_arp_frame(frame)? {
+        (2, sender_ip, sender_mac) => Some((sender_ip, sender_mac)),
+        _ => None,
+    }
+}
+
+/// 解析 ARP request（opcode 1）／reply（opcode 2）的 sender（純函式）。
+///
+/// 被動監聽用：兩種 opcode 的 sender IP／MAC 都是「有人在用該位址」的證據；
+/// 其他 opcode 或格式不符回 `None`。
+pub fn parse_arp_sender(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
+    match parse_arp_frame(frame)? {
+        (1 | 2, sender_ip, sender_mac) => Some((sender_ip, sender_mac)),
+        _ => None,
+    }
+}
+
+/// 被動 sender 是否可記錄（純函式；見 ADR-0017）。
+///
+/// 排除 `0.0.0.0`、multicast、有限廣播（`255.255.255.255` 與網段廣播）以及
+/// 本機介面自身的位址／MAC。MAC 比較不分大小寫。
+fn valid_passive_sender(
+    address: Ipv4Addr,
+    mac: &str,
+    local_ip: Ipv4Addr,
+    local_mac: &str,
+    network_broadcast: Ipv4Addr,
+) -> bool {
+    !address.is_unspecified()
+        && !address.is_multicast()
+        && !address.is_broadcast()
+        && address != network_broadcast
+        && address != local_ip
+        && !mac.eq_ignore_ascii_case(local_mac)
 }
 
 /// 讀取介面 MAC（`/sys/class/net/<if>/address`）；正規化失敗回 `None`。
@@ -544,6 +625,96 @@ fn collect_replies(
     responses
 }
 
+/// 收集窗內 ARP 的合法 sender（只收不送；見 ADR-0017）。
+///
+/// 迴圈輪詢 socket（SO_RCVTIMEO 見 [`open_arp_socket`]）直到窗長耗盡；每幀
+/// 以 [`parse_arp_sender`] 解析並經 [`valid_passive_sender`] 過濾。回傳全部
+/// 合法 sender，不去重、不濾 CIDR。
+#[cfg(target_os = "linux")]
+fn collect_senders(
+    socket: &RawSocket,
+    window: Duration,
+    local_ip: Ipv4Addr,
+    local_mac: &str,
+    network_broadcast: Ipv4Addr,
+) -> Vec<(Ipv4Addr, Mac)> {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let mut buffer = [0u8; 2048];
+    let mut senders: Vec<(Ipv4Addr, Mac)> = Vec::new();
+
+    while started.elapsed() < window {
+        // SAFETY: buffer 為本函式持有的可寫緩衝區；fd 有效。
+        let received = unsafe {
+            libc::recv(
+                socket.fd,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+                0,
+            )
+        };
+        if received < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                continue; // 等待窗逾時：回到迴圈開頭判斷窗長
+            }
+            break;
+        }
+        if received == 0 {
+            continue;
+        }
+
+        let frame = &buffer[..received as usize];
+        if let Some((address, mac)) = parse_arp_sender(frame)
+            && valid_passive_sender(address, &mac, local_ip, local_mac, network_broadcast)
+        {
+            senders.push((address, mac));
+        }
+    }
+
+    senders
+}
+
+/// raw 模式被動監聽：在網段介面上開 ARP socket 只收不送（見 ADR-0017）。
+#[cfg(target_os = "linux")]
+fn raw_passive_observe(
+    subnet: &Subnet,
+    window: Duration,
+) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
+    let network: Ipv4Net = subnet
+        .cidr
+        .parse()
+        .map_err(|_| RawProbeError::Unusable("網段 CIDR 非 IPv4".to_string()))?;
+    let (interface, local_ip) = local_interface(&network)
+        .ok_or_else(|| RawProbeError::Unusable("找不到落在網段內的本機介面".to_string()))?;
+    let local_mac = read_interface_mac(&interface)
+        .ok_or_else(|| RawProbeError::Unusable(format!("讀取介面 {interface} MAC 失敗")))?;
+
+    let socket = open_arp_socket(&interface)?;
+    Ok(collect_senders(
+        &socket,
+        window,
+        local_ip,
+        &local_mac,
+        network.broadcast(),
+    ))
+}
+
+/// 非 Linux：raw 一律不可用（見 ADR-0015）；被動監聽回空。
+#[cfg(not(target_os = "linux"))]
+fn raw_passive_observe(
+    _subnet: &Subnet,
+    _window: Duration,
+) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
+    Err(RawProbeError::Unusable(
+        "非 Linux 不支援 raw ARP 被動監聽".to_string(),
+    ))
+}
+
 /// raw 模式探測；Linux 以 `AF_PACKET` 自建 ARP 請求並收集回覆。
 #[cfg(target_os = "linux")]
 fn raw_probe(subnet: &Subnet, targets: &[Ipv4Addr]) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
@@ -787,5 +958,145 @@ mod tests {
         let mut bad_length = reply.clone();
         bad_length[18] = 8; // hlen 非 6
         assert_eq!(parse_arp_reply(&bad_length), None, "硬體長度不符");
+    }
+
+    #[test]
+    fn parse_arp_sender_accepts_requests_and_replies() {
+        let request = build_arp_request("0A:0B:0C:0D:0E:01", addr("10.0.0.2"), addr("10.0.0.7"))
+            .expect("合法 MAC");
+        assert_eq!(
+            parse_arp_sender(&request),
+            Some((addr("10.0.0.2"), "0a:0b:0c:0d:0e:01".to_string())),
+            "request（opcode 1）的 sender 是有效證據"
+        );
+
+        let reply = reply_frame(
+            "0A:0B:0C:0D:0E:02",
+            addr("10.0.0.7"),
+            "aa:bb:cc:dd:ee:01",
+            addr("10.0.0.2"),
+        );
+        assert_eq!(
+            parse_arp_sender(&reply),
+            Some((addr("10.0.0.7"), "0a:0b:0c:0d:0e:02".to_string())),
+            "reply（opcode 2）的 sender 解析相同"
+        );
+    }
+
+    #[test]
+    fn parse_arp_sender_rejects_foreign_and_malformed_frames() {
+        let request = build_arp_request("aa:bb:cc:dd:ee:01", addr("10.0.0.2"), addr("10.0.0.7"))
+            .expect("合法 MAC");
+
+        assert_eq!(parse_arp_sender(&request[..41]), None, "長度不足");
+        assert_eq!(parse_arp_sender(&[]), None);
+
+        let mut non_arp = request.clone();
+        non_arp[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        assert_eq!(parse_arp_sender(&non_arp), None, "非 ARP EtherType");
+
+        let mut bad_length = request.clone();
+        bad_length[18] = 8; // hlen 非 6
+        assert_eq!(parse_arp_sender(&bad_length), None, "硬體長度不符");
+
+        let mut rarp = request.clone();
+        rarp[20..22].copy_from_slice(&3u16.to_be_bytes()); // opcode 3（RARP request）
+        assert_eq!(parse_arp_sender(&rarp), None, "只接受 opcode 1／2");
+    }
+
+    #[test]
+    fn valid_passive_sender_excludes_invalid_multicast_broadcast_and_local() {
+        let local_ip = addr("10.0.0.2");
+        let local_mac = "aa:bb:cc:dd:ee:02";
+        let broadcast = addr("10.0.0.255");
+
+        assert!(
+            valid_passive_sender(
+                addr("10.0.9.9"),
+                "aa:bb:cc:dd:ee:99",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "一般 sender 合法"
+        );
+        assert!(
+            !valid_passive_sender(
+                addr("0.0.0.0"),
+                "aa:bb:cc:dd:ee:99",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "排除 0.0.0.0（ARP probe）"
+        );
+        assert!(
+            !valid_passive_sender(
+                addr("224.0.0.1"),
+                "aa:bb:cc:dd:ee:99",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "排除 multicast"
+        );
+        assert!(
+            !valid_passive_sender(
+                addr("255.255.255.255"),
+                "aa:bb:cc:dd:ee:99",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "排除有限廣播"
+        );
+        assert!(
+            !valid_passive_sender(
+                broadcast,
+                "aa:bb:cc:dd:ee:99",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "排除網段廣播"
+        );
+        assert!(
+            !valid_passive_sender(
+                local_ip,
+                "aa:bb:cc:dd:ee:99",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "排除本機位址"
+        );
+        assert!(
+            !valid_passive_sender(
+                addr("10.0.9.9"),
+                "AA:BB:CC:DD:EE:02",
+                local_ip,
+                local_mac,
+                broadcast
+            ),
+            "排除本機 MAC（不分大小寫）"
+        );
+    }
+
+    #[test]
+    fn passive_observe_is_empty_for_unprivileged_and_zero_window() {
+        let unprivileged = SystemProber::with_mode(ProbeMode::Unprivileged);
+        assert!(
+            unprivileged
+                .passive_observe(&subnet("10.0.0.0/29"), Duration::from_secs(1))
+                .is_empty(),
+            "零權限模式無被動資料"
+        );
+
+        let raw = SystemProber::with_mode(ProbeMode::Raw);
+        assert!(
+            raw.passive_observe(&subnet("10.0.0.0/29"), Duration::ZERO)
+                .is_empty(),
+            "窗長 0 不得開 socket"
+        );
     }
 }

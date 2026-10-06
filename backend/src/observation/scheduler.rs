@@ -56,8 +56,9 @@ fn discovery_interval(subnet: &Subnet, default_secs: u64) -> TimeDelta {
 
 /// 啟動背景排程器；回傳 task handle 供 `main` 持有／中止。
 ///
-/// 以 `state.kea.as_ref()`、`state.discovery_rate_pps` 與 `Utc::now()` 呼叫
-/// [`run_quick`]／[`run_discovery`]，與手動掃描同一服務路徑；清理沿用
+/// 以 `state.kea.as_ref()`、`state.discovery_rate_pps`、
+/// `state.passive_window_secs` 與 `Utc::now()` 呼叫 [`run_quick`]／
+/// [`run_discovery`]，與手動掃描同一服務路徑；清理沿用
 /// `retention_days`（`OBSERVATION_RETENTION_DAYS`）；探索全站預設間隔為
 /// `discovery_interval_secs`（`OBSERVATION_DISCOVERY_INTERVAL_SECS`）。
 pub fn spawn_scheduler(
@@ -153,6 +154,7 @@ pub fn spawn_scheduler(
                     state.kea.as_ref(),
                     &subnet,
                     state.discovery_rate_pps,
+                    Duration::from_secs(state.passive_window_secs),
                     now,
                 )
                 .await
@@ -163,6 +165,7 @@ pub fn spawn_scheduler(
                             subnet_id = subnet.id,
                             targets = report.targets,
                             seen = report.seen,
+                            passive_seen = report.passive_seen,
                             duration_ms = report.duration_ms,
                             "探索掃描完成"
                         );

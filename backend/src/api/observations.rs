@@ -1,7 +1,7 @@
 //! `/api/v1` 觀測歷史路由（見票 06、spec §HTTP API）。
 //!
-//! 唯讀端點：IP 歷史、MAC 歷史與單一 IP 歷史 CSV 匯出；宣告資料完全不變
-//! （見 ADR-0014）。彙總規則見 [`crate::observation`]。
+//! 唯讀端點：IP 歷史、MAC 歷史、單一 IP 歷史 CSV 匯出與網段外觀測清單；
+//! 宣告資料完全不變（見 ADR-0014）。彙總規則見 [`crate::observation`]。
 
 use std::net::IpAddr;
 
@@ -16,7 +16,7 @@ use chrono::Local;
 
 use crate::AppState;
 use crate::api::{ApiError, encode_filename};
-use crate::observation::{self, IpHistory, MacHistory};
+use crate::observation::{self, IpHistory, MacHistory, UnmanagedList};
 use crate::probe::normalize_mac;
 use crate::subnets::{self, Subnet};
 
@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
             get(export_ip_history),
         )
         .route("/observations/mac/{mac}", get(get_mac_history))
+        .route("/observations/unmanaged", get(get_unmanaged_observations))
 }
 
 /// 讀取網段內某位址的觀測歷史：現況＋事件（新到舊）＋用過的 MAC。
@@ -93,6 +94,16 @@ async fn get_mac_history(
 
     let history = observation::mac_history(&state.db, &normalized).await?;
     Ok(Json(history))
+}
+
+/// 列出被動監聽到的網段外位址（見票 01、ADR-0017）：`out_of_subnet = 1`
+/// 的現況列，last_seen 新到舊，附探測網段、首見與 MAC 資產連結。唯讀；
+/// 資料只由探索掃描產生。
+async fn get_unmanaged_observations(
+    State(state): State<AppState>,
+) -> Result<Json<UnmanagedList>, ApiError> {
+    let list = observation::unmanaged_observations(&state.db).await?;
+    Ok(Json(list))
 }
 
 /// 讀取網段；不存在回 404（歷史端點的共同前提）。

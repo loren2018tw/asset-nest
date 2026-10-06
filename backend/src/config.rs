@@ -13,6 +13,8 @@ const DEFAULT_RETENTION_DAYS: u32 = 365;
 const DEFAULT_DISCOVERY_INTERVAL_SECS: u64 = 86_400;
 /// `OBSERVATION_DISCOVERY_RATE_PPS` 的預設值（見票 05、spec §環境設定）。
 const DEFAULT_DISCOVERY_RATE_PPS: u32 = 1_000;
+/// `OBSERVATION_PASSIVE_WINDOW_SECS` 的預設值（見票 01、ADR-0017）。
+const DEFAULT_PASSIVE_WINDOW_SECS: u64 = 60;
 
 /// 後端啟動設定（見 `.env.example`）。
 #[derive(Debug, Clone)]
@@ -41,6 +43,9 @@ pub struct Config {
     /// 探索掃描每秒最多送出的探測數；`OBSERVATION_DISCOVERY_RATE_PPS`
     /// （正整數，預設 1000）。
     pub observation_discovery_rate_pps: u32,
+    /// 探索掃描時被動 ARP 監聽窗長秒數；`OBSERVATION_PASSIVE_WINDOW_SECS`
+    /// （非負整數，預設 60；0＝停用；見票 01、ADR-0017）。
+    pub observation_passive_window_secs: u64,
 }
 
 impl Config {
@@ -93,6 +98,12 @@ impl Config {
             Err(_) => DEFAULT_DISCOVERY_RATE_PPS,
         };
 
+        let observation_passive_window_secs = match std::env::var("OBSERVATION_PASSIVE_WINDOW_SECS")
+        {
+            Ok(raw) => parse_passive_window_secs(&raw)?,
+            Err(_) => DEFAULT_PASSIVE_WINDOW_SECS,
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -104,6 +115,7 @@ impl Config {
             observation_retention_days,
             observation_discovery_interval_secs,
             observation_discovery_rate_pps,
+            observation_passive_window_secs,
         })
     }
 }
@@ -141,6 +153,15 @@ fn parse_discovery_rate_pps(raw: &str) -> anyhow::Result<u32> {
         anyhow::bail!("OBSERVATION_DISCOVERY_RATE_PPS 須為正整數（收到 0）");
     }
     Ok(rate)
+}
+
+/// 解析 `OBSERVATION_PASSIVE_WINDOW_SECS`：須為非負整數秒（0＝停用），缺值由呼叫端套用預設。
+fn parse_passive_window_secs(raw: &str) -> anyhow::Result<u64> {
+    raw.trim().parse().map_err(|_| {
+        anyhow::anyhow!(
+            "OBSERVATION_PASSIVE_WINDOW_SECS 格式錯誤：{raw}（須為非負整數秒數，0＝停用，例：60）"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -207,5 +228,31 @@ mod tests {
     fn discovery_defaults_are_daily_and_1000_pps() {
         assert_eq!(DEFAULT_DISCOVERY_INTERVAL_SECS, 86_400);
         assert_eq!(DEFAULT_DISCOVERY_RATE_PPS, 1_000);
+    }
+
+    #[test]
+    fn passive_window_accepts_non_negative_integers_and_rejects_invalid() {
+        assert_eq!(
+            parse_passive_window_secs("60").expect("合法窗長"),
+            60,
+            "一般秒數"
+        );
+        assert_eq!(parse_passive_window_secs("0").expect("0＝停用"), 0);
+        assert_eq!(parse_passive_window_secs(" 5 ").expect("容許空白"), 5);
+
+        for invalid in ["-1", "abc", "1.5", ""] {
+            let error = parse_passive_window_secs(invalid)
+                .expect_err(&format!("應拒絕 {invalid:?}"))
+                .to_string();
+            assert!(
+                error.contains("OBSERVATION_PASSIVE_WINDOW_SECS"),
+                "錯誤訊息須指明變數（{invalid:?}）：{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn passive_window_default_is_60() {
+        assert_eq!(DEFAULT_PASSIVE_WINDOW_SECS, 60);
     }
 }

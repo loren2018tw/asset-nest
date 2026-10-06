@@ -174,7 +174,8 @@ struct SweepInput {
 ///
 /// 前提由服務驗證：v4、已開觀測、本機同 L2（`discovery` 另需已開探索），
 /// 否則回 400 明確訊息；未知模式亦回 400。探索速率上限取自
-/// `state.discovery_rate_pps`（`OBSERVATION_DISCOVERY_RATE_PPS`）。
+/// `state.discovery_rate_pps`（`OBSERVATION_DISCOVERY_RATE_PPS`）、被動
+/// 監聽窗長取自 `state.passive_window_secs`（`OBSERVATION_PASSIVE_WINDOW_SECS`）。
 async fn sweep_subnet(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
@@ -220,6 +221,7 @@ async fn sweep_subnet(
                 state.kea.as_ref(),
                 &subnet,
                 state.discovery_rate_pps,
+                std::time::Duration::from_secs(state.passive_window_secs),
                 Utc::now(),
             )
             .await?

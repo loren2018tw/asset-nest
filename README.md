@@ -14,6 +14,7 @@ Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、
 - ARP 探測預設 `auto`：先 raw（Linux `AF_PACKET`；systemd 單元已帶 `CAP_NET_RAW`），遇權限問題自動降級為零權限模式（UDP 觸發 kernel ARP 解析後讀 `/proc/net/arp`），降級只記一次警告。
 - 觀測事件預設保留 365 天，每日自動清理過期事件；只影響歷史深度，**現況與宣告資料（指派／保留）完全不受影響**。
 - **探索掃描**（每個網段可另開）：對網段**全部 host 位址**限速探測（上限為每秒 `OBSERVATION_DISCOVERY_RATE_PPS` 個），找出未指派卻實際在線的未知設備與未登錄 MAC；網段設定「探索間隔（分鐘）」（`discovery_interval_minutes`，留空＝全站預設 `OBSERVATION_DISCOVERY_INTERVAL_SECS`），網段畫面顯示上次探索時間，亦可按「立即探索」手動觸發。
+- **網段外觀測**：探索掃描時，在被探測網段的介面上**被動監聽 ARP**（只收不送、與主動探測並行），把 sender 位址落在該網段 CIDR 外者記為「網段外觀測」（來源 `arp_passive`，旗標 `out_of_subnet`），可發現同 L2 但不在受管網段內的設備（錯設定、私接、其他網段延伸）。監聽窗長為 `OBSERVATION_PASSIVE_WINDOW_SECS`（預設 60 秒，0＝停用）；命中率取決於設備是否在窗內發 ARP（閒置設備可能不出現）。**只有 raw 模式（含 `auto` 的 raw 路徑）有資料**，unprivileged 降級模式無法被動監聽；記錄歸屬於被探測的網段，同一 L2 多個受管網段可能各有一列。快速掃描不做被動監聽。
 - 相關環境變數（完整說明見 `.env.example`）：
 
 | 變數 | 預設 | 說明 |
@@ -22,6 +23,7 @@ Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、
 | `OBSERVATION_RETENTION_DAYS` | `365` | 事件保留天數（正整數） |
 | `OBSERVATION_DISCOVERY_INTERVAL_SECS` | `86400` | 探索掃描全站預設間隔秒數（正整數；網段可覆寫） |
 | `OBSERVATION_DISCOVERY_RATE_PPS` | `1000` | 探索掃描每秒最多探測位址數（正整數） |
+| `OBSERVATION_PASSIVE_WINDOW_SECS` | `60` | 探索時被動 ARP 監聽窗長秒數（非負整數；0＝停用） |
 
 ## 環境需求
 

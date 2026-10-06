@@ -46,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
         .with_prober(Arc::new(SystemProber::with_mode(
             config.observation_probe_mode,
         )))
-        .with_discovery_rate_pps(config.observation_discovery_rate_pps);
+        .with_discovery_rate_pps(config.observation_discovery_rate_pps)
+        .with_passive_window_secs(config.observation_passive_window_secs);
     if let Some(url) = config.kea_api_url.clone() {
         let mut client = kea::http::Client::new(url);
         if let Some(username) = config.kea_api_username.clone() {

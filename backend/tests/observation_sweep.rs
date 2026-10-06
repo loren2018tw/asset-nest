@@ -66,6 +66,15 @@ impl Prober for StubProber {
             .cloned()
             .collect()
     }
+
+    /// 本檔不測被動監聽；固定回空（被動語意見 `observation_passive.rs`）。
+    fn passive_observe(
+        &self,
+        _subnet: &Subnet,
+        _window: std::time::Duration,
+    ) -> Vec<(Ipv4Addr, String)> {
+        Vec::new()
+    }
 }
 
 /// 建立測試資料庫並套用 migrations（領域測試必須先套）。

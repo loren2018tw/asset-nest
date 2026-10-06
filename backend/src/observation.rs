@@ -97,6 +97,29 @@ pub struct MacHistory {
     pub sightings: Vec<MacSighting>,
 }
 
+/// 網段外觀測清單的一列（`GET /api/v1/observations/unmanaged`；見票 01）。
+#[derive(Debug, Serialize)]
+pub struct UnmanagedObservation {
+    pub subnet_id: i64,
+    pub subnet_cidr: String,
+    pub subnet_name: Option<String>,
+    pub address: String,
+    pub mac: Option<String>,
+    /// 該列最早事件時間；事件經保留清理後退化為 `last_seen_at`。
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub source: Option<String>,
+    pub known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset: Option<MacAsset>,
+}
+
+/// 網段外觀測清單回應。
+#[derive(Debug, Serialize)]
+pub struct UnmanagedList {
+    pub items: Vec<UnmanagedObservation>,
+}
+
 /// [`assets_for_macs`] 的查詢列。
 #[derive(Debug, FromRow)]
 struct LinkedMacRow {
@@ -105,6 +128,19 @@ struct LinkedMacRow {
     description: String,
     location: String,
     property_no: Option<String>,
+}
+
+/// [`unmanaged_observations`] 的查詢列。
+#[derive(Debug, FromRow)]
+struct UnmanagedRow {
+    subnet_id: i64,
+    subnet_cidr: String,
+    subnet_name: Option<String>,
+    address: String,
+    mac: Option<String>,
+    first_seen_at: String,
+    last_seen_at: String,
+    source: Option<String>,
 }
 
 /// [`used_macs`] 的中間訊號：同一 MAC 的首見／最後可見／來源。
@@ -148,6 +184,8 @@ pub struct SweepReport {
     pub seen: u64,
     /// 掃描耗時（毫秒；含探測回覆窗、限速等待與寫入）。
     pub duration_ms: u64,
+    /// 本輪寫入的相異網段外位址數（被動監聽；快速掃描固定 0，見票 01）。
+    pub passive_seen: u64,
     /// 僅探索掃描回傳：本次寫入的 `subnets.last_discovery_at`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_discovery_at: Option<String>,
@@ -317,6 +355,66 @@ pub async fn mac_history(pool: &SqlitePool, mac: &str) -> Result<MacHistory, Api
         asset,
         sightings,
     })
+}
+
+/// 讀取網段外觀測清單（見票 01、ADR-0017）：`out_of_subnet = 1` 的現況列，
+/// last_seen 新到舊（同時間依網段、位址）。
+///
+/// - `first_seen_at`＝該 `(subnet_id, address)` 最早事件時間；事件經保留清理
+///   後退化為 `last_seen_at`（現況不受清理影響）。
+/// - `known`／`asset` 比照 MAC 歷史：MAC 存在於任一 Interface 即已知，連結
+///   取第一筆命中（不分大小寫）。
+/// - 唯讀；資料只由探索掃描的被動監聽產生。
+pub async fn unmanaged_observations(pool: &SqlitePool) -> Result<UnmanagedList, ApiError> {
+    let rows: Vec<UnmanagedRow> = sqlx::query_as(
+        "SELECT p.subnet_id,
+                s.cidr AS subnet_cidr,
+                s.name AS subnet_name,
+                p.address,
+                p.last_seen_mac AS mac,
+                p.last_seen_at AS last_seen_at,
+                p.last_seen_source AS source,
+                COALESCE(
+                    (SELECT MIN(e.observed_at)
+                       FROM observation_event e
+                      WHERE e.subnet_id = p.subnet_id AND e.address = p.address),
+                    p.last_seen_at
+                ) AS first_seen_at
+           FROM ip_presence p
+           JOIN subnets s ON s.id = p.subnet_id
+          WHERE p.out_of_subnet = 1
+          ORDER BY p.last_seen_at DESC, p.subnet_id ASC, p.address ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| ApiError::internal("讀取網段外觀測清單失敗", error))?;
+
+    let macs: Vec<String> = rows.iter().filter_map(|row| row.mac.clone()).collect();
+    let assets = assets_for_macs(pool, &macs).await?;
+
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let asset = row
+                .mac
+                .as_deref()
+                .and_then(|mac| assets.get(&mac.to_ascii_lowercase()).cloned());
+            UnmanagedObservation {
+                subnet_id: row.subnet_id,
+                subnet_cidr: row.subnet_cidr,
+                subnet_name: row.subnet_name,
+                address: row.address,
+                mac: row.mac,
+                first_seen_at: row.first_seen_at,
+                last_seen_at: row.last_seen_at,
+                source: row.source,
+                known: asset.is_some(),
+                asset,
+            }
+        })
+        .collect();
+
+    Ok(UnmanagedList { items })
 }
 
 /// 產生單一 IP 觀測歷史匯出 CSV（UTF-8 BOM＋標題列；見票 06、spec §HTTP API）。
@@ -573,7 +671,16 @@ pub async fn run_quick(
             .map_err(|error| ApiError::internal("快速掃描工作失敗", error))?
     };
 
-    apply_results(pool, subnet.id, &targets, &responses, &lease_signals, now).await?;
+    apply_results(
+        pool,
+        subnet.id,
+        &targets,
+        &responses,
+        &lease_signals,
+        &[],
+        now,
+    )
+    .await?;
 
     // seen＝本輪有證據的相異位址（ARP 回應或有效租約）。
     let mut seen: HashSet<Ipv4Addr> = responses
@@ -593,6 +700,7 @@ pub async fn run_quick(
         targets: targets.len() as u64,
         seen: seen.len() as u64,
         duration_ms: started.elapsed().as_millis() as u64,
+        passive_seen: 0,
         last_discovery_at: None,
     })
 }
@@ -605,6 +713,10 @@ pub async fn run_quick(
 ///   `rate_pps` 分批探測，批與批的開始時間相距約 1 秒（只補足探測耗時後
 ///   的剩餘時間；最後一批不等待），使探測起始速率接近每秒 `rate_pps` 個
 ///   請求。
+/// - 被動監聽（見票 01、ADR-0017）：`passive_window` 非 0 時先以
+///   `spawn_blocking` 啟動 [`Prober::passive_observe`]，與主動批次並行，
+///   最後收割；只保留 CIDR **外** 的 sender，以來源 `arp_passive`、
+///   `out_of_subnet = 1` 寫入同一交易（時間 `now`）。窗長 0＝停用。
 /// - 寫入語意同 [`run_quick`]（Kea 租約先寫、ARP 後寫，latest-wins），另：
 ///   - 僅**已指派**目標（含未回應者）upsert `last_checked_at`；
 ///     未指派且未回應者不得建立 `ip_presence` 列。
@@ -615,6 +727,7 @@ pub async fn run_discovery(
     kea: Option<&KeaClient>,
     subnet: &Subnet,
     rate_pps: u32,
+    passive_window: Duration,
     now: DateTime<Utc>,
 ) -> Result<SweepReport, ApiError> {
     validate_discovery(subnet, prober.as_ref())?;
@@ -629,7 +742,33 @@ pub async fn run_discovery(
     let checked_targets = assigned_targets(pool, subnet).await?;
     let lease_signals = lease_signals(kea, subnet).await;
 
+    // 被動監聽與主動探測並行：先開 listener，主動批次照跑，最後收割。
+    let passive_handle = if passive_window.is_zero() {
+        None
+    } else {
+        let passive_prober = Arc::clone(&prober);
+        let passive_subnet = subnet.clone();
+        Some(tokio::task::spawn_blocking(move || {
+            passive_prober.passive_observe(&passive_subnet, passive_window)
+        }))
+    };
+
     let responses = probe_rate_limited(prober, subnet, &targets, rate_pps).await?;
+
+    let passive_senders = match passive_handle {
+        Some(handle) => handle
+            .await
+            .map_err(|error| ApiError::internal("被動觀測工作失敗", error))?,
+        None => Vec::new(),
+    };
+    // CIDR 過濾在服務層（探測邊界不濾）；passive_seen 只計實際寫入的相異位址。
+    let passive_outside = out_of_subnet_senders(&network, &passive_senders);
+    let passive_seen = passive_outside
+        .iter()
+        .filter(|(_, mac)| crate::probe::normalize_mac(mac).is_some())
+        .map(|(address, _)| *address)
+        .collect::<HashSet<_>>()
+        .len() as u64;
 
     apply_results(
         pool,
@@ -637,6 +776,7 @@ pub async fn run_discovery(
         &checked_targets,
         &responses,
         &lease_signals,
+        &passive_outside,
         now,
     )
     .await?;
@@ -662,8 +802,21 @@ pub async fn run_discovery(
         targets: targets.len() as u64,
         seen: seen.len() as u64,
         duration_ms: started.elapsed().as_millis() as u64,
+        passive_seen,
         last_discovery_at: Some(last_discovery_at),
     })
+}
+
+/// 由被動 sender 篩出網段 CIDR 外者（純函式；見票 01、ADR-0017）。
+///
+/// 探測邊界回傳全部合法 sender；CIDR 過濾由服務層負責，只保留
+/// `!network.contains(address)`（含網段位址與廣播皆視為網段內）。
+fn out_of_subnet_senders(network: &Ipv4Net, senders: &[(Ipv4Addr, Mac)]) -> Vec<(Ipv4Addr, Mac)> {
+    senders
+        .iter()
+        .filter(|(address, _)| !network.contains(address))
+        .cloned()
+        .collect()
 }
 
 /// 批次間隔的剩餘等待（純函式；見票 05 限速）。
@@ -860,16 +1013,18 @@ async fn assigned_targets(pool: &SqlitePool, subnet: &Subnet) -> Result<Vec<Ipv4
 
 /// 套用一次掃描的結果：`checked_targets` 更新 `last_checked_at`；租約先寫
 /// （其時間可能較舊），ARP 回應後寫，讓同秒時的直接觀測（`arp`）勝出；
-/// 同一交易。
+/// 被動 sender 最後寫（來源 `arp_passive`、`out_of_subnet = 1`）；同一交易。
 ///
 /// 快速掃描傳入全部目標（含僅有租約者）；探索掃描只傳已指派目標，
-/// 未指派未回應者因此不建立現況列（見票 05）。
+/// 未指派未回應者因此不建立現況列（見票 05）。`passive_senders` 已由服務層
+/// 濾為 CIDR 外；快速掃描固定傳空切片（不做被動監聽，見票 01）。
 async fn apply_results(
     pool: &SqlitePool,
     subnet_id: i64,
     checked_targets: &[Ipv4Addr],
     responses: &[(Ipv4Addr, Mac)],
     lease_signals: &[LeaseSignal],
+    passive_senders: &[(Ipv4Addr, Mac)],
     now: DateTime<Utc>,
 ) -> Result<(), ApiError> {
     let now_text = timestamp(now);
@@ -916,6 +1071,23 @@ async fn apply_results(
         )
         .await
         .map_err(|error| ApiError::internal("寫入觀測現況失敗", error))?;
+    }
+
+    // 被動監聽：只在此路徑寫 `out_of_subnet = 1`（見票 01、ADR-0017）。
+    for (address, mac) in passive_senders {
+        let Some(normalized) = crate::probe::normalize_mac(mac) else {
+            tracing::warn!(mac = %mac, "忽略格式異常的被動 sender MAC");
+            continue;
+        };
+        record_passive_seen(
+            &mut transaction,
+            subnet_id,
+            &address.to_string(),
+            &normalized,
+            &now_text,
+        )
+        .await
+        .map_err(|error| ApiError::internal("寫入網段外觀測現況失敗", error))?;
     }
 
     transaction
@@ -967,6 +1139,9 @@ pub(crate) fn transition_event(previous_mac: Option<&str>, new_mac: &str) -> Opt
 ///
 /// 票 03（Kea 租約來源）以同一介面併入：來源帶 `kea_lease`、時間帶 `cltt`，
 /// 租約位址亦須先納入目標集合（呼叫 [`upsert_checked`] 更新 `last_checked_at`）。
+///
+/// 此路徑**不觸碰** `out_of_subnet`（見票 01、ADR-0017）；被動監聽請用
+/// [`record_passive_seen`]。
 pub(crate) async fn record_seen(
     connection: &mut SqliteConnection,
     subnet_id: i64,
@@ -974,6 +1149,53 @@ pub(crate) async fn record_seen(
     mac: Option<&str>,
     source: &str,
     observed_at: &str,
+) -> sqlx::Result<()> {
+    record_observation(
+        connection,
+        subnet_id,
+        address,
+        mac,
+        source,
+        observed_at,
+        false,
+    )
+    .await
+}
+
+/// 寫入單筆被動監聽「看到」：比照 [`record_seen`]（事件、latest-wins 規則
+/// 相同），並在現況列寫 `out_of_subnet = 1`。
+///
+/// 只有被動監聽路徑寫此欄；其他來源不觸碰，避免同一列在來源間翻轉
+/// （見票 01、ADR-0017）。CIDR 過濾由呼叫端（`run_discovery`）完成。
+async fn record_passive_seen(
+    connection: &mut SqliteConnection,
+    subnet_id: i64,
+    address: &str,
+    mac: &str,
+    observed_at: &str,
+) -> sqlx::Result<()> {
+    record_observation(
+        connection,
+        subnet_id,
+        address,
+        Some(mac),
+        "arp_passive",
+        observed_at,
+        true,
+    )
+    .await
+}
+
+/// [`record_seen`]／[`record_passive_seen`] 的共用實作；`out_of_subnet`
+/// 僅被動路徑為 `true`。
+async fn record_observation(
+    connection: &mut SqliteConnection,
+    subnet_id: i64,
+    address: &str,
+    mac: Option<&str>,
+    source: &str,
+    observed_at: &str,
+    out_of_subnet: bool,
 ) -> sqlx::Result<()> {
     let current: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT last_seen_at, last_seen_mac FROM ip_presence WHERE subnet_id = ? AND address = ?",
@@ -1018,32 +1240,64 @@ pub(crate) async fn record_seen(
             Some((_, previous_mac)) => {
                 // MAC 未提供時保留既有值（無證據不得改寫）。
                 let stored_mac = mac.or(previous_mac.as_deref());
-                sqlx::query(
-                    "UPDATE ip_presence
-                        SET last_seen_at = ?, last_seen_mac = ?, last_seen_source = ?
-                      WHERE subnet_id = ? AND address = ?",
-                )
-                .bind(observed_at)
-                .bind(stored_mac)
-                .bind(source)
-                .bind(subnet_id)
-                .bind(address)
-                .execute(&mut *connection)
-                .await?;
+                if out_of_subnet {
+                    sqlx::query(
+                        "UPDATE ip_presence
+                            SET last_seen_at = ?, last_seen_mac = ?, last_seen_source = ?,
+                                out_of_subnet = 1
+                          WHERE subnet_id = ? AND address = ?",
+                    )
+                    .bind(observed_at)
+                    .bind(stored_mac)
+                    .bind(source)
+                    .bind(subnet_id)
+                    .bind(address)
+                    .execute(&mut *connection)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "UPDATE ip_presence
+                            SET last_seen_at = ?, last_seen_mac = ?, last_seen_source = ?
+                          WHERE subnet_id = ? AND address = ?",
+                    )
+                    .bind(observed_at)
+                    .bind(stored_mac)
+                    .bind(source)
+                    .bind(subnet_id)
+                    .bind(address)
+                    .execute(&mut *connection)
+                    .await?;
+                }
             }
             None => {
-                sqlx::query(
-                    "INSERT INTO ip_presence
-                         (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source)
-                     VALUES (?, ?, ?, ?, ?)",
-                )
-                .bind(subnet_id)
-                .bind(address)
-                .bind(observed_at)
-                .bind(mac)
-                .bind(source)
-                .execute(&mut *connection)
-                .await?;
+                if out_of_subnet {
+                    sqlx::query(
+                        "INSERT INTO ip_presence
+                             (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source,
+                              out_of_subnet)
+                         VALUES (?, ?, ?, ?, ?, 1)",
+                    )
+                    .bind(subnet_id)
+                    .bind(address)
+                    .bind(observed_at)
+                    .bind(mac)
+                    .bind(source)
+                    .execute(&mut *connection)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "INSERT INTO ip_presence
+                             (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source)
+                         VALUES (?, ?, ?, ?, ?)",
+                    )
+                    .bind(subnet_id)
+                    .bind(address)
+                    .bind(observed_at)
+                    .bind(mac)
+                    .bind(source)
+                    .execute(&mut *connection)
+                    .await?;
+                }
             }
         }
     }
@@ -1101,6 +1355,107 @@ mod tests {
             batch_pacing_delay(Duration::from_millis(1_500), interval),
             Duration::ZERO,
             "耗時超過間隔：不再等待"
+        );
+    }
+
+    #[test]
+    fn out_of_subnet_senders_keeps_only_addresses_outside_cidr() {
+        let network: Ipv4Net = "10.0.0.0/29".parse().expect("合法網段");
+        let mac = |suffix: &str| format!("aa:bb:cc:dd:ee:{suffix}");
+        let addr = |text: &str| text.parse::<Ipv4Addr>().expect("合法位址");
+
+        let senders = vec![
+            (addr("10.0.0.5"), mac("05")),
+            (addr("10.0.0.0"), mac("00")), // 網段位址屬網段內
+            (addr("10.0.0.7"), mac("07")), // 網段廣播屬網段內
+            (addr("10.0.9.9"), mac("99")),
+            (addr("192.168.1.1"), mac("01")),
+        ];
+
+        assert_eq!(
+            out_of_subnet_senders(&network, &senders),
+            vec![
+                (addr("10.0.9.9"), mac("99")),
+                (addr("192.168.1.1"), mac("01")),
+            ],
+            "只保留 CIDR 外者且維持原順序"
+        );
+        assert!(out_of_subnet_senders(&network, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn passive_record_sets_flag_and_regular_path_never_touches_it() {
+        let pool = test_pool().await;
+        let subnet_id = insert_subnet(&pool, "10.0.0.0/29").await;
+        let mut transaction = pool.begin().await.expect("建立交易");
+
+        record_passive_seen(
+            &mut transaction,
+            subnet_id,
+            "10.0.9.9",
+            "aa:bb:cc:dd:ee:99",
+            "2026-10-06T12:00:00Z",
+        )
+        .await
+        .expect("寫入被動觀測");
+        record_seen(
+            &mut transaction,
+            subnet_id,
+            "10.0.0.5",
+            Some("aa:bb:cc:dd:ee:05"),
+            "arp",
+            "2026-10-06T12:00:00Z",
+        )
+        .await
+        .expect("寫入一般觀測");
+        // 一般路徑即使命中同一列（理論上不會，因 CIDR 過濾）也不得清旗標。
+        record_seen(
+            &mut transaction,
+            subnet_id,
+            "10.0.9.9",
+            Some("aa:bb:cc:dd:ee:99"),
+            "arp",
+            "2026-10-06T12:00:01Z",
+        )
+        .await
+        .expect("一般觀測命中被動列");
+        transaction.commit().await.expect("提交交易");
+
+        let passive_flag: i64 =
+            sqlx::query_scalar("SELECT out_of_subnet FROM ip_presence WHERE address = '10.0.9.9'")
+                .fetch_one(&pool)
+                .await
+                .expect("讀取被動列旗標");
+        assert_eq!(passive_flag, 1, "被動路徑寫 1 且不被後續一般路徑清除");
+
+        let active_flag: i64 =
+            sqlx::query_scalar("SELECT out_of_subnet FROM ip_presence WHERE address = '10.0.0.5'")
+                .fetch_one(&pool)
+                .await
+                .expect("讀取一般列旗標");
+        assert_eq!(active_flag, 0, "一般路徑不觸碰旗標（維持預設 0）");
+
+        let events = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT address, kind, source FROM observation_event ORDER BY id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("讀取事件");
+        assert_eq!(
+            events,
+            vec![
+                (
+                    "10.0.9.9".to_string(),
+                    "first_seen".to_string(),
+                    "arp_passive".to_string()
+                ),
+                (
+                    "10.0.0.5".to_string(),
+                    "first_seen".to_string(),
+                    "arp".to_string()
+                ),
+            ],
+            "被動列首見來源 arp_passive；一般列同 MAC 不再寫事件"
         );
     }
 
