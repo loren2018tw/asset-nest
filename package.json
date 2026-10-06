@@ -17,6 +17,7 @@
     "lint": "pnpm --filter frontend lint",
     "lint:check": "pnpm --filter frontend lint:check",
     "test": "cargo test --manifest-path backend/Cargo.toml",
+    "test:agent": "cargo test --manifest-path agent/Cargo.toml",
     "test:kea": "cargo test --manifest-path backend/Cargo.toml --test kea_connectivity -- --ignored --nocapture"
   },
   "devDependencies": {

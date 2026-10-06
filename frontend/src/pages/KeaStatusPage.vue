@@ -231,15 +231,187 @@
           </q-card-section>
         </q-card>
       </div>
+
+      <div class="col-12">
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="row items-baseline">
+              <div class="text-subtitle1 q-mb-sm">觀測代理</div>
+              <div
+                v-if="agents"
+                class="text-caption text-grey-7 q-ml-sm q-mb-sm"
+              >
+                在線門檻：{{ humanizeDuration(staleSecs) }}內有回報
+              </div>
+            </div>
+            <q-table
+              v-if="agents"
+              :rows="agents"
+              :columns="agentColumns"
+              row-key="instance_id"
+              :loading="loading"
+              :pagination="{ rowsPerPage: 0 }"
+              hide-bottom
+            >
+              <template #body-cell-name="props">
+                <q-td :props="props">
+                  <div>{{ props.row.name }}</div>
+                  <div class="text-caption text-grey-7 mono-text">
+                    {{ props.row.instance_id }}
+                  </div>
+                </q-td>
+              </template>
+              <template #body-cell-source_ip="props">
+                <q-td :props="props">
+                  <span class="mono-text">{{ props.row.source_ip }}</span>
+                </q-td>
+              </template>
+              <template #body-cell-subnet="props">
+                <q-td :props="props">
+                  <span class="mono-text">{{ props.row.subnet_cidr }}</span>
+                  <div
+                    v-if="props.row.subnet_name"
+                    class="text-caption text-grey-7"
+                  >
+                    {{ props.row.subnet_name }}
+                  </div>
+                </q-td>
+              </template>
+              <template #body-cell-last_report="props">
+                <q-td :props="props">
+                  {{ relativeTime(props.row.last_report_at) }}
+                  <q-tooltip>
+                    {{ exactTime(props.row.last_report_at) }}
+                  </q-tooltip>
+                </q-td>
+              </template>
+              <template #body-cell-status="props">
+                <q-td :props="props">
+                  <q-chip
+                    dense
+                    :color="agentStatus(props.row).color"
+                    :text-color="agentStatus(props.row).textColor"
+                  >
+                    {{ agentStatus(props.row).label }}
+                  </q-chip>
+                  <q-tooltip v-if="agentStatus(props.row).hint">
+                    {{ agentStatus(props.row).hint }}
+                  </q-tooltip>
+                </q-td>
+              </template>
+              <!-- 空狀態（見票 01）：說明代理回報與狀態語意 -->
+              <template #no-data>
+                <div class="full-width q-px-md q-py-md text-grey-7">
+                  <div class="text-subtitle2 q-mb-xs">尚無觀測代理回報</div>
+                  <ul class="q-my-none q-pl-lg">
+                    <li>
+                      在目標網段安裝觀測代理後，代理會定期回報心跳並顯示於此。
+                    </li>
+                    <li>
+                      涵蓋網段需與受管網段 CIDR 精確相符，否則標示「未對應」。
+                    </li>
+                    <li>
+                      最後回報超過在線門檻
+                      <span class="mono-text">AGENT_STALE_SECS</span>
+                      即標示「離線」；代理資料保留、不清除。
+                    </li>
+                  </ul>
+                </div>
+              </template>
+            </q-table>
+            <q-banner
+              v-else-if="agentsError"
+              dense
+              rounded
+              class="bg-negative text-white"
+            >
+              無法取得觀測代理：{{ agentsError }}
+            </q-banner>
+            <div v-else class="text-grey-7">載入中…</div>
+          </q-card-section>
+        </q-card>
+      </div>
+
+      <div class="col-12">
+        <q-card flat bordered>
+          <q-card-section>
+            <div class="text-subtitle1 q-mb-sm">被拒回報</div>
+            <q-table
+              v-if="authFailures"
+              :rows="authFailures"
+              :columns="authFailureColumns"
+              row-key="source_ip"
+              :loading="loading"
+              :pagination="{ rowsPerPage: 0 }"
+              hide-bottom
+            >
+              <template #body-cell-source_ip="props">
+                <q-td :props="props">
+                  <span class="mono-text">{{ props.row.source_ip }}</span>
+                </q-td>
+              </template>
+              <template #body-cell-claimed="props">
+                <q-td :props="props">
+                  {{ props.row.claimed_name ?? "—" }}
+                  <span class="text-grey-7">／</span>
+                  {{ props.row.claimed_version ?? "—" }}
+                </q-td>
+              </template>
+              <template #body-cell-last_attempt="props">
+                <q-td :props="props">
+                  {{ relativeTime(props.row.last_attempt_at) }}
+                  <q-tooltip>
+                    {{ exactTime(props.row.last_attempt_at) }}
+                  </q-tooltip>
+                </q-td>
+              </template>
+              <!-- 空狀態（見票 01）：說明被拒回報的產生條件 -->
+              <template #no-data>
+                <div class="full-width q-px-md q-py-md text-grey-7">
+                  <div class="text-subtitle2 q-mb-xs">沒有被拒的回報</div>
+                  <ul class="q-my-none q-pl-lg">
+                    <li>
+                      認證碼不符的代理回報會在此依來源 IP
+                      累計次數與最後嘗試時間。
+                    </li>
+                    <li>
+                      後端未設定
+                      <span class="mono-text">AGENT_AUTH_CODE</span>
+                      時，入庫端點一律回 503（不列入此表）。
+                    </li>
+                  </ul>
+                </div>
+              </template>
+            </q-table>
+            <q-banner
+              v-else-if="authFailuresError"
+              dense
+              rounded
+              class="bg-negative text-white"
+            >
+              無法取得被拒回報：{{ authFailuresError }}
+            </q-banner>
+            <div v-else class="text-grey-7">載入中…</div>
+          </q-card-section>
+        </q-card>
+      </div>
     </div>
   </q-page>
 </template>
 
 <script setup lang="ts">
+import type { QTableProps } from "quasar";
 import { computed, onMounted, ref } from "vue";
 
+import {
+  listAgentAuthFailures,
+  listAgents,
+  type Agent,
+  type AgentAuthFailure
+} from "@/api/agents";
 import { fetchHealth, type HealthResponse } from "@/api/health";
 import { getKeaStatus, type KeaStatus } from "@/api/kea";
+import { relativeTime } from "@/utils/relativeTime";
 
 const status = ref<KeaStatus | null>(null);
 const health = ref<HealthResponse | null>(null);
@@ -247,6 +419,72 @@ const loading = ref(false);
 const loadError = ref("");
 const healthError = ref("");
 const updatedAt = ref<Date | null>(null);
+
+/** 觀測代理（null＝尚未成功載入；見票 01）。 */
+const agents = ref<Agent[] | null>(null);
+const agentsError = ref("");
+/** 後端在線門檻秒數（`AGENT_STALE_SECS`）。 */
+const staleSecs = ref(0);
+/** 被拒回報（null＝尚未成功載入）。 */
+const authFailures = ref<AgentAuthFailure[] | null>(null);
+const authFailuresError = ref("");
+
+const agentColumns: QTableProps["columns"] = [
+  { name: "name", label: "名稱", field: "name", align: "left" },
+  { name: "source_ip", label: "來源 IP", field: "source_ip", align: "left" },
+  { name: "subnet", label: "涵蓋網段", field: "subnet_cidr", align: "left" },
+  { name: "version", label: "版本", field: "version", align: "left" },
+  {
+    name: "last_report",
+    label: "最後回報",
+    field: "last_report_at",
+    align: "left"
+  },
+  { name: "status", label: "狀態", field: "online", align: "left" }
+];
+
+const authFailureColumns: QTableProps["columns"] = [
+  { name: "source_ip", label: "來源 IP", field: "source_ip", align: "left" },
+  {
+    name: "claimed",
+    label: "自報名稱／版本",
+    field: "claimed_name",
+    align: "left"
+  },
+  {
+    name: "attempt_count",
+    label: "次數",
+    field: "attempt_count",
+    align: "left"
+  },
+  {
+    name: "last_attempt",
+    label: "最後嘗試",
+    field: "last_attempt_at",
+    align: "left"
+  }
+];
+
+/** 代理狀態 chip：離線（不再回報）優先於未對應。 */
+function agentStatus(agent: Agent): {
+  label: string;
+  color: string;
+  textColor: string;
+  hint?: string;
+} {
+  if (!agent.online) {
+    return { label: "離線", color: "grey-7", textColor: "white" };
+  }
+  if (agent.subnet_id === null) {
+    return {
+      label: "未對應",
+      color: "warning",
+      textColor: "black",
+      hint: "回報的涵蓋網段不在受管網段中，請建立對應網段或修正代理設定"
+    };
+  }
+  return { label: "在線", color: "positive", textColor: "white" };
+}
 
 /** 版本顯示 `version ?? text`（真機 3.2.1 無 `arguments.version`，只回 text）。 */
 const versionText = computed(() => {
@@ -309,13 +547,22 @@ function formatTime(date: Date): string {
   return date.toLocaleTimeString("zh-TW", { hour12: false });
 }
 
+/** 精確時間：顯示瀏覽器本地時間；解析失敗原樣顯示（tooltip 用）。 */
+function exactTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 async function load() {
   loading.value = true;
   try {
-    const [keaResult, healthResult] = await Promise.allSettled([
-      getKeaStatus(),
-      fetchHealth()
-    ]);
+    const [keaResult, healthResult, agentsResult, authFailuresResult] =
+      await Promise.allSettled([
+        getKeaStatus(),
+        fetchHealth(),
+        listAgents(),
+        listAgentAuthFailures()
+      ]);
 
     if (keaResult.status === "fulfilled") {
       status.value = keaResult.value;
@@ -333,6 +580,23 @@ async function load() {
       healthError.value = errorMessage(healthResult.reason);
     }
 
+    if (agentsResult.status === "fulfilled") {
+      agents.value = agentsResult.value.items;
+      staleSecs.value = agentsResult.value.stale_secs;
+      agentsError.value = "";
+    } else {
+      agents.value = null;
+      agentsError.value = errorMessage(agentsResult.reason);
+    }
+
+    if (authFailuresResult.status === "fulfilled") {
+      authFailures.value = authFailuresResult.value.items;
+      authFailuresError.value = "";
+    } else {
+      authFailures.value = null;
+      authFailuresError.value = errorMessage(authFailuresResult.reason);
+    }
+
     updatedAt.value = new Date();
   } finally {
     loading.value = false;
@@ -347,3 +611,9 @@ onMounted(() => {
   void load();
 });
 </script>
+
+<style scoped>
+.mono-text {
+  font-family: monospace;
+}
+</style>

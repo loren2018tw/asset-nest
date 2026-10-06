@@ -5,15 +5,13 @@ use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
-use chrono::{Local, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Local;
+use serde::Serialize;
 
 use crate::AppState;
 use crate::api::{ApiError, encode_filename};
-use crate::observation::{self, SweepReport};
-use crate::probe::Prober;
 use crate::subnets::{self, Subnet, SubnetInput, SubnetPatch, SubnetSummary};
 
 pub fn router() -> Router<AppState> {
@@ -26,36 +24,16 @@ pub fn router() -> Router<AppState> {
             "/subnets/{id}",
             get(get_subnet).patch(update_subnet).delete(delete_subnet),
         )
-        // 手動觸發掃描（票 02 僅快速掃描；探索掃描為票 05）。
-        .route("/subnets/{id}/sweeps", post(sweep_subnet))
 }
 
-/// 網段清單回應；`items` 為列表摘要（含已用／總數／衝突數與觀測欄位，見票 07、票 01）。
+/// 網段清單回應；`items` 為列表摘要（含已用／總數／衝突數，見票 07）。
 #[derive(Debug, Serialize)]
 struct SubnetItems {
     items: Vec<SubnetSummary>,
 }
 
-/// 網段詳情回應：網段欄位＋本機同 L2 判定（見票 01）。
-#[derive(Debug, Serialize)]
-struct SubnetDetail {
-    #[serde(flatten)]
-    subnet: Subnet,
-    /// `prober.is_local`：本機是否有介面位址落在該 v4 子網；v6 恆為 false。
-    local: bool,
-}
-
-impl SubnetDetail {
-    fn new(subnet: Subnet, prober: &dyn Prober) -> Self {
-        Self {
-            local: prober.is_local(&subnet),
-            subnet,
-        }
-    }
-}
-
 async fn list_subnets(State(state): State<AppState>) -> Result<Json<SubnetItems>, ApiError> {
-    let items = subnets::list(&state.db, state.prober.as_ref()).await?;
+    let items = subnets::list(&state.db).await?;
 
     Ok(Json(SubnetItems { items }))
 }
@@ -85,7 +63,7 @@ async fn export_subnets(State(state): State<AppState>) -> Result<Response<Body>,
 async fn get_subnet(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
-) -> Result<Json<SubnetDetail>, ApiError> {
+) -> Result<Json<Subnet>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
 
     let subnet = subnets::get(&state.db, id)
@@ -93,13 +71,13 @@ async fn get_subnet(
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到網段"))?;
 
-    Ok(Json(SubnetDetail::new(subnet, state.prober.as_ref())))
+    Ok(Json(subnet))
 }
 
 async fn create_subnet(
     State(state): State<AppState>,
     payload: Result<Json<SubnetInput>, JsonRejection>,
-) -> Result<(StatusCode, Json<SubnetDetail>), ApiError> {
+) -> Result<(StatusCode, Json<Subnet>), ApiError> {
     let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
     let valid = input.validate()?;
 
@@ -109,17 +87,14 @@ async fn create_subnet(
         .await
         .map_err(|error| ApiError::internal("新增網段失敗", error))?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(SubnetDetail::new(subnet, state.prober.as_ref())),
-    ))
+    Ok((StatusCode::CREATED, Json(subnet)))
 }
 
 async fn update_subnet(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
     payload: Result<Json<SubnetPatch>, JsonRejection>,
-) -> Result<Json<SubnetDetail>, ApiError> {
+) -> Result<Json<Subnet>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
     let Json(patch) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
 
@@ -134,7 +109,7 @@ async fn update_subnet(
     subnets::update(&state.db, id, valid)
         .await
         .map_err(|error| ApiError::internal("更新網段失敗", error))?
-        .map(|subnet| Json(SubnetDetail::new(subnet, state.prober.as_ref())))
+        .map(Json)
         .ok_or_else(|| ApiError::not_found("找不到網段"))
 }
 
@@ -161,71 +136,4 @@ async fn delete_subnet(
     } else {
         Err(ApiError::not_found("找不到網段"))
     }
-}
-
-/// 掃描輸入；`mode` 支援 `quick`（快速）與 `discovery`（探索；見票 05）。
-#[derive(Debug, Deserialize)]
-struct SweepInput {
-    mode: Option<String>,
-}
-
-/// `POST /subnets/{id}/sweeps`：同步執行掃描並回摘要（見票 02、票 05、
-/// spec §HTTP API）。
-///
-/// 前提由服務驗證：v4、已開觀測、本機同 L2（`discovery` 另需已開探索），
-/// 否則回 400 明確訊息；未知模式亦回 400。探索速率上限取自
-/// `state.discovery_rate_pps`（`OBSERVATION_DISCOVERY_RATE_PPS`）、被動
-/// 監聽窗長取自 `state.passive_window_secs`（`OBSERVATION_PASSIVE_WINDOW_SECS`）。
-async fn sweep_subnet(
-    State(state): State<AppState>,
-    id: Result<Path<i64>, PathRejection>,
-    payload: Result<Json<SweepInput>, JsonRejection>,
-) -> Result<Json<SweepReport>, ApiError> {
-    let Path(id) = id.map_err(|_| ApiError::validation("網段 id 格式錯誤"))?;
-    let Json(input) = payload.map_err(|_| ApiError::validation("請求內容格式錯誤"))?;
-
-    let mode = input.mode.as_deref().map(str::trim).unwrap_or_default();
-    match mode {
-        "quick" | "discovery" => {}
-        "" => {
-            return Err(ApiError::validation("mode 為必填（quick／discovery）").field("mode"));
-        }
-        other => {
-            return Err(ApiError::validation(format!(
-                "不支援的掃描模式：{other}（僅支援 quick／discovery）"
-            ))
-            .field("mode"));
-        }
-    }
-
-    let subnet = subnets::get(&state.db, id)
-        .await
-        .map_err(|error| ApiError::internal("讀取網段失敗", error))?
-        .ok_or_else(|| ApiError::not_found("找不到網段"))?;
-
-    let report = match mode {
-        "quick" => {
-            observation::run_quick(
-                &state.db,
-                state.prober.clone(),
-                state.kea.as_ref(),
-                &subnet,
-                Utc::now(),
-            )
-            .await?
-        }
-        _ => {
-            observation::run_discovery(
-                &state.db,
-                state.prober.clone(),
-                state.kea.as_ref(),
-                &subnet,
-                state.discovery_rate_pps,
-                std::time::Duration::from_secs(state.passive_window_secs),
-                Utc::now(),
-            )
-            .await?
-        }
-    };
-    Ok(Json(report))
 }

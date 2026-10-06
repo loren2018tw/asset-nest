@@ -7,6 +7,7 @@ frontend/dist/
 
 # Rust
 backend/target/
+agent/target/
 
 # 環境與資料庫
 .env

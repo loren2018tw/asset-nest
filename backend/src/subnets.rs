@@ -17,11 +17,9 @@ use crate::assets::{double_option, optional_text};
 use crate::assignments;
 use crate::conflicts;
 use crate::ips::HostRange;
-use crate::probe::Prober;
 
 /// `subnets` 資料表完整欄位清單。
-const COLUMNS: &str = "id, cidr, name, note, gateway, kea_subnet_id, observed,
-     discovery_enabled, discovery_interval_minutes, last_discovery_at, created_at, updated_at";
+const COLUMNS: &str = "id, cidr, name, note, gateway, kea_subnet_id, created_at, updated_at";
 
 /// `subnets` 資料表列。
 #[derive(Debug, FromRow)]
@@ -32,10 +30,6 @@ struct SubnetRow {
     note: Option<String>,
     gateway: Option<String>,
     kea_subnet_id: Option<i64>,
-    observed: i64,
-    discovery_enabled: i64,
-    discovery_interval_minutes: Option<i64>,
-    last_discovery_at: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -58,9 +52,6 @@ struct PoolJoinRow {
 }
 
 /// API 回傳的 DHCP 位址池（僅 IPv4；見 spec §2.3）。
-///
-/// `Clone`：掃描服務以 [`crate::observation::run_quick`] 複製網段至
-/// `spawn_blocking` 的探測工作。
 #[derive(Debug, Clone, Serialize)]
 pub struct Pool {
     pub id: i64,
@@ -78,15 +69,6 @@ pub struct Subnet {
     pub note: Option<String>,
     pub gateway: Option<String>,
     pub kea_subnet_id: Option<i64>,
-    /// 觀測開關（快速掃描；見 ADR-0014）；v6 網段恆為 false。
-    pub observed: bool,
-    /// 探索掃描開關；需 `observed`（見票 05）；v6 網段恆為 false。
-    pub discovery_enabled: bool,
-    /// 探索間隔覆寫（分鐘）；`None`＝用全站
-    /// `OBSERVATION_DISCOVERY_INTERVAL_SECS` 預設。
-    pub discovery_interval_minutes: Option<i64>,
-    /// 上次探索掃描時間（UTC）；從未探索為 `None`。
-    pub last_discovery_at: Option<String>,
     pub pools: Vec<Pool>,
     pub created_at: String,
     pub updated_at: String,
@@ -108,10 +90,6 @@ pub struct SubnetSummary {
     /// 衝突數：命中至少一條語意規則的指派筆數（同一筆命中多條規則仍計 1；
     /// 見 [`crate::conflicts::detect`]）。
     pub conflicts: u64,
-    /// 觀測開關（見 ADR-0014）；v6 恆為 false。
-    pub observed: bool,
-    /// 本機是否有介面位址落在該 v4 子網（同 L2；由注入的探測邊界判定）。
-    pub local: bool,
 }
 
 /// 新增網段的 pool 輸入。
@@ -149,16 +127,6 @@ pub struct SubnetPatch {
     #[serde(default, deserialize_with = "double_option")]
     pub kea_subnet_id: Option<Option<i64>>,
     pub pools: Option<Vec<PoolInput>>,
-    /// 觀測開關（見票 01、ADR-0014）；未提供＝維持原值，v6 不得為 true。
-    pub observed: Option<bool>,
-    /// 探索掃描開關（見票 05）；未提供＝維持原值。
-    ///
-    /// 開啟需合併後 `observed=true` 且為 v4；v6 不得為 true。
-    pub discovery_enabled: Option<bool>,
-    /// 探索間隔（分鐘；見票 05）。外層 `None`＝未提供、`Some(None)`＝顯式
-    /// `null`（清除，改用全站預設）；值須為正整數。
-    #[serde(default, deserialize_with = "double_option")]
-    pub discovery_interval_minutes: Option<Option<i64>>,
 }
 
 /// 已驗證的網段內容。
@@ -170,9 +138,6 @@ pub struct ValidSubnet {
     gateway: Option<IpAddr>,
     kea_subnet_id: Option<i64>,
     pools: Vec<ValidPool>,
-    observed: bool,
-    discovery_enabled: bool,
-    discovery_interval_minutes: Option<i64>,
 }
 
 /// 已驗證的 pool 範圍（僅 IPv4）。
@@ -199,11 +164,6 @@ impl SubnetInput {
 impl SubnetPatch {
     /// 與既有網段合併後驗證：以合併後的最終狀態判斷結構規則。
     pub fn apply_to(self, existing: &Subnet) -> Result<ValidSubnet, ApiError> {
-        let observed = self.observed.unwrap_or(existing.observed);
-        let discovery_enabled = self.discovery_enabled.unwrap_or(existing.discovery_enabled);
-        let discovery_interval_minutes = self
-            .discovery_interval_minutes
-            .unwrap_or(existing.discovery_interval_minutes);
         let pools = match self.pools {
             Some(pools) => pools,
             None => existing
@@ -216,46 +176,14 @@ impl SubnetPatch {
                 .collect(),
         };
 
-        let mut valid = validate_fields(
+        validate_fields(
             Some(self.cidr.unwrap_or_else(|| existing.cidr.clone())),
             self.name.unwrap_or_else(|| existing.name.clone()),
             self.note.unwrap_or_else(|| existing.note.clone()),
             self.gateway.unwrap_or_else(|| existing.gateway.clone()),
             self.kea_subnet_id.unwrap_or(existing.kea_subnet_id),
             pools,
-        )?;
-
-        // 結構驗證：v6 網段不得開啟觀測（關閉或 v4 任何值皆可；見票 01）。
-        if observed && !valid.cidr.addr().is_ipv4() {
-            return Err(ApiError::validation("IPv6 網段不支援觀測").field("observed"));
-        }
-        valid.observed = observed;
-
-        // 結構驗證：探索掃描需 v4 且已開觀測（見票 05）。
-        if discovery_enabled {
-            if !valid.cidr.addr().is_ipv4() {
-                return Err(
-                    ApiError::validation("IPv6 網段不支援探索掃描").field("discovery_enabled")
-                );
-            }
-            if !observed {
-                return Err(ApiError::validation("探索掃描需先開啟觀測").field("discovery_enabled"));
-            }
-        }
-        valid.discovery_enabled = discovery_enabled;
-
-        // 結構驗證：探索間隔須為正整數分鐘；`null` 使用全站預設。
-        if let Some(minutes) = discovery_interval_minutes
-            && minutes <= 0
-        {
-            return Err(
-                ApiError::validation("探索間隔須為正整數分鐘（留空＝使用全站預設）")
-                    .field("discovery_interval_minutes"),
-            );
-        }
-        valid.discovery_interval_minutes = discovery_interval_minutes;
-
-        Ok(valid)
+        )
     }
 }
 
@@ -335,9 +263,6 @@ fn validate_fields(
         gateway,
         kea_subnet_id,
         pools: valid_pools,
-        observed: false,
-        discovery_enabled: false,
-        discovery_interval_minutes: None,
     })
 }
 
@@ -432,8 +357,7 @@ fn describe(cidr: &str, name: Option<&str>) -> String {
 ///
 /// 統計即時計算、無快取：逐網段讀取 pools 與指派並偵測衝突；網段編輯
 /// （縮小 CIDR、擴大 pool）或指派異動後，下一次讀取即反映最新結果。
-/// `local` 以注入的探測邊界判定（見票 01、ADR-0015）。
-pub async fn list(pool: &SqlitePool, prober: &dyn Prober) -> Result<Vec<SubnetSummary>, ApiError> {
+pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
     let rows =
         sqlx::query_as::<_, SubnetRow>(&format!("SELECT {COLUMNS} FROM subnets ORDER BY id ASC"))
             .fetch_all(pool)
@@ -459,8 +383,6 @@ pub async fn list(pool: &SqlitePool, prober: &dyn Prober) -> Result<Vec<SubnetSu
             Ok(IpNet::V6(_)) => used,
             Err(error) => return Err(ApiError::internal("網段 CIDR 格式錯誤", error)),
         };
-        let local = prober.is_local(&subnet);
-
         summaries.push(SubnetSummary {
             id: subnet.id,
             cidr: subnet.cidr,
@@ -469,8 +391,6 @@ pub async fn list(pool: &SqlitePool, prober: &dyn Prober) -> Result<Vec<SubnetSu
             used,
             total,
             conflicts,
-            observed: subnet.observed,
-            local,
         });
     }
 
@@ -639,15 +559,14 @@ pub(crate) async fn insert_subnet(
     valid: ValidSubnet,
 ) -> sqlx::Result<i64> {
     let result = sqlx::query(
-        "INSERT INTO subnets (cidr, name, note, gateway, kea_subnet_id, observed)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO subnets (cidr, name, note, gateway, kea_subnet_id)
+         VALUES (?, ?, ?, ?, ?)",
     )
     .bind(valid.cidr.to_string())
     .bind(valid.name)
     .bind(valid.note)
     .bind(valid.gateway.map(|address| address.to_string()))
     .bind(valid.kea_subnet_id)
-    .bind(valid.observed)
     .execute(&mut *connection)
     .await?;
 
@@ -675,8 +594,6 @@ pub async fn update(
     let result = sqlx::query(
         "UPDATE subnets
              SET cidr = ?, name = ?, note = ?, gateway = ?, kea_subnet_id = ?,
-                 observed = ?,
-                 discovery_enabled = ?, discovery_interval_minutes = ?,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
            WHERE id = ?",
     )
@@ -685,9 +602,6 @@ pub async fn update(
     .bind(valid.note)
     .bind(valid.gateway.map(|address| address.to_string()))
     .bind(valid.kea_subnet_id)
-    .bind(valid.observed)
-    .bind(valid.discovery_enabled)
-    .bind(valid.discovery_interval_minutes)
     .bind(id)
     .execute(&mut *transaction)
     .await?;
@@ -788,10 +702,6 @@ impl SubnetRow {
             note: self.note,
             gateway: self.gateway,
             kea_subnet_id: self.kea_subnet_id,
-            observed: self.observed != 0,
-            discovery_enabled: self.discovery_enabled != 0,
-            discovery_interval_minutes: self.discovery_interval_minutes,
-            last_discovery_at: self.last_discovery_at,
             pools,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -991,62 +901,6 @@ mod tests {
         assert_eq!(family_of("fd00::/64"), "ipv6");
     }
 
-    #[test]
-    fn patch_discovery_requires_observed_v4_and_positive_interval() {
-        let v4 = export_subnet("10.0.0.0/24", None, None, None, &[], None);
-        let v6 = export_subnet("fd00::/64", None, None, None, &[], None);
-
-        // v4 未開觀測：開探索被拒。
-        let error = SubnetPatch {
-            discovery_enabled: Some(true),
-            ..Default::default()
-        }
-        .apply_to(&v4)
-        .expect_err("探索需先開觀測");
-        assert_eq!(error.field_name(), Some("discovery_enabled"));
-
-        // 開了觀測即可；v6 一律拒絕。
-        let observed = Subnet {
-            observed: true,
-            ..export_subnet("10.0.0.0/24", None, None, None, &[], None)
-        };
-        let valid = SubnetPatch {
-            discovery_enabled: Some(true),
-            discovery_interval_minutes: Some(Some(30)),
-            ..Default::default()
-        }
-        .apply_to(&observed)
-        .expect("已開觀測的 v4 可開探索");
-        assert!(valid.discovery_enabled);
-        assert_eq!(valid.discovery_interval_minutes, Some(30));
-
-        let error = SubnetPatch {
-            discovery_enabled: Some(true),
-            ..Default::default()
-        }
-        .apply_to(&v6)
-        .expect_err("v6 不得開探索");
-        assert_eq!(error.field_name(), Some("discovery_enabled"));
-
-        // 間隔須為正整數；null 清除。
-        for minutes in [0, -1] {
-            let error = SubnetPatch {
-                discovery_interval_minutes: Some(Some(minutes)),
-                ..Default::default()
-            }
-            .apply_to(&observed)
-            .expect_err("非正間隔被拒");
-            assert_eq!(error.field_name(), Some("discovery_interval_minutes"));
-        }
-        let cleared = SubnetPatch {
-            discovery_interval_minutes: Some(None),
-            ..Default::default()
-        }
-        .apply_to(&observed)
-        .expect("null 清除合法");
-        assert_eq!(cleared.discovery_interval_minutes, None);
-    }
-
     /// 匯出測試用：以最小內容組出網段（id 與時間不影響匯出內容）。
     fn export_subnet(
         cidr: &str,
@@ -1063,10 +917,6 @@ mod tests {
             note: note.map(str::to_string),
             gateway: gateway.map(str::to_string),
             kea_subnet_id,
-            observed: false,
-            discovery_enabled: false,
-            discovery_interval_minutes: None,
-            last_discovery_at: None,
             pools: pools
                 .iter()
                 .enumerate()

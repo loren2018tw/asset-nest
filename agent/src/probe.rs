@@ -1,191 +1,52 @@
-//! 探測邊界：本機同 L2 判定、ARP 探測與被動監聽（見 spec §探測邊界、
-//! ADR-0015、ADR-0017）。
+//! raw ARP 探測（自 backend `probe.rs` 複製；後端本體保留至票 08）。
 //!
-//! [`Prober`] 以 `Arc<dyn Prober + Send + Sync>` 掛在 [`crate::AppState`]，
-//! 測試注入 stub，任何碰真實網路者不進自動測試。實作策略（見 ADR-0015）：
+//! 以 Linux `AF_PACKET`／`ETH_P_ARP` 自建與解析 ARP 框架（僅依賴 `libc`，
+//! 不依賴 libpcap）；需 `CAP_NET_RAW`。模組另有介面列舉（網段自動偵測與
+//! 探測介面選擇）與被動監聽（持續迴圈 [`passive_listen`] 與短窗
+//! [`passive_observe`]；見票 05、spec §持續被動）。
 //!
-//! - `raw`：Linux `AF_PACKET` raw socket 自建／解析 ARP 框架（僅依賴 `libc`，
-//!   不依賴 libpcap）；需 `CAP_NET_RAW`。被動監聽（[`Prober::passive_observe`]）
-//!   同樣只在 raw 路徑可用。
-//! - `unprivileged`：對目標丟 UDP 觸發 kernel ARP 解析，再讀 `/proc/net/arp`
-//!   （重用 [`crate::peer::mac_from_arp_table`]）；無法被動監聽，回空集合。
-//! - `auto`（預設）：先 raw；遇權限問題（EPERM／EACCES）或環境不可用時記錄
-//!   一次警告並降級 unprivileged。
+//! 主動探測語意沿用後端：「送一批、收約 2 秒回覆窗」，批與批的開始時間
+//! 相距約 1 秒以貼近 `rate_pps`。
+//!
+//! 被動監聽**只收不送**：解析 opcode 1／2 的 sender 並套用排除規則
+//! （[`valid_passive_sender`]）；持續迴圈由 caller 提供停止條件與逐筆回呼。
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ipnet::Ipv4Net;
 
-use crate::subnets::Subnet;
+use crate::host_range::HostRange;
 
 /// 正規化後的 MAC 位址字串（小寫冒號格式，如 `aa:bb:cc:dd:ee:ff`）。
 pub type Mac = String;
 
-/// 探測模式；由 `OBSERVATION_PROBE_MODE` 設定（見 spec §環境設定）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ProbeMode {
-    /// 先 raw，失敗時降級 unprivileged（預設）。
-    #[default]
-    Auto,
-    /// 只使用 raw（Linux `AF_PACKET`）；不可用時該次探測回空集合。
-    Raw,
-    /// 只使用零權限降級（UDP 觸發＋讀 ARP 表）。
-    Unprivileged,
-}
-
-impl ProbeMode {
-    /// 由環境設定字串解析；未知值回傳 `None`（由 [`crate::config::Config`] 拒絕）。
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Some(Self::Auto),
-            "raw" => Some(Self::Raw),
-            "unprivileged" => Some(Self::Unprivileged),
-            _ => None,
-        }
-    }
-}
-
-/// 探測邊界：觀測讀取端與掃描服務以注入的實作判定本機可觀測性並執行探測。
-pub trait Prober: Send + Sync {
-    /// 本機是否有介面位址落在該 v4 子網（判定同 L2）。
-    ///
-    /// v6 網段與列舉失敗一律回 `false`（見 ADR-0015）。
-    fn is_local(&self, subnet: &Subnet) -> bool;
-
-    /// 對 `targets` 發 ARP 請求並收集回應（回覆窗上限約 2 秒，實作可調；
-    /// 全部目標回應或一段閒置後提早結束）。
-    ///
-    /// 回傳（位址、正規化小寫 MAC）；未回應者不出現。阻塞式；呼叫端以
-    /// `spawn_blocking` 執行（見 [`crate::observation::run_quick`]）。
-    fn probe(&self, subnet: &Subnet, targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, Mac)>;
-
-    /// 被動監聽 `window` 期間該網段介面上的 ARP sender（見 ADR-0017）。
-    ///
-    /// 只收不送：解析 opcode 1（request）與 2（reply）的 sender，排除
-    /// `0.0.0.0`、multicast／broadcast 與本機介面自身位址／MAC。回傳窗內
-    /// 全部合法 sender，**不去重、不濾 CIDR**（CIDR 過濾由服務層做，可測）。
-    ///
-    /// 只有 raw（含 `auto` 的 raw 路徑）能監聽；unprivileged 與降級一律回
-    /// 空集合。阻塞式；呼叫端以 `spawn_blocking` 執行（見
-    /// [`crate::observation::run_discovery`]）。
-    fn passive_observe(&self, subnet: &Subnet, window: Duration) -> Vec<(Ipv4Addr, Mac)>;
-}
-
-/// raw 模式的 ARP 回覆窗硬上限；送出全部請求後被動收集。
-const RAW_REPLY_WINDOW: Duration = Duration::from_secs(2);
+/// 主動探測的回覆窗硬上限；送出整批後被動收集。
+pub const RAW_REPLY_WINDOW: Duration = Duration::from_secs(2);
 /// 距最後一幀超過此時間即提早結束回覆窗（無回應時不空等硬上限）。
-const RAW_IDLE_EXIT: Duration = Duration::from_millis(500);
+pub const RAW_IDLE_EXIT: Duration = Duration::from_millis(500);
 /// raw socket 單次 `recv` 的等待上限（輪詢以判斷是否提早結束）。
-const RAW_RECV_POLL: Duration = Duration::from_millis(200);
-/// unprivileged 模式送出 UDP 後等待 kernel ARP 解析的簡短時間。
-const UNPRIVILEGED_WAIT: Duration = Duration::from_millis(250);
+pub const RAW_RECV_POLL: Duration = Duration::from_millis(200);
 
-/// 預設實作：raw／unprivileged 雙模式（見 ADR-0015）。
-///
-/// 不依賴 libpcap；非 Linux 建置的 raw 一律不可用（自動降級）。
-#[derive(Debug, Default)]
-pub struct SystemProber {
-    mode: ProbeMode,
-    /// 降級警告只記一次，避免每輪掃描洗版。
-    fallback_warned: AtomicBool,
-    /// 被動監聽不可用的警告只記一次（見 [`Prober::passive_observe`]）。
-    passive_warned: AtomicBool,
+/// 一次主動掃描的結果（見 spec §週期掃描）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SweepResult {
+    /// 全部送出的目標位址（正常路徑即整批 host；見票 04）。
+    pub checked: Vec<Ipv4Addr>,
+    /// 有 ARP 回應的位址與正規化小寫冒號 MAC。
+    pub seen: Vec<(Ipv4Addr, Mac)>,
 }
 
-impl SystemProber {
-    pub fn new() -> Self {
-        Self::with_mode(ProbeMode::Auto)
-    }
-
-    /// 以指定模式建立（`main` 由 `OBSERVATION_PROBE_MODE` 帶入）。
-    pub fn with_mode(mode: ProbeMode) -> Self {
-        Self {
-            mode,
-            fallback_warned: AtomicBool::new(false),
-            passive_warned: AtomicBool::new(false),
-        }
-    }
-
-    /// 降級警告僅記錄一次。
-    fn warn_fallback_once(&self, reason: &RawProbeError) {
-        if self.fallback_warned.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        tracing::warn!(reason = %reason, "raw ARP 不可用，改用零權限降級模式（UDP 觸發＋/proc/net/arp）");
-    }
-
-    /// 被動監聽不可用的警告僅記錄一次（unprivileged 為預期狀態，不警告）。
-    fn warn_passive_unavailable_once(&self, reason: &RawProbeError) {
-        if self.passive_warned.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        tracing::warn!(reason = %reason, "被動 ARP 監聽不可用，本次略過網段外觀測（需 raw 模式與 CAP_NET_RAW）");
-    }
-}
-
-impl Prober for SystemProber {
-    fn is_local(&self, subnet: &Subnet) -> bool {
-        let Ok(network) = subnet.cidr.parse::<Ipv4Net>() else {
-            return false; // v6 或非法 CIDR：一律非同 L2
-        };
-        contains_address(&network, &local_ipv4_addresses())
-    }
-
-    fn probe(&self, subnet: &Subnet, targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, Mac)> {
-        if targets.is_empty() {
-            return Vec::new();
-        }
-
-        match self.mode {
-            ProbeMode::Raw => match raw_probe(subnet, targets) {
-                Ok(responses) => responses,
-                Err(error) => {
-                    self.warn_fallback_once(&error);
-                    Vec::new()
-                }
-            },
-            ProbeMode::Unprivileged => unprivileged_probe(targets),
-            ProbeMode::Auto => match raw_probe(subnet, targets) {
-                Ok(responses) => responses,
-                Err(error) => {
-                    self.warn_fallback_once(&error);
-                    unprivileged_probe(targets)
-                }
-            },
-        }
-    }
-
-    fn passive_observe(&self, subnet: &Subnet, window: Duration) -> Vec<(Ipv4Addr, Mac)> {
-        if window.is_zero() {
-            return Vec::new(); // 窗長 0＝停用（服務層通常已略過呼叫）
-        }
-
-        match self.mode {
-            ProbeMode::Raw | ProbeMode::Auto => match raw_passive_observe(subnet, window) {
-                Ok(senders) => senders,
-                Err(error) => {
-                    self.warn_passive_unavailable_once(&error);
-                    Vec::new()
-                }
-            },
-            // 零權限模式無法被動監聽（見 ADR-0017 §降級誠實）。
-            ProbeMode::Unprivileged => Vec::new(),
-        }
-    }
-}
-
-/// raw 模式的失敗原因；權限問題與環境不可用區分以供降級決策與訊息。
+/// raw 探測的失敗原因；權限問題與環境不可用區分以供訊息說明。
 #[derive(Debug)]
-enum RawProbeError {
+pub enum ProbeError {
     /// `AF_PACKET` socket 建立被拒（EPERM／EACCES；缺 CAP_NET_RAW）。
     Permission,
-    /// 找不到介面、讀不到 MAC、CIDR 非 v4 等環境問題。
+    /// 找不到介面、讀不到 MAC、非 Linux 等環境問題。
     Unusable(String),
 }
 
-impl std::fmt::Display for RawProbeError {
+impl std::fmt::Display for ProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Permission => write!(formatter, "需要 CAP_NET_RAW 權限"),
@@ -194,22 +55,19 @@ impl std::fmt::Display for RawProbeError {
     }
 }
 
-/// 由作業系統錯誤區分權限問題；其他一律視為環境不可用。
-fn classify_io_error(error: std::io::Error) -> RawProbeError {
-    match error.raw_os_error() {
-        Some(libc::EPERM) | Some(libc::EACCES) => RawProbeError::Permission,
-        _ => RawProbeError::Unusable(error.to_string()),
-    }
-}
+impl std::error::Error for ProbeError {}
 
-/// 介面位址清單中是否有任一位址落在網段內（純函式，供單元測試）。
-fn contains_address(network: &Ipv4Net, addresses: &[Ipv4Addr]) -> bool {
-    addresses.iter().any(|address| network.contains(address))
+/// 由作業系統錯誤區分權限問題；其他一律視為環境不可用。
+fn classify_io_error(error: std::io::Error) -> ProbeError {
+    match error.raw_os_error() {
+        Some(libc::EPERM) | Some(libc::EACCES) => ProbeError::Permission,
+        _ => ProbeError::Unusable(error.to_string()),
+    }
 }
 
 /// 列舉本機介面的 IPv4 位址；列舉失敗回空清單。
 #[cfg(target_os = "linux")]
-fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+pub fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
     let mut addresses = Vec::new();
 
     // SAFETY: 依 getifaddrs(3) 契約——`list` 成功時由函式配置、
@@ -217,7 +75,7 @@ fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
     unsafe {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut list) != 0 {
-            tracing::debug!("列舉本機網路介面失敗（getifaddrs），本機判定視為非同 L2");
+            tracing::debug!("列舉本機網路介面失敗（getifaddrs）");
             return addresses;
         }
 
@@ -239,9 +97,58 @@ fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
     addresses
 }
 
-/// 非 Linux：不支援 `getifaddrs`，一律回空清單（見 ADR-0015）。
+/// 非 Linux：不支援 `getifaddrs`，一律回空清單。
 #[cfg(not(target_os = "linux"))]
-fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+pub fn local_ipv4_addresses() -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
+/// 列舉本機非 loopback、已啟動（IFF_UP）介面的 IPv4 網段（供網段自動偵測）。
+///
+/// 由位址與 netmask 推導網段（host bits 收斂）；列舉失敗或無候選回空清單。
+#[cfg(target_os = "linux")]
+pub fn interface_networks() -> Vec<Ipv4Net> {
+    let mut networks = Vec::new();
+
+    // SAFETY: 比照 `local_ipv4_addresses`；鏈結清單於 freeifaddrs 前維持有效。
+    unsafe {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut list) != 0 {
+            tracing::debug!("列舉本機網路介面失敗（getifaddrs）");
+            return networks;
+        }
+
+        let mut current = list;
+        while !current.is_null() {
+            let interface = &*current;
+            let is_up = interface.ifa_flags as libc::c_int & libc::IFF_UP != 0;
+            if is_up
+                && !interface.ifa_addr.is_null()
+                && !interface.ifa_netmask.is_null()
+                && (*interface.ifa_addr).sa_family as libc::c_int == libc::AF_INET
+            {
+                let address = &*(interface.ifa_addr as *const libc::sockaddr_in);
+                let address = Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
+                if !address.is_loopback() {
+                    let netmask = &*(interface.ifa_netmask as *const libc::sockaddr_in);
+                    let netmask = Ipv4Addr::from(u32::from_be(netmask.sin_addr.s_addr));
+                    if let Ok(network) = Ipv4Net::with_netmask(address, netmask) {
+                        networks.push(network.trunc());
+                    }
+                }
+            }
+            current = interface.ifa_next;
+        }
+
+        libc::freeifaddrs(list);
+    }
+
+    networks
+}
+
+/// 非 Linux：不支援 `getifaddrs`，一律回空清單。
+#[cfg(not(target_os = "linux"))]
+pub fn interface_networks() -> Vec<Ipv4Net> {
     Vec::new()
 }
 
@@ -283,7 +190,7 @@ fn mac_octets(mac: &str) -> Option<[u8; 6]> {
     groups.next().is_none().then_some(octets)
 }
 
-/// 組出 ARP 請求 Ethernet 框架（純函式；見 spec §探測邊界）。
+/// 組出 ARP 請求 Ethernet 框架（純函式）。
 ///
 /// 版面：Ethernet（broadcast dest、`sender_mac`、EtherType 0x0806）
 /// ＋ ARP（htype 1、ptype 0x0800、hlen 6、plen 4、opcode 1、sender、target）。
@@ -350,8 +257,8 @@ pub fn parse_arp_reply(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
 
 /// 解析 ARP request（opcode 1）／reply（opcode 2）的 sender（純函式）。
 ///
-/// 被動監聽用：兩種 opcode 的 sender IP／MAC 都是「有人在用該位址」的證據；
-/// 其他 opcode 或格式不符回 `None`。
+/// 被動監聽（票 05）用：兩種 opcode 的 sender IP／MAC 都是「有人在用該
+/// 位址」的證據；其他 opcode 或格式不符回 `None`。
 pub fn parse_arp_sender(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
     match parse_arp_frame(frame)? {
         (1 | 2, sender_ip, sender_mac) => Some((sender_ip, sender_mac)),
@@ -359,11 +266,11 @@ pub fn parse_arp_sender(frame: &[u8]) -> Option<(Ipv4Addr, Mac)> {
     }
 }
 
-/// 被動 sender 是否可記錄（純函式；見 ADR-0017）。
+/// 被動 sender 是否可記錄（純函式；見 ADR-0017；票 05 使用）。
 ///
 /// 排除 `0.0.0.0`、multicast、有限廣播（`255.255.255.255` 與網段廣播）以及
 /// 本機介面自身的位址／MAC。MAC 比較不分大小寫。
-fn valid_passive_sender(
+pub fn valid_passive_sender(
     address: Ipv4Addr,
     mac: &str,
     local_ip: Ipv4Addr,
@@ -437,16 +344,16 @@ impl Drop for RawSocket {
     }
 }
 
-/// 建立綁定介面的 ARP raw socket；權限被拒回 [`RawProbeError::Permission`]。
+/// 建立綁定介面的 ARP raw socket；權限被拒回 [`ProbeError::Permission`]。
 #[cfg(target_os = "linux")]
-fn open_arp_socket(interface: &str) -> Result<RawSocket, RawProbeError> {
+fn open_arp_socket(interface: &str) -> Result<RawSocket, ProbeError> {
     let name = std::ffi::CString::new(interface)
-        .map_err(|_| RawProbeError::Unusable("介面名稱含 NUL 字元".to_string()))?;
+        .map_err(|_| ProbeError::Unusable("介面名稱含 NUL 字元".to_string()))?;
 
     // SAFETY: 依 socket(2)／if_nametoindex(3) 契約。
     let ifindex = unsafe { libc::if_nametoindex(name.as_ptr()) };
     if ifindex == 0 {
-        return Err(RawProbeError::Unusable(format!("找不到介面 {interface}")));
+        return Err(ProbeError::Unusable(format!("找不到介面 {interface}")));
     }
 
     // SAFETY: AF_PACKET/SOCK_RAW 僅建立 socket；失敗回 -1。
@@ -520,7 +427,7 @@ fn open_arp_socket(interface: &str) -> Result<RawSocket, RawProbeError> {
 
 /// 由綁定的 raw socket 送出單一 Ethernet 框架（廣播）。
 #[cfg(target_os = "linux")]
-fn send_frame(socket: &RawSocket, frame: &[u8]) -> Result<(), RawProbeError> {
+fn send_frame(socket: &RawSocket, frame: &[u8]) -> Result<(), ProbeError> {
     let mut address: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
     address.sll_family = libc::AF_PACKET as u16;
     address.sll_protocol = (libc::ETH_P_ARP as u16).to_be();
@@ -614,10 +521,11 @@ fn collect_replies(
         last_frame = Instant::now();
 
         let frame = &buffer[..received as usize];
-        if let Some((address, mac)) = parse_arp_reply(frame) {
-            if targets.contains(&address) && !responses.iter().any(|(known, _)| *known == address) {
-                responses.push((address, mac));
-            }
+        if let Some((address, mac)) = parse_arp_reply(frame)
+            && targets.contains(&address)
+            && !responses.iter().any(|(known, _)| *known == address)
+        {
+            responses.push((address, mac));
         }
     }
 
@@ -625,26 +533,132 @@ fn collect_replies(
     responses
 }
 
-/// 收集窗內 ARP 的合法 sender（只收不送；見 ADR-0017）。
+/// 批與批的剩餘等待（純函式）：批開始時間相距約 `interval`；探測耗時
+/// `elapsed` 後只補足剩餘時間，耗時已達或超過間隔時不再等待。
+fn batch_pacing_delay(elapsed: Duration, interval: Duration) -> Duration {
+    interval.saturating_sub(elapsed)
+}
+
+/// 對 `targets` 限速主動探測（阻塞式；見 spec §週期掃描）。
 ///
-/// 迴圈輪詢 socket（SO_RCVTIMEO 見 [`open_arp_socket`]）直到窗長耗盡；每幀
-/// 以 [`parse_arp_sender`] 解析並經 [`valid_passive_sender`] 過濾。回傳全部
-/// 合法 sender，不去重、不濾 CIDR。
+/// 每批最多 `rate_pps` 個目標：送出整批後以 [`RAW_REPLY_WINDOW`] 收集
+/// 回覆，批與批間補足約 1 秒間隔；`checked` 為實際送出的位址。
+/// 呼叫端以 `tokio::task::spawn_blocking` 執行（見 [`sweep`]）。
+pub fn probe_targets(
+    network: &Ipv4Net,
+    targets: &[Ipv4Addr],
+    rate_pps: u32,
+) -> Result<SweepResult, ProbeError> {
+    if targets.is_empty() {
+        return Ok(SweepResult::default());
+    }
+    probe_targets_platform(network, targets, rate_pps)
+}
+
+/// 平台實作（Linux）：開 raw socket、分批送收。
 #[cfg(target_os = "linux")]
-fn collect_senders(
-    socket: &RawSocket,
-    window: Duration,
-    local_ip: Ipv4Addr,
-    local_mac: &str,
-    network_broadcast: Ipv4Addr,
-) -> Vec<(Ipv4Addr, Mac)> {
+fn probe_targets_platform(
+    network: &Ipv4Net,
+    targets: &[Ipv4Addr],
+    rate_pps: u32,
+) -> Result<SweepResult, ProbeError> {
     use std::time::Instant;
 
-    let started = Instant::now();
-    let mut buffer = [0u8; 2048];
-    let mut senders: Vec<(Ipv4Addr, Mac)> = Vec::new();
+    let (interface, sender_ip) = local_interface(network)
+        .ok_or_else(|| ProbeError::Unusable(format!("找不到落在網段 {network} 內的本機介面")))?;
+    let sender_mac = read_interface_mac(&interface)
+        .ok_or_else(|| ProbeError::Unusable(format!("讀取介面 {interface} MAC 失敗")))?;
 
-    while started.elapsed() < window {
+    let socket = open_arp_socket(&interface)?;
+    let batch_size = rate_pps.max(1) as usize;
+    let batch_count = targets.len().div_ceil(batch_size);
+    let mut result = SweepResult {
+        checked: Vec::with_capacity(targets.len()),
+        seen: Vec::new(),
+    };
+
+    for (index, batch) in targets.chunks(batch_size).enumerate() {
+        let batch_started = Instant::now();
+        for target in batch {
+            let frame = build_arp_request(&sender_mac, sender_ip, *target)
+                .ok_or_else(|| ProbeError::Unusable("本機介面 MAC 格式錯誤".to_string()))?;
+            send_frame(&socket, &frame)?;
+            result.checked.push(*target);
+        }
+
+        result
+            .seen
+            .extend(collect_replies(&socket, batch, RAW_REPLY_WINDOW));
+
+        if index + 1 < batch_count {
+            std::thread::sleep(batch_pacing_delay(
+                batch_started.elapsed(),
+                Duration::from_secs(1),
+            ));
+        }
+    }
+
+    result.seen.sort_by_key(|(address, _)| *address);
+    Ok(result)
+}
+
+/// 非 Linux：raw 一律不可用。
+#[cfg(not(target_os = "linux"))]
+fn probe_targets_platform(
+    _network: &Ipv4Net,
+    _targets: &[Ipv4Addr],
+    _rate_pps: u32,
+) -> Result<SweepResult, ProbeError> {
+    Err(ProbeError::Unusable(
+        "非 Linux 不支援 raw ARP 探測".to_string(),
+    ))
+}
+
+/// 對網段全部 host 位址限速主動探測（見 spec §週期掃描）。
+///
+/// host 列舉沿用 [`HostRange`]（扣 network／broadcast；`/31`、`/32` 全列），
+/// 實際送收為阻塞式，於 `spawn_blocking` 執行。
+pub async fn sweep(network: Ipv4Net, rate_pps: u32) -> Result<SweepResult, ProbeError> {
+    let targets: Vec<Ipv4Addr> = HostRange::of(&network).iter().collect();
+    tokio::task::spawn_blocking(move || probe_targets(&network, &targets, rate_pps))
+        .await
+        .map_err(|error| ProbeError::Unusable(format!("掃描工作失敗：{error}")))?
+}
+
+/// 持續被動監聽（阻塞式；只收不送；見 spec §持續被動）。
+///
+/// 在網段介面上開啟 ARP socket 後持續收訊：每筆合法 sender（opcode 1／2、
+/// 排除規則見 [`valid_passive_sender`]）呼叫一次 `on_sender`；`should_stop`
+/// 每輪（單次 `recv` 等待上限 [`RAW_RECV_POLL`]）檢查一次，回 `true` 時正常
+/// 結束。socket 無法建立或讀取失敗（非逾時）回 [`ProbeError`]。
+///
+/// 阻塞式；代理常駐路徑以 `tokio::task::spawn_blocking` 執行（見
+/// [`crate::passive`]）。不去重、不濾 CIDR：聚合與 CIDR 過濾由呼叫端負責。
+pub fn passive_listen(
+    network: &Ipv4Net,
+    should_stop: impl Fn() -> bool,
+    mut on_sender: impl FnMut(Ipv4Addr, Mac),
+) -> Result<(), ProbeError> {
+    passive_listen_platform(network, &should_stop, &mut on_sender)
+}
+
+/// 平台實作（Linux）：開 raw socket 只收不送，逐筆回呼合法 sender。
+#[cfg(target_os = "linux")]
+fn passive_listen_platform(
+    network: &Ipv4Net,
+    should_stop: &dyn Fn() -> bool,
+    on_sender: &mut dyn FnMut(Ipv4Addr, Mac),
+) -> Result<(), ProbeError> {
+    let (interface, local_ip) = local_interface(network)
+        .ok_or_else(|| ProbeError::Unusable(format!("找不到落在網段 {network} 內的本機介面")))?;
+    let local_mac = read_interface_mac(&interface)
+        .ok_or_else(|| ProbeError::Unusable(format!("讀取介面 {interface} MAC 失敗")))?;
+
+    let socket = open_arp_socket(&interface)?;
+    let broadcast = network.broadcast();
+    let mut buffer = [0u8; 2048];
+
+    while !should_stop() {
         // SAFETY: buffer 為本函式持有的可寫緩衝區；fd 有效。
         let received = unsafe {
             libc::recv(
@@ -660,9 +674,9 @@ fn collect_senders(
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ) {
-                continue; // 等待窗逾時：回到迴圈開頭判斷窗長
+                continue; // 等待窗逾時：回到迴圈開頭檢查是否結束
             }
-            break;
+            return Err(classify_io_error(error));
         }
         if received == 0 {
             continue;
@@ -670,131 +684,71 @@ fn collect_senders(
 
         let frame = &buffer[..received as usize];
         if let Some((address, mac)) = parse_arp_sender(frame)
-            && valid_passive_sender(address, &mac, local_ip, local_mac, network_broadcast)
+            && valid_passive_sender(address, &mac, local_ip, &local_mac, broadcast)
         {
-            senders.push((address, mac));
+            on_sender(address, mac);
         }
     }
-
-    senders
+    Ok(())
 }
 
-/// raw 模式被動監聽：在網段介面上開 ARP socket 只收不送（見 ADR-0017）。
-#[cfg(target_os = "linux")]
-fn raw_passive_observe(
-    subnet: &Subnet,
-    window: Duration,
-) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
-    let network: Ipv4Net = subnet
-        .cidr
-        .parse()
-        .map_err(|_| RawProbeError::Unusable("網段 CIDR 非 IPv4".to_string()))?;
-    let (interface, local_ip) = local_interface(&network)
-        .ok_or_else(|| RawProbeError::Unusable("找不到落在網段內的本機介面".to_string()))?;
-    let local_mac = read_interface_mac(&interface)
-        .ok_or_else(|| RawProbeError::Unusable(format!("讀取介面 {interface} MAC 失敗")))?;
-
-    let socket = open_arp_socket(&interface)?;
-    Ok(collect_senders(
-        &socket,
-        window,
-        local_ip,
-        &local_mac,
-        network.broadcast(),
-    ))
-}
-
-/// 非 Linux：raw 一律不可用（見 ADR-0015）；被動監聽回空。
+/// 非 Linux：raw 一律不可用。
 #[cfg(not(target_os = "linux"))]
-fn raw_passive_observe(
-    _subnet: &Subnet,
-    _window: Duration,
-) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
-    Err(RawProbeError::Unusable(
+fn passive_listen_platform(
+    _network: &Ipv4Net,
+    _should_stop: &dyn Fn() -> bool,
+    _on_sender: &mut dyn FnMut(Ipv4Addr, Mac),
+) -> Result<(), ProbeError> {
+    Err(ProbeError::Unusable(
         "非 Linux 不支援 raw ARP 被動監聽".to_string(),
     ))
 }
 
-/// raw 模式探測；Linux 以 `AF_PACKET` 自建 ARP 請求並收集回覆。
-#[cfg(target_os = "linux")]
-fn raw_probe(subnet: &Subnet, targets: &[Ipv4Addr]) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
-    let network: Ipv4Net = subnet
-        .cidr
-        .parse()
-        .map_err(|_| RawProbeError::Unusable("網段 CIDR 非 IPv4".to_string()))?;
-    let (interface, sender_ip) = local_interface(&network)
-        .ok_or_else(|| RawProbeError::Unusable("找不到落在網段內的本機介面".to_string()))?;
-    let sender_mac = read_interface_mac(&interface)
-        .ok_or_else(|| RawProbeError::Unusable(format!("讀取介面 {interface} MAC 失敗")))?;
-
-    let socket = open_arp_socket(&interface)?;
-    for target in targets {
-        let frame = build_arp_request(&sender_mac, sender_ip, *target)
-            .ok_or_else(|| RawProbeError::Unusable("本機介面 MAC 格式錯誤".to_string()))?;
-        send_frame(&socket, &frame)?;
+/// 短窗被動監聽（阻塞式；只收不送）：回傳窗內全部合法 sender。
+///
+/// 不去重、不濾 CIDR（比照後端語意，供真機 `#[ignore]` 測試與人工檢查）；
+/// 代理常駐路徑請用 [`passive_listen`]。`window` 為 0 回空集合且不開 socket。
+pub fn passive_observe(
+    network: &Ipv4Net,
+    window: Duration,
+) -> Result<Vec<(Ipv4Addr, Mac)>, ProbeError> {
+    if window.is_zero() {
+        return Ok(Vec::new());
     }
 
-    Ok(collect_replies(&socket, targets, RAW_REPLY_WINDOW))
+    let started = std::time::Instant::now();
+    let mut senders = Vec::new();
+    passive_listen(
+        network,
+        || started.elapsed() >= window,
+        |address, mac| {
+            senders.push((address, mac));
+        },
+    )?;
+    Ok(senders)
 }
 
-/// 非 Linux：raw 一律不可用（見 ADR-0015）。
+/// 啟動能力檢查：對網段介面開一次 raw socket 後立即關閉。
+///
+/// 供啟動時提示（缺 `CAP_NET_RAW` 時主動掃描必然失敗）；不阻擋啟動。
+#[cfg(target_os = "linux")]
+pub fn raw_available(network: &Ipv4Net) -> Result<(), ProbeError> {
+    let (interface, _) = local_interface(network)
+        .ok_or_else(|| ProbeError::Unusable(format!("找不到落在網段 {network} 內的本機介面")))?;
+    open_arp_socket(&interface).map(|_| ())
+}
+
+/// 非 Linux：raw 一律不可用。
 #[cfg(not(target_os = "linux"))]
-fn raw_probe(
-    _subnet: &Subnet,
-    _targets: &[Ipv4Addr],
-) -> Result<Vec<(Ipv4Addr, Mac)>, RawProbeError> {
-    Err(RawProbeError::Unusable(
+pub fn raw_available(_network: &Ipv4Net) -> Result<(), ProbeError> {
+    Err(ProbeError::Unusable(
         "非 Linux 不支援 raw ARP 探測".to_string(),
     ))
-}
-
-/// 零權限降級：對每個目標丟 UDP 觸發 kernel ARP 解析，再讀 `/proc/net/arp`。
-fn unprivileged_probe(targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, Mac)> {
-    // 觸發 ARP：kernel 於送出前解析目的 MAC；單一 socket 共用。
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        for target in targets {
-            // 目的埠無關緊要（UDP 不回覆）；失敗（如無路由）不影響後續讀表。
-            let _ = socket.send_to(&[0u8; 1], std::net::SocketAddr::from((*target, 9)));
-        }
-    }
-
-    std::thread::sleep(UNPRIVILEGED_WAIT);
-
-    let Ok(table) = std::fs::read_to_string("/proc/net/arp") else {
-        return Vec::new();
-    };
-    targets
-        .iter()
-        .filter_map(|target| {
-            crate::peer::mac_from_arp_table(&table, &target.to_string())
-                .and_then(|mac| normalize_mac(&mac))
-                .map(|mac| (*target, mac))
-        })
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 測試用網段（欄位與 `subnets::tests::export_subnet` 一致）。
-    fn subnet(cidr: &str) -> Subnet {
-        Subnet {
-            id: 0,
-            cidr: cidr.to_string(),
-            name: None,
-            note: None,
-            gateway: None,
-            kea_subnet_id: None,
-            observed: false,
-            discovery_enabled: false,
-            discovery_interval_minutes: None,
-            last_discovery_at: None,
-            pools: Vec::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
 
     /// 測試用位址。
     fn addr(text: &str) -> Ipv4Addr {
@@ -814,66 +768,6 @@ mod tests {
         frame[0..6].copy_from_slice(&mac_octets(requester_mac).expect("合法 requester MAC"));
         frame[20..22].copy_from_slice(&2u16.to_be_bytes()); // opcode：reply
         frame
-    }
-
-    #[test]
-    fn presence_containment_matches_any_listed_address() {
-        let network: Ipv4Net = "10.0.0.0/24".parse().expect("合法網段");
-        let inside: Ipv4Addr = "10.0.0.123".parse().expect("合法位址");
-        let outside: Ipv4Addr = "10.0.1.1".parse().expect("合法位址");
-
-        assert!(!contains_address(&network, &[]), "無介面位址回 false");
-        assert!(!contains_address(&network, &[outside]));
-        assert!(contains_address(&network, &[outside, inside]));
-        assert!(contains_address(&network, &[inside]));
-    }
-
-    #[test]
-    fn v6_and_invalid_cidr_are_never_local() {
-        let prober = SystemProber::new();
-        assert!(!prober.is_local(&subnet("fd00::/64")), "v6 恆非同 L2");
-        assert!(!prober.is_local(&subnet("not-a-cidr")));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn loopback_is_local_on_linux() {
-        let prober = SystemProber::new();
-        assert!(
-            prober.is_local(&subnet("127.0.0.0/8")),
-            "loopback 位址必落在本機介面清單"
-        );
-    }
-
-    #[test]
-    fn probe_mode_parses_known_values_case_insensitively() {
-        assert_eq!(ProbeMode::parse("auto"), Some(ProbeMode::Auto));
-        assert_eq!(ProbeMode::parse(" RAW "), Some(ProbeMode::Raw));
-        assert_eq!(
-            ProbeMode::parse("Unprivileged"),
-            Some(ProbeMode::Unprivileged)
-        );
-        assert_eq!(ProbeMode::parse("pcap"), None);
-        assert_eq!(ProbeMode::default(), ProbeMode::Auto);
-    }
-
-    #[test]
-    fn reply_window_exits_when_all_answered_idle_or_window_reached() {
-        let window = Duration::from_secs(2);
-        let idle = Duration::from_millis(500);
-        let ms = Duration::from_millis;
-
-        // 全部目標已回應 → 立即結束。
-        assert!(reply_window_done(ms(0), ms(0), 3, 3, window, idle));
-        assert!(!reply_window_done(ms(0), ms(0), 2, 3, window, idle));
-        // 距最後一幀達 idle → 提早結束（含自始無幀）。
-        assert!(reply_window_done(ms(500), ms(500), 1, 3, window, idle));
-        assert!(!reply_window_done(ms(499), ms(499), 1, 3, window, idle));
-        // 有新幀持續進來：未達 idle、未全回應、未達硬上限 → 繼續。
-        assert!(!reply_window_done(ms(700), ms(200), 1, 3, window, idle));
-        // 硬上限：即使幀持續進來也結束。
-        assert!(reply_window_done(window, ms(10), 0, 3, window, idle));
-        assert!(!reply_window_done(ms(1_999), ms(10), 0, 3, window, idle));
     }
 
     #[test]
@@ -1005,6 +899,28 @@ mod tests {
     }
 
     #[test]
+    fn passive_observe_with_zero_window_never_touches_network() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().expect("合法網段");
+        assert_eq!(
+            passive_observe(&network, Duration::ZERO).expect("零窗不開 socket"),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn passive_observe_without_local_interface_fails_before_opening_socket() {
+        // TEST-NET-1 保留位址，本機不可能有介面落在其中（同 config 測試手法）。
+        let network: Ipv4Net = "192.0.2.0/24".parse().expect("合法網段");
+        let error = passive_observe(&network, Duration::from_millis(1))
+            .expect_err("無本機介面應失敗")
+            .to_string();
+        assert!(
+            error.contains("192.0.2.0/24"),
+            "錯誤訊息須說明網段：{error}"
+        );
+    }
+
+    #[test]
     fn valid_passive_sender_excludes_invalid_multicast_broadcast_and_local() {
         let local_ip = addr("10.0.0.2");
         let local_mac = "aa:bb:cc:dd:ee:02";
@@ -1083,20 +999,55 @@ mod tests {
     }
 
     #[test]
-    fn passive_observe_is_empty_for_unprivileged_and_zero_window() {
-        let unprivileged = SystemProber::with_mode(ProbeMode::Unprivileged);
-        assert!(
-            unprivileged
-                .passive_observe(&subnet("10.0.0.0/29"), Duration::from_secs(1))
-                .is_empty(),
-            "零權限模式無被動資料"
-        );
+    fn reply_window_exits_when_all_answered_idle_or_window_reached() {
+        let window = Duration::from_secs(2);
+        let idle = Duration::from_millis(500);
+        let ms = Duration::from_millis;
 
-        let raw = SystemProber::with_mode(ProbeMode::Raw);
-        assert!(
-            raw.passive_observe(&subnet("10.0.0.0/29"), Duration::ZERO)
-                .is_empty(),
-            "窗長 0 不得開 socket"
+        // 全部目標已回應 → 立即結束。
+        assert!(reply_window_done(ms(0), ms(0), 3, 3, window, idle));
+        assert!(!reply_window_done(ms(0), ms(0), 2, 3, window, idle));
+        // 距最後一幀達 idle → 提早結束（含自始無幀）。
+        assert!(reply_window_done(ms(500), ms(500), 1, 3, window, idle));
+        assert!(!reply_window_done(ms(499), ms(499), 1, 3, window, idle));
+        // 有新幀持續進來：未達 idle、未全回應、未達硬上限 → 繼續。
+        assert!(!reply_window_done(ms(700), ms(200), 1, 3, window, idle));
+        // 硬上限：即使幀持續進來也結束。
+        assert!(reply_window_done(window, ms(10), 0, 3, window, idle));
+        assert!(!reply_window_done(ms(1_999), ms(10), 0, 3, window, idle));
+    }
+
+    #[test]
+    fn batch_pacing_delay_only_sleeps_remainder_of_interval() {
+        let interval = Duration::from_secs(1);
+        assert_eq!(
+            batch_pacing_delay(Duration::ZERO, interval),
+            interval,
+            "未耗時：補足完整間隔"
+        );
+        assert_eq!(
+            batch_pacing_delay(Duration::from_millis(800), interval),
+            Duration::from_millis(200),
+            "耗時 800ms：只補 200ms"
+        );
+        assert_eq!(
+            batch_pacing_delay(interval, interval),
+            Duration::ZERO,
+            "耗時恰達間隔：不再等待"
+        );
+        assert_eq!(
+            batch_pacing_delay(Duration::from_millis(1_500), interval),
+            Duration::ZERO,
+            "耗時超過間隔：不再等待"
+        );
+    }
+
+    #[test]
+    fn probe_targets_with_empty_targets_never_touches_network() {
+        let network: Ipv4Net = "10.0.0.0/24".parse().expect("合法網段");
+        assert_eq!(
+            probe_targets(&network, &[], 1_000).expect("空目標不應開 socket"),
+            SweepResult::default()
         );
     }
 }

@@ -245,10 +245,6 @@ mod tests {
             note: None,
             gateway: None,
             kea_subnet_id: None,
-            observed: false,
-            discovery_enabled: false,
-            discovery_interval_minutes: None,
-            last_discovery_at: None,
             pools: pools
                 .iter()
                 .enumerate()

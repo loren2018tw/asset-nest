@@ -1,15 +1,15 @@
 //! 觀測歷史端點整合測試（見票 06、spec §讀取端／§HTTP API）。
 //!
-//! 以注入的 stub 探測邊界（比照 `observation_sweep.rs`）驗證：
+//! 驗證：
 //! - IP 歷史：現況＋事件（新到舊）＋用過的 MAC 彙總（首見／最後可見／來源／已知）。
 //! - MAC 歷史：用過的位址每位址首見／最後可見／來源，已知 MAC 連資產。
 //! - CSV 匯出：BOM、欄位、事件順序與檔名。
+//! - 有效涵蓋＝網段有在線代理（見票 08）；代理離線或不存在即「未觀測」。
 //!
-//! 歷史以直接 SQL 植入固定時間戳，讓排序與彙總規則可精確斷言；掃描產生的
-//! 事件語意已於 `observation_sweep.rs` 覆蓋。
+//! 歷史以直接 SQL 植入固定時間戳，讓排序與彙總規則可精確斷言；入庫推導的
+//! 事件語意已於 `agent_ingest.rs` 覆蓋。
 
-use std::net::Ipv4Addr;
-use std::sync::Arc;
+use chrono::Utc;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
@@ -19,41 +19,8 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 use tower::ServiceExt;
 
-use asset_nest::probe::Prober;
-use asset_nest::subnets::Subnet;
+use asset_nest::observation::timestamp;
 use asset_nest::{AppState, app};
-
-/// 最小 stub 探測邊界：只回答本機同 L2 判定（歷史讀取端不探測）。
-struct StubProber {
-    local_cidrs: Vec<String>,
-}
-
-impl StubProber {
-    fn new(local_cidrs: &[&str]) -> Self {
-        Self {
-            local_cidrs: local_cidrs.iter().map(|cidr| cidr.to_string()).collect(),
-        }
-    }
-}
-
-impl Prober for StubProber {
-    fn is_local(&self, subnet: &Subnet) -> bool {
-        self.local_cidrs.iter().any(|cidr| cidr == &subnet.cidr)
-    }
-
-    fn probe(&self, _subnet: &Subnet, _targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, String)> {
-        Vec::new()
-    }
-
-    /// 本檔不測被動監聽；固定回空。
-    fn passive_observe(
-        &self,
-        _subnet: &Subnet,
-        _window: std::time::Duration,
-    ) -> Vec<(Ipv4Addr, String)> {
-        Vec::new()
-    }
-}
 
 /// 建立測試資料庫並套用 migrations。
 async fn test_pool() -> SqlitePool {
@@ -71,13 +38,12 @@ async fn test_pool() -> SqlitePool {
     pool
 }
 
-/// 建立附掛 stub 探測邊界的 AppState。
+/// 建立測試用 AppState。
 fn test_state(pool: &SqlitePool) -> AppState {
     AppState::new(
         pool.clone(),
         std::env::temp_dir().join("asset-nest-test-no-dist"),
     )
-    .with_prober(Arc::new(StubProber::new(&["10.0.0.0/29", "10.0.1.0/29"])))
 }
 
 /// 以 `oneshot` 發送請求；回傳狀態碼與 JSON（空內容為 `Value::Null`）。
@@ -154,16 +120,30 @@ async fn create_subnet(state: &AppState, cidr: &str) -> i64 {
     json["id"].as_i64().expect("回應含 id")
 }
 
-/// 開啟網段的快速掃描觀測。
-async fn enable_observation(state: &AppState, id: i64) {
-    let (status, json) = send(
-        state,
-        Method::PATCH,
-        &format!("/api/v1/subnets/{id}"),
-        Some(json!({ "observed": true })),
+/// 植入一台在線代理涵蓋該 CIDR（有效涵蓋＝網段有在線代理；見票 08）。
+async fn cover_with_agent(pool: &SqlitePool, cidr: &str) {
+    sqlx::query(
+        "INSERT INTO agent
+             (id, name, version, source_ip, subnet_cidr, subnet_id,
+              first_report_at, last_report_at)
+         VALUES ('test-agent', 'test-agent', '0.1.0', '203.0.113.9', ?,
+                 (SELECT id FROM subnets WHERE cidr = ?), ?, ?)",
     )
-    .await;
-    assert_eq!(status, StatusCode::OK, "開啟觀測應成功：{json}");
+    .bind(cidr)
+    .bind(cidr)
+    .bind(timestamp(Utc::now()))
+    .bind(timestamp(Utc::now()))
+    .execute(pool)
+    .await
+    .expect("植入在線代理");
+}
+
+/// 讓所有代理的最近回報時間過期（超過 `AGENT_STALE_SECS`）。
+async fn expire_agents(pool: &SqlitePool) {
+    sqlx::query("UPDATE agent SET last_report_at = '2020-01-01T00:00:00Z'")
+        .execute(pool)
+        .await
+        .expect("調整代理回報時間");
 }
 
 /// 新增資產並斷言成功，回傳 id。
@@ -265,7 +245,7 @@ async fn ip_history_returns_presence_events_and_used_macs() {
     let pool = test_pool().await;
     let state = test_state(&pool);
     let id = create_subnet(&state, "10.0.0.0/29").await;
-    enable_observation(&state, id).await;
+    cover_with_agent(&pool, "10.0.0.0/29").await;
 
     // 已知 MAC 連結的資產（.2 為目前現況 MAC）。
     let asset = create_asset(
@@ -360,18 +340,18 @@ async fn ip_history_empty_and_unobserved_subnets() {
     let pool = test_pool().await;
     let state = test_state(&pool);
 
-    // 未開觀測：observed=false、空歷史。
+    // 無代理涵蓋：observed=false、空歷史。
     let off = create_subnet(&state, "10.0.0.0/29").await;
     let (status, json) = ip_history(&state, off, "10.0.0.1").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["observed"], false, "未開觀測：未觀測");
+    assert_eq!(json["observed"], false, "無在線代理：未觀測");
     assert!(json["presence"].is_null());
     assert_eq!(json["events"].as_array().map(Vec::len), Some(0));
     assert_eq!(json["macs"].as_array().map(Vec::len), Some(0));
 
-    // 已開觀測但位址無任何記錄：observed=true、presence 為 null、清單為空。
+    // 有在線代理但位址無任何記錄：observed=true、presence 為 null、清單為空。
     let on = create_subnet(&state, "10.0.1.0/29").await;
-    enable_observation(&state, on).await;
+    cover_with_agent(&pool, "10.0.1.0/29").await;
     let (status, json) = ip_history(&state, on, "10.0.1.3").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["observed"], true);
@@ -379,12 +359,11 @@ async fn ip_history_empty_and_unobserved_subnets() {
     assert_eq!(json["events"].as_array().map(Vec::len), Some(0));
     assert_eq!(json["macs"].as_array().map(Vec::len), Some(0));
 
-    // 非同 L2 的網段：observed=false（有效涵蓋不含遠端網段）。
-    let remote = create_subnet(&state, "10.9.9.0/29").await;
-    enable_observation(&state, remote).await;
-    let (status, json) = ip_history(&state, remote, "10.9.9.1").await;
+    // 代理過期：observed=false（有效涵蓋只認在線代理；既有資料保留）。
+    expire_agents(&pool).await;
+    let (status, json) = ip_history(&state, on, "10.0.1.3").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["observed"], false);
+    assert_eq!(json["observed"], false, "代理離線：未觀測");
 
     // 不存在的網段 → 404；位址格式錯誤 → 400。
     let (status, json) = ip_history(&state, 999, "10.0.0.1").await;
@@ -530,7 +509,7 @@ async fn export_observations_returns_csv_with_bom_and_events_newest_first() {
     let pool = test_pool().await;
     let state = test_state(&pool);
     let id = create_subnet(&state, "10.0.0.0/29").await;
-    enable_observation(&state, id).await;
+    cover_with_agent(&pool, "10.0.0.0/29").await;
 
     // 三筆事件：時間新到舊應為 03 → 02 → 01。
     for (mac, kind, source, observed_at) in [

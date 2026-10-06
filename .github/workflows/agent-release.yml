@@ -1,0 +1,103 @@
+name: 觀測代理發佈（tag agent-v*）
+
+# 推 agent-v* 標籤時建置 x86_64／aarch64 musl 靜態產物並上傳 GitHub Release；
+# workflow_dispatch 僅測試建置（非標籤時不執行 release job）。
+on:
+  push:
+    tags:
+      - 'agent-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 建置 ${{ matrix.artifact }}（musl 靜態）
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: asset-nest-agent-x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: asset-nest-agent-aarch64
+    steps:
+      - name: 取出原始碼
+        uses: actions/checkout@v5
+
+      - name: 安裝 musl 建置工具
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y musl-tools cmake
+          # Ubuntu 的 musl-tools 只提供 musl-gcc；cc-rs（aws-lc-sys 等 C 依賴）
+          # 對 musl 目標先找 <arch>-linux-musl-gcc，於同架構 runner 建立別名。
+          sudo ln -sf /usr/bin/musl-gcc "/usr/local/bin/$(uname -m)-linux-musl-gcc"
+
+      - name: 加入 Rust musl target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: 還原 Cargo 建置快取
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent/target
+          key: agent-release-${{ matrix.target }}-${{ hashFiles('agent/Cargo.lock') }}
+          restore-keys: |
+            agent-release-${{ matrix.target }}-
+
+      - name: 建置代理（musl 靜態）
+        run: cargo build --release --locked --target ${{ matrix.target }} --manifest-path agent/Cargo.toml
+
+      - name: 檢驗並整理產物
+        run: |
+          BIN="agent/target/${{ matrix.target }}/release/asset-nest-agent"
+          file "$BIN"
+          # musl 目標產物為靜態連結（x86_64 為 static-pie）。
+          file "$BIN" | grep -qE '(static|static-pie) linked'
+          mkdir -p dist
+          cp "$BIN" "dist/${{ matrix.artifact }}"
+          file "dist/${{ matrix.artifact }}"
+
+      - name: 上傳產物
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: 上傳 Release 產物
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/agent-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下載建置產物
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 建立 Release（若尚未存在）並上傳
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "$TAG" --generate-notes
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            dist/asset-nest-agent-x86_64 dist/asset-nest-agent-aarch64
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"

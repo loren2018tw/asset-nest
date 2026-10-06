@@ -12,12 +12,11 @@ use axum::http::header;
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
-use chrono::Local;
+use chrono::{Local, Utc};
 
 use crate::AppState;
 use crate::api::{ApiError, encode_filename};
-use crate::observation::{self, IpHistory, MacHistory, OutOfSubnetList};
-use crate::probe::normalize_mac;
+use crate::observation::{self, IpHistory, MacHistory, OutOfSubnetList, normalize_mac};
 use crate::subnets::{self, Subnet};
 
 pub fn router() -> Router<AppState> {
@@ -46,8 +45,14 @@ async fn get_ip_history(
     let subnet = load_subnet(&state, id).await?;
     let address = validate_address(&address)?;
 
-    let history =
-        observation::ip_history(&state.db, state.prober.as_ref(), &subnet, &address).await?;
+    let history = observation::ip_history(
+        &state.db,
+        &subnet,
+        &address,
+        Utc::now(),
+        state.agent_stale_secs,
+    )
+    .await?;
     Ok(Json(history))
 }
 
@@ -62,8 +67,14 @@ async fn export_ip_history(
     let subnet = load_subnet(&state, id).await?;
     let address = validate_address(&address)?;
 
-    let history =
-        observation::ip_history(&state.db, state.prober.as_ref(), &subnet, &address).await?;
+    let history = observation::ip_history(
+        &state.db,
+        &subnet,
+        &address,
+        Utc::now(),
+        state.agent_stale_secs,
+    )
+    .await?;
     let body = observation::history_export_csv(&history.events)?;
 
     let date = Local::now().format("%Y%m%d");
@@ -100,8 +111,8 @@ async fn get_mac_history(
 }
 
 /// 列出被動監聽到的網段外位址（見票 01、ADR-0017）：`out_of_subnet = 1`
-/// 的現況列，last_seen 新到舊，附探測網段、首見與 MAC 資產連結。唯讀；
-/// 資料只由探索掃描產生；位址已落在網段 CIDR 內的殘留列於讀取時跳過。
+/// 的現況列，last_seen 新到舊，附觀測網段、首見與 MAC 資產連結。唯讀；
+/// 資料只由觀測代理的被動監聽產生；位址已落在網段 CIDR 內的殘留列於讀取時跳過。
 async fn get_out_of_subnet_observations(
     State(state): State<AppState>,
 ) -> Result<Json<OutOfSubnetList>, ApiError> {

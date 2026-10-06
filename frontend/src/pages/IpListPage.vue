@@ -60,38 +60,6 @@
           @update:model-value="reload"
         />
       </div>
-      <!-- 立即快速掃描（見票 02）；v6 無觀測，v4 未開觀測／非同 L2 時停用。
-           探索掃描開啟時另提供「探索掃描」（見票 05）。 -->
-      <div v-if="!isV6" class="col-12 col-sm-6 col-md-3 text-right">
-        <span>
-          <q-btn
-            color="primary"
-            outline
-            icon="radar"
-            label="立即掃描"
-            :loading="sweeping"
-            :disable="sweepDisabledReason !== null"
-            @click="runQuickSweep"
-          />
-          <q-tooltip v-if="sweepDisabledReason">{{
-            sweepDisabledReason
-          }}</q-tooltip>
-        </span>
-        <span v-if="subnet?.discovery_enabled" class="q-ml-sm">
-          <q-btn
-            color="primary"
-            outline
-            icon="travel_explore"
-            label="探索掃描"
-            :loading="discovering"
-            :disable="sweepDisabledReason !== null"
-            @click="runDiscoverySweep"
-          />
-          <q-tooltip v-if="sweepDisabledReason">{{
-            sweepDisabledReason
-          }}</q-tooltip>
-        </span>
-      </div>
       <!-- v6 登錄制：僅已指派位址存在，由「新增位址」輸入並即指派（見票 06） -->
       <div v-if="isV6" class="col-12 col-sm-6 col-md-6 text-right">
         <q-btn
@@ -160,7 +128,7 @@
           <template v-else-if="!props.row.last_seen_at">
             <span class="text-grey-7">從未上線</span>
             <q-tooltip>
-              已開啟觀測並持續檢查；尚未看到此位址
+              已由觀測代理持續檢查；尚未看到此位址
               <template v-if="props.row.last_checked_at">
                 <br />最後檢查：{{ checkedLabel(props.row.last_checked_at) }}
               </template>
@@ -293,19 +261,13 @@ import { useRoute } from "vue-router";
 import { fetchAsset, type Asset } from "@/api/assets";
 import {
   listSubnetIps,
-  quickSweep,
   type IpAssignmentTarget,
   type IpEntry,
   type IpObservedFilter,
   type IpSortField,
   type IpStatus
 } from "@/api/ips";
-import {
-  fetchSubnet,
-  discoverySweep,
-  type AddressFamily,
-  type Subnet
-} from "@/api/subnets";
+import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
@@ -360,40 +322,15 @@ const assetLoadingAddress = ref<string | null>(null);
 /** 觀測歷史對話框（見票 06）：以列位址開啟。 */
 const observationOpen = ref(false);
 const observationEntry = ref<IpEntry | null>(null);
-/** 「立即掃描」進行中（見票 02）。 */
-const sweeping = ref(false);
-/** 「探索掃描」進行中（見票 05）。 */
-const discovering = ref(false);
-
 /** v6 為登錄制（見票 06）：僅列登錄位址、用途固定 static、無 pool。 */
 const isV6 = computed(() => subnet.value?.cidr.includes(":") ?? false);
-
-/** 立即掃描停用原因（null＝可掃描；見票 02 前提）。 */
-const sweepDisabledReason = computed<string | null>(() => {
-  if (!subnet.value) {
-    return "網段載入中";
-  }
-  if (!subnet.value.observed) {
-    return "此網段未開啟觀測";
-  }
-  if (!subnet.value.local) {
-    return "本機與此網段非同 L2，無法觀測";
-  }
-  return null;
-});
 
 /** 「未觀測」列的提示（三態定義見 spec §Further Notes）。 */
 const unobservedHint = computed(() => {
   if (isV6.value) {
     return "IPv6 網段不支援觀測";
   }
-  if (!subnet.value?.observed) {
-    return "此網段未開啟觀測";
-  }
-  if (!subnet.value.local) {
-    return "本機與此網段非同 L2，無法觀測";
-  }
-  return "位址未被已啟用的觀測涵蓋";
+  return "此網段沒有在線觀測代理（尚未安裝或代理離線）";
 });
 
 const family = computed<AddressFamily>(() => (isV6.value ? "ipv6" : "ipv4"));
@@ -664,48 +601,6 @@ async function openBoundAsset(entry: IpEntry) {
 /** 資產編輯儲存後：重載清單（描述／位置，或對話框內取消的指派）。 */
 function onBoundAssetSaved() {
   void fetchIps();
-}
-
-/** 立即快速掃描：同步執行、回報結果後重載清單（見票 02）。 */
-async function runQuickSweep() {
-  sweeping.value = true;
-  try {
-    const report = await quickSweep(subnetId.value);
-    $q.notify({
-      type: "positive",
-      message: `快速掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
-    });
-    await fetchIps();
-  } catch (cause) {
-    $q.notify({ type: "negative", message: messageOf(cause) });
-  } finally {
-    sweeping.value = false;
-  }
-}
-
-/** 立即探索掃描：整段限速探測、回報結果後重載清單（見票 05）。 */
-async function runDiscoverySweep() {
-  discovering.value = true;
-  try {
-    const report = await discoverySweep(subnetId.value);
-    const passive =
-      report.passive_seen > 0 ? `｜被動看到 ${report.passive_seen}` : "";
-    $q.notify({
-      type: "positive",
-      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）${passive}`
-    });
-    if (subnet.value !== null && report.last_discovery_at !== undefined) {
-      subnet.value = {
-        ...subnet.value,
-        last_discovery_at: report.last_discovery_at
-      };
-    }
-    await fetchIps();
-  } catch (cause) {
-    $q.notify({ type: "negative", message: messageOf(cause) });
-  } finally {
-    discovering.value = false;
-  }
 }
 
 /** 丟棄過期回應：快速切換網段時前一個網段請求可能較晚回來（見票 24）。 */

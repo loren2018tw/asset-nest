@@ -35,6 +35,7 @@ KEA_INTERFACES_RAW=""
 KEA_SUBNET=""
 FORCE_KEA_CONFIG=0
 KEA_PASSWORD=""
+AGENT_AUTH_CODE=""
 KEA_HOOK_PATH=""
 KEA_LEASE_HOOK_PATH=""
 KEA_SUBNET_HOOK_PATH=""
@@ -474,6 +475,19 @@ configure_kea() {
 
 # ---- asset-nest 服務 --------------------------------------------------------
 
+configure_agent_auth_code() {
+  # 觀測代理共用認證碼（見 docs/adr/0019）：首次隨機產生、重跑沿用既有值。
+  if [ -f "$ENV_FILE" ]; then
+    AGENT_AUTH_CODE="$(grep -m1 '^AGENT_AUTH_CODE=' "$ENV_FILE" | cut -d= -f2- || true)"
+  fi
+  if [ -n "$AGENT_AUTH_CODE" ]; then
+    info "沿用既有代理認證碼（$ENV_FILE）。"
+  else
+    AGENT_AUTH_CODE="$(generate_password)"
+    info "產生代理認證碼（AGENT_AUTH_CODE）。"
+  fi
+}
+
 write_env_file() {
   install -d -m 0750 -o root -g "$SERVICE_USER" "$CONFIG_DIR"
   info "寫入環境設定（$ENV_FILE）..."
@@ -482,6 +496,8 @@ write_env_file() {
     printf 'BIND_ADDR=%s\n' "$BIND_ADDR"
     printf 'DATABASE_URL=sqlite://%s/asset-nest.db\n' "$STATE_DIR"
     printf 'WEB_DIST_DIR=%s/web\n' "$INSTALL_DIR"
+    printf '# 代理入庫認證碼（見 docs/adr/0019；代理安裝時輸入同一組）\n'
+    printf 'AGENT_AUTH_CODE=%s\n' "$AGENT_AUTH_CODE"
     if [ "$WITH_KEA" -eq 1 ]; then
       printf 'KEA_API_URL=http://127.0.0.1:%s\n' "$KEA_PORT"
       printf 'KEA_API_USERNAME=%s\n' "${KEA_USERNAME:-asset-nest}"
@@ -519,9 +535,6 @@ ExecStart=${INSTALL_DIR}/asset-nest
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
-# IP 觀測 ARP 探測的最小權限（見 docs/adr/0015）
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
@@ -574,6 +587,9 @@ print_summary() {
   asset-nest：http://<主機>:${BIND_ADDR##*:}（BIND_ADDR=${BIND_ADDR}）
   資料庫：${STATE_DIR}/asset-nest.db
   環境檔：${ENV_FILE}
+  代理認證碼：grep AGENT_AUTH_CODE ${ENV_FILE}
+  安裝觀測代理（於目標網段主機執行）：
+    sudo ./deploy/agent-install.sh --server-url http://<主機>:${BIND_ADDR##*:} --auth-code <認證碼>
 EOF
   if [ "$WITH_KEA" -eq 1 ]; then
     cat <<EOF
@@ -617,6 +633,7 @@ main() {
     systemctl restart isc-kea-dhcp4-server
   fi
 
+  configure_agent_auth_code
   write_env_file
   write_unit_file
   systemctl daemon-reload

@@ -40,8 +40,8 @@
             rounded
             class="bg-grey-3 q-mb-md"
           >
-            未觀測：此位址未被已啟用的觀測涵蓋（網段未開啟觀測、本機非同
-            L2，或為 IPv6）。
+            未觀測：所屬網段沒有在線觀測代理（尚未安裝或代理離線；IPv6
+            網段恆為未觀測）。
           </q-banner>
 
           <template v-else>
@@ -51,7 +51,7 @@
             >
               <q-badge color="grey-7">從未上線</q-badge>
               <span class="text-grey-7 q-ml-sm">
-                已開啟觀測並持續檢查；尚未看到此位址
+                已由觀測代理持續檢查；尚未看到此位址
                 <template v-if="presence?.last_checked_at">
                   （最後檢查：{{ exactTime(presence.last_checked_at) }}）
                 </template>

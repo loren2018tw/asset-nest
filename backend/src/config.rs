@@ -5,16 +5,12 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::probe::ProbeMode;
-
 /// `OBSERVATION_RETENTION_DAYS` 的預設值（一年；見 ADR-0016）。
 const DEFAULT_RETENTION_DAYS: u32 = 365;
-/// `OBSERVATION_DISCOVERY_INTERVAL_SECS` 的預設值（每日；見票 05、spec §環境設定）。
-const DEFAULT_DISCOVERY_INTERVAL_SECS: u64 = 86_400;
-/// `OBSERVATION_DISCOVERY_RATE_PPS` 的預設值（見票 05、spec §環境設定）。
-const DEFAULT_DISCOVERY_RATE_PPS: u32 = 1_000;
-/// `OBSERVATION_PASSIVE_WINDOW_SECS` 的預設值（見票 01、ADR-0017）。
-const DEFAULT_PASSIVE_WINDOW_SECS: u64 = 60;
+/// `AGENT_STALE_SECS` 的預設值（15 分鐘；見票 01、spec §環境設定）。
+const DEFAULT_AGENT_STALE_SECS: u64 = 900;
+/// `AGENT_AUTH_FAILURE_RETENTION_DAYS` 的預設值（30 天；見票 08、spec §環境設定）。
+const DEFAULT_AGENT_AUTH_FAILURE_RETENTION_DAYS: u32 = 30;
 
 /// 後端啟動設定（見 `.env.example`）。
 #[derive(Debug, Clone)]
@@ -31,21 +27,17 @@ pub struct Config {
     pub kea_api_username: Option<String>,
     /// Kea 控制通道 Basic 認證密碼；`KEA_API_PASSWORD`（搭配帳號使用）。
     pub kea_api_password: Option<String>,
-    /// 觀測探測模式；`OBSERVATION_PROBE_MODE`（`auto|raw|unprivileged`，預設 `auto`；
-    /// 見 `docs/adr/0015`）。
-    pub observation_probe_mode: ProbeMode,
+    /// 代理入庫認證碼；`AGENT_AUTH_CODE`，未設定（或空白）為 `None`＝入庫端點
+    /// 一律 503（見 ADR-0019）。
+    pub agent_auth_code: Option<String>,
+    /// 代理「在線」門檻秒數；`AGENT_STALE_SECS`（正整數，預設 900；見票 01）。
+    pub agent_stale_secs: u64,
+    /// 代理被拒回報保留天數；`AGENT_AUTH_FAILURE_RETENTION_DAYS`（正整數，
+    /// 預設 30；見票 08）。清理 `agent_auth_failure` 的過期列。
+    pub agent_auth_failure_retention_days: u32,
     /// 觀測事件保留天數；`OBSERVATION_RETENTION_DAYS`（正整數，預設 365；
     /// 見 `docs/adr/0016`）。僅影響事件歷史，不動 `ip_presence` 現況。
     pub observation_retention_days: u32,
-    /// 探索掃描全站預設間隔秒數；`OBSERVATION_DISCOVERY_INTERVAL_SECS`
-    /// （正整數，預設 86400；網段可用 `discovery_interval_minutes` 覆寫）。
-    pub observation_discovery_interval_secs: u64,
-    /// 探索掃描每秒最多送出的探測數；`OBSERVATION_DISCOVERY_RATE_PPS`
-    /// （正整數，預設 1000）。
-    pub observation_discovery_rate_pps: u32,
-    /// 探索掃描時被動 ARP 監聽窗長秒數；`OBSERVATION_PASSIVE_WINDOW_SECS`
-    /// （非負整數，預設 60；0＝停用；見票 01、ADR-0017）。
-    pub observation_passive_window_secs: u64,
 }
 
 impl Config {
@@ -73,35 +65,22 @@ impl Config {
             anyhow::bail!("KEA_API_PASSWORD 已設定但缺少 KEA_API_USERNAME");
         }
 
-        let observation_probe_mode = match std::env::var("OBSERVATION_PROBE_MODE") {
-            Ok(raw) => ProbeMode::parse(&raw).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "OBSERVATION_PROBE_MODE 格式錯誤：{raw}（僅接受 auto／raw／unprivileged）"
-                )
-            })?,
-            Err(_) => ProbeMode::default(),
+        let agent_auth_code = parse_agent_auth_code(std::env::var("AGENT_AUTH_CODE").ok());
+
+        let agent_stale_secs = match std::env::var("AGENT_STALE_SECS") {
+            Ok(raw) => parse_agent_stale_secs(&raw)?,
+            Err(_) => DEFAULT_AGENT_STALE_SECS,
         };
+
+        let agent_auth_failure_retention_days =
+            match std::env::var("AGENT_AUTH_FAILURE_RETENTION_DAYS") {
+                Ok(raw) => parse_agent_auth_failure_retention_days(&raw)?,
+                Err(_) => DEFAULT_AGENT_AUTH_FAILURE_RETENTION_DAYS,
+            };
 
         let observation_retention_days = match std::env::var("OBSERVATION_RETENTION_DAYS") {
             Ok(raw) => parse_retention_days(&raw)?,
             Err(_) => DEFAULT_RETENTION_DAYS,
-        };
-
-        let observation_discovery_interval_secs =
-            match std::env::var("OBSERVATION_DISCOVERY_INTERVAL_SECS") {
-                Ok(raw) => parse_discovery_interval_secs(&raw)?,
-                Err(_) => DEFAULT_DISCOVERY_INTERVAL_SECS,
-            };
-
-        let observation_discovery_rate_pps = match std::env::var("OBSERVATION_DISCOVERY_RATE_PPS") {
-            Ok(raw) => parse_discovery_rate_pps(&raw)?,
-            Err(_) => DEFAULT_DISCOVERY_RATE_PPS,
-        };
-
-        let observation_passive_window_secs = match std::env::var("OBSERVATION_PASSIVE_WINDOW_SECS")
-        {
-            Ok(raw) => parse_passive_window_secs(&raw)?,
-            Err(_) => DEFAULT_PASSIVE_WINDOW_SECS,
         };
 
         Ok(Self {
@@ -111,11 +90,10 @@ impl Config {
             kea_api_url,
             kea_api_username,
             kea_api_password,
-            observation_probe_mode,
+            agent_auth_code,
+            agent_stale_secs,
+            agent_auth_failure_retention_days,
             observation_retention_days,
-            observation_discovery_interval_secs,
-            observation_discovery_rate_pps,
-            observation_passive_window_secs,
         })
     }
 }
@@ -131,37 +109,34 @@ fn parse_retention_days(raw: &str) -> anyhow::Result<u32> {
     Ok(days)
 }
 
-/// 解析 `OBSERVATION_DISCOVERY_INTERVAL_SECS`：須為正整數秒，缺值由呼叫端套用預設。
-fn parse_discovery_interval_secs(raw: &str) -> anyhow::Result<u64> {
-    let seconds: u64 = raw.trim().parse().map_err(|_| {
+/// 解析 `AGENT_AUTH_FAILURE_RETENTION_DAYS`：須為正整數天數，缺值由呼叫端套用預設。
+fn parse_agent_auth_failure_retention_days(raw: &str) -> anyhow::Result<u32> {
+    let days: u32 = raw.trim().parse().map_err(|_| {
         anyhow::anyhow!(
-            "OBSERVATION_DISCOVERY_INTERVAL_SECS 格式錯誤：{raw}（須為正整數秒數，例：86400）"
+            "AGENT_AUTH_FAILURE_RETENTION_DAYS 格式錯誤：{raw}（須為正整數天數，例：30）"
         )
+    })?;
+    if days == 0 {
+        anyhow::bail!("AGENT_AUTH_FAILURE_RETENTION_DAYS 須為正整數天數（收到 0）");
+    }
+    Ok(days)
+}
+
+/// 解析 `AGENT_AUTH_CODE`：未設定或空白視為未設定（入庫端點回 503；見 ADR-0019）。
+fn parse_agent_auth_code(raw: Option<String>) -> Option<String> {
+    raw.map(|code| code.trim().to_string())
+        .filter(|code| !code.is_empty())
+}
+
+/// 解析 `AGENT_STALE_SECS`：須為正整數秒，缺值由呼叫端套用預設。
+fn parse_agent_stale_secs(raw: &str) -> anyhow::Result<u64> {
+    let seconds: u64 = raw.trim().parse().map_err(|_| {
+        anyhow::anyhow!("AGENT_STALE_SECS 格式錯誤：{raw}（須為正整數秒數，例：900）")
     })?;
     if seconds == 0 {
-        anyhow::bail!("OBSERVATION_DISCOVERY_INTERVAL_SECS 須為正整數秒數（收到 0）");
+        anyhow::bail!("AGENT_STALE_SECS 須為正整數秒數（收到 0）");
     }
     Ok(seconds)
-}
-
-/// 解析 `OBSERVATION_DISCOVERY_RATE_PPS`：須為正整數（每秒探測數），缺值由呼叫端套用預設。
-fn parse_discovery_rate_pps(raw: &str) -> anyhow::Result<u32> {
-    let rate: u32 = raw.trim().parse().map_err(|_| {
-        anyhow::anyhow!("OBSERVATION_DISCOVERY_RATE_PPS 格式錯誤：{raw}（須為正整數，例：1000）")
-    })?;
-    if rate == 0 {
-        anyhow::bail!("OBSERVATION_DISCOVERY_RATE_PPS 須為正整數（收到 0）");
-    }
-    Ok(rate)
-}
-
-/// 解析 `OBSERVATION_PASSIVE_WINDOW_SECS`：須為非負整數秒（0＝停用），缺值由呼叫端套用預設。
-fn parse_passive_window_secs(raw: &str) -> anyhow::Result<u64> {
-    raw.trim().parse().map_err(|_| {
-        anyhow::anyhow!(
-            "OBSERVATION_PASSIVE_WINDOW_SECS 格式錯誤：{raw}（須為非負整數秒數，0＝停用，例：60）"
-        )
-    })
 }
 
 #[cfg(test)]
@@ -195,64 +170,75 @@ mod tests {
     }
 
     #[test]
-    fn discovery_settings_accept_positive_integers_and_reject_invalid() {
+    fn auth_failure_retention_accepts_positive_integers_and_rejects_invalid() {
         assert_eq!(
-            parse_discovery_interval_secs("86400").expect("合法秒數"),
-            86_400
+            parse_agent_auth_failure_retention_days("30").expect("合法天數"),
+            30
         );
-        assert_eq!(parse_discovery_interval_secs(" 60 ").expect("容許空白"), 60);
-        for invalid in ["0", "-1", "abc", "1.5", ""] {
-            let error = parse_discovery_interval_secs(invalid)
-                .expect_err(&format!("應拒絕 {invalid:?}"))
-                .to_string();
-            assert!(
-                error.contains("OBSERVATION_DISCOVERY_INTERVAL_SECS"),
-                "錯誤訊息須指明變數（{invalid:?}）：{error}"
-            );
-        }
-
-        assert_eq!(parse_discovery_rate_pps("1000").expect("合法速率"), 1_000);
-        assert_eq!(parse_discovery_rate_pps(" 1 ").expect("容許空白"), 1);
-        for invalid in ["0", "-1", "abc", "1.5", ""] {
-            let error = parse_discovery_rate_pps(invalid)
-                .expect_err(&format!("應拒絕 {invalid:?}"))
-                .to_string();
-            assert!(
-                error.contains("OBSERVATION_DISCOVERY_RATE_PPS"),
-                "錯誤訊息須指明變數（{invalid:?}）：{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn discovery_defaults_are_daily_and_1000_pps() {
-        assert_eq!(DEFAULT_DISCOVERY_INTERVAL_SECS, 86_400);
-        assert_eq!(DEFAULT_DISCOVERY_RATE_PPS, 1_000);
-    }
-
-    #[test]
-    fn passive_window_accepts_non_negative_integers_and_rejects_invalid() {
         assert_eq!(
-            parse_passive_window_secs("60").expect("合法窗長"),
-            60,
-            "一般秒數"
+            parse_agent_auth_failure_retention_days(" 7 ").expect("容許空白"),
+            7
         );
-        assert_eq!(parse_passive_window_secs("0").expect("0＝停用"), 0);
-        assert_eq!(parse_passive_window_secs(" 5 ").expect("容許空白"), 5);
+        assert_eq!(
+            parse_agent_auth_failure_retention_days("1").expect("最小合法天數"),
+            1
+        );
 
-        for invalid in ["-1", "abc", "1.5", ""] {
-            let error = parse_passive_window_secs(invalid)
+        for invalid in ["0", "-1", "abc", "1.5", ""] {
+            let error = parse_agent_auth_failure_retention_days(invalid)
                 .expect_err(&format!("應拒絕 {invalid:?}"))
                 .to_string();
             assert!(
-                error.contains("OBSERVATION_PASSIVE_WINDOW_SECS"),
+                error.contains("AGENT_AUTH_FAILURE_RETENTION_DAYS"),
                 "錯誤訊息須指明變數（{invalid:?}）：{error}"
             );
         }
     }
 
     #[test]
-    fn passive_window_default_is_60() {
-        assert_eq!(DEFAULT_PASSIVE_WINDOW_SECS, 60);
+    fn auth_failure_retention_default_is_30_days() {
+        assert_eq!(DEFAULT_AGENT_AUTH_FAILURE_RETENTION_DAYS, 30);
+    }
+
+    #[test]
+    fn agent_stale_secs_accepts_positive_integers_and_rejects_invalid() {
+        assert_eq!(parse_agent_stale_secs("900").expect("合法秒數"), 900);
+        assert_eq!(parse_agent_stale_secs(" 60 ").expect("容許空白"), 60);
+        assert_eq!(parse_agent_stale_secs("1").expect("最小合法秒數"), 1);
+
+        for invalid in ["0", "-1", "abc", "1.5", ""] {
+            let error = parse_agent_stale_secs(invalid)
+                .expect_err(&format!("應拒絕 {invalid:?}"))
+                .to_string();
+            assert!(
+                error.contains("AGENT_STALE_SECS"),
+                "錯誤訊息須指明變數（{invalid:?}）：{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_stale_default_is_900() {
+        assert_eq!(DEFAULT_AGENT_STALE_SECS, 900);
+    }
+
+    #[test]
+    fn agent_auth_code_missing_or_blank_is_unset() {
+        assert_eq!(parse_agent_auth_code(None), None, "未設定＝未啟用");
+        assert_eq!(
+            parse_agent_auth_code(Some(String::new())),
+            None,
+            "空字串視為未設定"
+        );
+        assert_eq!(
+            parse_agent_auth_code(Some("   ".to_string())),
+            None,
+            "全空白視為未設定"
+        );
+        assert_eq!(
+            parse_agent_auth_code(Some("  secret ".to_string())),
+            Some("secret".to_string()),
+            "前後空白應去除"
+        );
     }
 }

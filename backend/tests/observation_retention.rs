@@ -1,13 +1,18 @@
-//! 觀測事件保留清理整合測試（見票 04、ADR-0016）。
+//! 保留清理整合測試（見票 04、票 08、ADR-0016）。
 //!
-//! 直接呼叫 [`cleanup_events`] 對套用 migrations 的記憶體 SQLite 驗證：
-//! 只刪過期事件（含嚴格早於 cutoff 的界線）、現況列不受影響、清理為全站。
+//! 直接呼叫 [`cleanup_events`] 與 [`cleanup_auth_failures`] 對套用 migrations
+//! 的記憶體 SQLite 驗證：只刪過期列（含嚴格早於 cutoff 的界線）、現況列與
+//! 代理列不受影響、清理為全站。
 
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
+use asset_nest::agents::cleanup_auth_failures;
 use asset_nest::observation::cleanup_events;
+
+/// 現況查詢列：（位址、最後可見時間、最後可見 MAC、最後檢查時間）。
+type PresenceRow = (String, Option<String>, Option<String>, Option<String>);
 
 /// 建立測試資料庫並套用 migrations。
 async fn test_pool() -> SqlitePool {
@@ -34,7 +39,7 @@ fn now() -> DateTime<Utc> {
 
 /// 植入測試網段，回傳 id。
 async fn insert_subnet(pool: &SqlitePool, cidr: &str) -> i64 {
-    sqlx::query("INSERT INTO subnets (cidr, observed) VALUES (?, 1)")
+    sqlx::query("INSERT INTO subnets (cidr) VALUES (?)")
         .bind(cidr)
         .execute(pool)
         .await
@@ -132,7 +137,7 @@ async fn cleanup_deletes_only_expired_events_and_keeps_presence_intact() {
     );
 
     // 現況完整保留：last_seen 原值不動、「從未上線」仍為 NULL、檢查時間不動。
-    let presence: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let presence: Vec<PresenceRow> = sqlx::query_as(
         "SELECT address, last_seen_at, last_seen_mac, last_checked_at
            FROM ip_presence WHERE subnet_id = ? ORDER BY address",
     )
@@ -177,4 +182,112 @@ async fn cleanup_is_a_noop_when_nothing_is_expired() {
         .await
         .expect("讀取現況筆數");
     assert_eq!(presence_count, 1, "現況保留");
+}
+
+/// 植入一筆被拒回報列。
+async fn insert_auth_failure(
+    pool: &SqlitePool,
+    source_ip: &str,
+    first_attempt_at: &str,
+    last_attempt_at: &str,
+    attempt_count: i64,
+) {
+    sqlx::query(
+        "INSERT INTO agent_auth_failure
+             (source_ip, claimed_name, claimed_version, first_attempt_at, last_attempt_at,
+              attempt_count)
+         VALUES (?, 'ghost', '9.9.9', ?, ?, ?)",
+    )
+    .bind(source_ip)
+    .bind(first_attempt_at)
+    .bind(last_attempt_at)
+    .bind(attempt_count)
+    .execute(pool)
+    .await
+    .expect("植入被拒回報");
+}
+
+/// 剩餘被拒回報的來源 IP，依 IP 排序。
+async fn auth_failures(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar("SELECT source_ip FROM agent_auth_failure ORDER BY source_ip")
+        .fetch_all(pool)
+        .await
+        .expect("讀取被拒回報")
+}
+
+/// 被拒回報清理：以 `last_attempt_at` 為準，只刪嚴格早於 cutoff 者
+/// （cutoff ＝ 2026-09-06T00:00:00Z；30 天前）。
+#[tokio::test]
+async fn auth_failure_cleanup_deletes_only_expired_rows_and_keeps_boundary() {
+    let pool = test_pool().await;
+
+    insert_auth_failure(
+        &pool,
+        "10.0.0.1",
+        "2025-01-01T00:00:00Z",
+        "2025-01-01T00:00:00Z",
+        1,
+    )
+    .await;
+    insert_auth_failure(
+        &pool,
+        "10.0.0.2",
+        "2025-01-01T00:00:00Z",
+        "2026-09-06T00:00:00Z",
+        5,
+    )
+    .await;
+    insert_auth_failure(
+        &pool,
+        "10.0.0.3",
+        "2025-01-01T00:00:00Z",
+        "2026-10-05T00:00:00Z",
+        2,
+    )
+    .await;
+    // 首次嘗試很久以前、但最近仍在嘗試：不得清掉。
+    insert_auth_failure(
+        &pool,
+        "10.0.0.4",
+        "2024-01-01T00:00:00Z",
+        "2026-10-06T00:00:00Z",
+        9,
+    )
+    .await;
+
+    let deleted = cleanup_auth_failures(&pool, 30, now())
+        .await
+        .expect("清理成功");
+
+    assert_eq!(deleted, 1, "只刪最後嘗試嚴格早於 cutoff 者");
+    assert_eq!(
+        auth_failures(&pool).await,
+        vec![
+            "10.0.0.2".to_string(),
+            "10.0.0.3".to_string(),
+            "10.0.0.4".to_string(),
+        ],
+        "恰在 cutoff 的列保留；最近仍嘗試者保留"
+    );
+}
+
+/// 被拒回報清理為全站、無過期列時刪除 0 筆；不影響事件與代理。
+#[tokio::test]
+async fn auth_failure_cleanup_is_a_noop_when_nothing_is_expired() {
+    let pool = test_pool().await;
+    insert_auth_failure(
+        &pool,
+        "10.0.0.1",
+        "2026-10-01T00:00:00Z",
+        "2026-10-05T00:00:00Z",
+        3,
+    )
+    .await;
+
+    let deleted = cleanup_auth_failures(&pool, 30, now())
+        .await
+        .expect("清理成功");
+
+    assert_eq!(deleted, 0);
+    assert_eq!(auth_failures(&pool).await.len(), 1, "未過期列保留");
 }

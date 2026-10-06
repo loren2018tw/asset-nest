@@ -33,7 +33,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             backend/target
-          key: ${{ matrix.os }}-cargo-${{ hashFiles('backend/Cargo.lock') }}
+            agent/target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('backend/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: |
             ${{ matrix.os }}-cargo-
 
@@ -54,8 +55,52 @@ jobs:
             PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
             pnpm test:kea
 
+      - name: 執行代理安裝（自來源建置、大掃描間隔避免真實掃描）
+        run: |
+          AUTH_CODE="$(sudo grep '^AGENT_AUTH_CODE=' /etc/asset-nest/asset-nest.env | cut -d= -f2-)"
+          test -n "$AUTH_CODE"
+          # 明確指定預設路由介面的網段：runner 可能有多個非 loopback 介面
+          # （如 docker0），代理的自動偵測遇多候選會拒絕啟動。
+          ROUTE_DEV="$(ip -4 route show default | awk '{print $5; exit}')"
+          SUBNET="$(ip -4 -o addr show scope global dev "$ROUTE_DEV" | awk 'NR == 1 {print $4}')"
+          test -n "$SUBNET"
+          sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+            bash -s -- --source-dir "$GITHUB_WORKSPACE" \
+            --server-url http://127.0.0.1:8080 --auth-code "$AUTH_CODE" \
+            --subnet "$SUBNET" --sweep-interval 86400 < deploy/agent-install.sh
+
+      - name: 驗證代理服務、環境檔權限與心跳上線
+        run: |
+          systemctl is-active asset-nest-agent
+          test "$(sudo stat -c '%a:%U:%G' /etc/asset-nest-agent/agent.env)" = "640:root:asset-nest-agent"
+          INSTANCE_ID="$(sudo grep '^AGENT_INSTANCE_ID=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)"
+          test -n "$INSTANCE_ID"
+          for attempt in $(seq 1 12); do
+            if curl -fsS http://127.0.0.1:8080/api/v1/agents \
+              | jq -e --arg id "$INSTANCE_ID" 'any(.items[]; .instance_id == $id and .online)' >/dev/null; then
+              echo "代理 $INSTANCE_ID 已在線。"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "等待代理上線逾時（instance id：$INSTANCE_ID）。" >&2
+          curl -fsS http://127.0.0.1:8080/api/v1/agents || true
+          exit 1
+
+      - name: 重跑代理安裝（重跑＝更新；保留 instance id 與認證碼）
+        run: |
+          INSTANCE_ID_BEFORE="$(sudo grep '^AGENT_INSTANCE_ID=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)"
+          sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+            bash -s -- --source-dir "$GITHUB_WORKSPACE" --sweep-interval 86400 \
+            --server-url http://127.0.0.1:8080 < deploy/agent-install.sh
+          systemctl is-active --quiet asset-nest-agent
+          test "$(sudo grep '^AGENT_INSTANCE_ID=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)" = "$INSTANCE_ID_BEFORE"
+          test "$(sudo grep '^AGENT_AUTH_CODE=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)" \
+            = "$(sudo grep '^AGENT_AUTH_CODE=' /etc/asset-nest/asset-nest.env | cut -d= -f2-)"
+
       - name: 失敗時輸出服務紀錄
         if: failure()
         run: |
           sudo journalctl -u asset-nest --no-pager -n 200 || true
+          sudo journalctl -u asset-nest-agent --no-pager -n 200 || true
           sudo journalctl -u isc-kea-dhcp4-server --no-pager -n 200 || true

@@ -82,23 +82,18 @@
           <span class="mono-text">{{ props.row.subnet_cidr }}</span>
         </q-td>
       </template>
-      <!-- 空狀態（見票 02）：說明資料只在探索掃描被動監聽時產生 -->
+      <!-- 空狀態：說明資料由觀測代理的被動監聽產生 -->
       <template #no-data>
         <div class="full-width q-px-md q-py-md text-grey-7">
           <div class="text-subtitle2 q-mb-xs">尚無網段外觀測資料</div>
           <ul class="q-my-none q-pl-lg">
             <li>
-              只於<strong>探索掃描</strong>時，在被探測網段的介面上被動監聽
-              ARP；快速掃描不監聽。
+              由觀測代理<strong>持續被動監聽</strong> ARP（只收不送）：sender
+              位址落在代理涵蓋網段 CIDR <strong>外</strong>者列於此。
             </li>
             <li>
-              需要 raw 模式（CAP_NET_RAW）；unprivileged
-              降級模式無法被動監聽，不會有資料。
-            </li>
-            <li>
-              監聽窗長以環境變數
-              <span class="mono-text">OBSERVATION_PASSIVE_WINDOW_SECS</span>
-              設定（預設 60 秒、0＝停用）。
+              代理需具備 raw 封包權限（安裝腳本已設
+              <span class="mono-text">CAP_NET_RAW</span>）。
             </li>
             <li>命中率取決於設備活動：閒置設備可能不出現。</li>
           </ul>
@@ -151,7 +146,7 @@ const columns: QTableProps["columns"] = [
   { name: "subnet", label: "觀測網段", field: "subnet_cidr", align: "left" }
 ];
 
-/** 同一網段外位址可歸屬多個探測網段（ADR-0017），列鍵須含網段。 */
+/** 同一網段外位址可歸屬多個觀測網段（ADR-0017），列鍵須含網段。 */
 function rowKey(row: OutOfSubnetObservation): string {
   return `${row.subnet_id}-${row.address}`;
 }

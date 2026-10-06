@@ -30,6 +30,11 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "validation_error", message)
     }
 
+    /// 401：代理認證碼不符（見 ADR-0019）。
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+    }
+
     /// 標示錯誤對應的輸入欄位，供前端定位。
     pub fn field(mut self, field: &str) -> Self {
         self.details = Some(json!({ "field": field }));
@@ -65,6 +70,15 @@ impl ApiError {
     /// 502：Kea 控制通道連線或命令失敗（如完整同步計畫無法產生）。
     pub fn kea(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, "kea_error", message)
+    }
+
+    /// 503：端點所需設定未提供（如未設定 `AGENT_AUTH_CODE`；見 ADR-0019）。
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            message,
+        )
     }
 
     /// 500：記錄原始錯誤（含堆疊追蹤），對外僅回覆籠統訊息。

@@ -43,7 +43,7 @@ export interface ObservedMac {
 
 /** IP 歷史：有效涵蓋＋現況＋事件（新到舊）＋用過的 MAC。 */
 export interface IpObservationHistory {
-  /** 有效觀測涵蓋（網段已開觀測且本機同 L2；據此區分未觀測／從未上線）。 */
+  /** 有效觀測涵蓋＝v4 且該網段有在線觀測代理（據此區分未觀測／從未上線）。 */
   observed: boolean;
   presence: ObservationPresence | null;
   events: ObservationEvent[];
@@ -68,7 +68,7 @@ export interface MacObservationHistory {
 
 /** 網段外觀測清單的一列（`GET /api/v1/observations/out-of-subnet`；見票 01、02）。 */
 export interface OutOfSubnetObservation {
-  /** 探測時所屬的受管網段（同一 L2 多個網段可能各有一列，見 ADR-0017）。 */
+  /** 觀測所屬的受管網段（同一 L2 多個網段可能各有一列，見 ADR-0017）。 */
   subnet_id: number;
   subnet_cidr: string;
   subnet_name: string | null;

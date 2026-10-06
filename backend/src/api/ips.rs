@@ -13,6 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, put};
 use axum::{Json, Router};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -201,7 +202,8 @@ async fn list_subnet_ips(
         .await
         .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
 
-    // 觀測現況批次讀取（單一查詢、無 N+1）；有效涵蓋＝observed ∧ 同 L2 ∧ v4。
+    // 觀測現況批次讀取（單一查詢、無 N+1）；有效涵蓋＝v4 且該網段有
+    // 在線代理（見票 08、spec §讀取端）。
     let presence = observation::presence_map(&state.db, id).await?;
     // `unknown_mac` 需要全系統已登錄 MAC 集合；其他查詢不需多讀（見票 07）。
     let known_macs = if observed_filter == Some(IpObservedFilter::UnknownMac) {
@@ -212,7 +214,8 @@ async fn list_subnet_ips(
         HashSet::new()
     };
     let observed_coverage =
-        !subnet.cidr.contains(':') && subnet.observed && state.prober.is_local(&subnet);
+        observation::effective_coverage(&state.db, &subnet, Utc::now(), state.agent_stale_secs)
+            .await?;
     let view = ObservationView {
         observed: observed_coverage,
         presence,

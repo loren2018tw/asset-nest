@@ -8,22 +8,67 @@ Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、
 
 ## IP 觀測
 
-每個 IPv4 網段可個別開啟「觀測」（v6 不可開）。開啟後系統在背景每 15 分鐘自動快速掃描一次：對該網段已指派與 Kea 有效租約的位址發 ARP 探測，記錄每個位址的「最後可見」時間、MAC 與來源（`arp`／`kea_lease`）；首次出現與 MAC 變更會留成事件（亦可在畫面上按「立即掃描」手動觸發）。
+觀測執行由**觀測代理**負責：在每個要觀測的網段安裝一個代理，代理持續被動監聽 ARP、並週期主動掃描整個網段，將原始觀測推送回伺服器；伺服器端只保留 Kea 租約觀測、入庫與呈現（見 `docs/adr/0018`、`docs/adr/0019`）。安裝與行為詳見下方「觀測代理」。
 
-- v1 僅支援**本機同 L2** 的網段：本機沒有介面位址落在該網段時無法觀測（網段畫面會顯示提示）。
-- ARP 探測預設 `auto`：先 raw（Linux `AF_PACKET`；systemd 單元已帶 `CAP_NET_RAW`），遇權限問題自動降級為零權限模式（UDP 觸發 kernel ARP 解析後讀 `/proc/net/arp`），降級只記一次警告。
-- 觀測事件預設保留 365 天，每日自動清理過期事件；只影響歷史深度，**現況與宣告資料（指派／保留）完全不受影響**。
-- **探索掃描**（每個網段可另開）：對網段**全部 host 位址**限速探測（上限為每秒 `OBSERVATION_DISCOVERY_RATE_PPS` 個），找出未指派卻實際在線的未知設備與未登錄 MAC；網段設定「探索間隔（分鐘）」（`discovery_interval_minutes`，留空＝全站預設 `OBSERVATION_DISCOVERY_INTERVAL_SECS`），網段畫面顯示上次探索時間，亦可按「立即探索」手動觸發。
-- **網段外觀測**：探索掃描時，在被探測網段的介面上**被動監聽 ARP**（只收不送、與主動探測並行），把 sender 位址落在該網段 CIDR 外者記為「網段外觀測」（來源 `arp_passive`，旗標 `out_of_subnet`），可發現同 L2 但不在受管網段內的設備（錯設定、私接、其他網段延伸）。監聽窗長為 `OBSERVATION_PASSIVE_WINDOW_SECS`（預設 60 秒，0＝停用）；命中率取決於設備是否在窗內發 ARP（閒置設備可能不出現）。**只有 raw 模式（含 `auto` 的 raw 路徑）有資料**，unprivileged 降級模式無法被動監聽；記錄歸屬於被探測的網段，同一 L2 多個受管網段可能各有一列。快速掃描不做被動監聽。
+- 網段沒有個別觀測開關：「已觀測」＝該網段有**在線代理**涵蓋（同網段多代理允許，取任一）；代理失聯時該網段顯示「未觀測」、既有資料保留不清除。「從未上線」＝有掃描紀錄但從未看到該位址，與「未觀測」不同。
+- 沒有「立即掃描」；資料新鮮度以「最後回報時間」與「最後可見」呈現，掃描頻率與限速屬代理設定。
+- **網段外觀測**：代理持續被動監聽 ARP（只收不送），sender 位址落在代理涵蓋網段 CIDR 外者記為「網段外觀測」（來源 `arp_passive`、旗標 `out_of_subnet`）；網段內者由主動掃描負責。可發現同 L2 但不在受管網段內的設備（錯設定、私接、其他網段延伸）；命中率取決於設備活動。
+- **Kea 租約**（來源 `kea_lease`）仍是觀測來源之一：後端每 15 分鐘讀取目前有效租約（`state=default`、對應 `kea_subnet_id`），以 `cltt` 記為最後可見。
+- 觀測事件預設保留 365 天、被拒回報預設保留 30 天，皆每日自動清理；只影響歷史深度，**現況與宣告資料（指派／保留）完全不受影響**。
 - 相關環境變數（完整說明見 `.env.example`）：
 
 | 變數 | 預設 | 說明 |
 |------|------|------|
-| `OBSERVATION_PROBE_MODE` | `auto` | ARP 探測模式：`auto`／`raw`／`unprivileged` |
+| `AGENT_AUTH_CODE` | 安裝時隨機產生 | 代理入庫認證碼；未設定＝入庫端點一律 503 |
+| `AGENT_STALE_SECS` | `900` | 代理「在線」門檻秒數（正整數） |
+| `AGENT_AUTH_FAILURE_RETENTION_DAYS` | `30` | 被拒回報保留天數（正整數） |
 | `OBSERVATION_RETENTION_DAYS` | `365` | 事件保留天數（正整數） |
-| `OBSERVATION_DISCOVERY_INTERVAL_SECS` | `86400` | 探索掃描全站預設間隔秒數（正整數；網段可覆寫） |
-| `OBSERVATION_DISCOVERY_RATE_PPS` | `1000` | 探索掃描每秒最多探測位址數（正整數） |
-| `OBSERVATION_PASSIVE_WINDOW_SECS` | `60` | 探索時被動 ARP 監聽窗長秒數（非負整數；0＝停用） |
+
+## 觀測代理
+
+觀測執行外移給**觀測代理**：在每個要觀測的網段選一台主機安裝代理，代理持續被動監聽 ARP、並週期主動掃描整個網段，將原始觀測推送回伺服器；伺服器端只保留 Kea 租約觀測、入庫與呈現（見 `docs/adr/0018`、`docs/adr/0019`）。系統狀態頁（側邊欄「Kea → 系統狀態」）的「觀測代理」與「被拒回報」兩張表反映部署狀況。
+
+### 安裝
+
+在目標網段的一台 Ubuntu 24.04／26.04 主機上，一行指令安裝（需 root）。與後端同機時可直接讀後端環境檔：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/loren2018tw/asset-nest/main/deploy/agent-install.sh | \
+  sudo bash -s -- --server-url http://<後端主機>:8080 \
+  --auth-code-file /etc/asset-nest/asset-nest.env
+```
+
+`--auth-code-file` 可直接指向後端的環境檔（自動取 `AGENT_AUTH_CODE=` 行）。在另一台主機安裝時，先於後端執行 `sudo grep AGENT_AUTH_CODE /etc/asset-nest/asset-nest.env` 取得認證碼，再以 `--auth-code '<認證碼>'` 提供（或把該檔複製到代理主機後改用 `--auth-code-file`）。常用選項（完整說明：`./deploy/agent-install.sh --help`）：
+
+| 選項 | 說明 |
+|------|------|
+| `--subnet <CIDR>` | 要觀測的 IPv4 網段；預設由本機介面自動偵測，多候選或找不到時必須明確指定 |
+| `--name <name>` | 代理名稱（預設 hostname） |
+| `--sweep-interval <secs>` | 主動掃描間隔秒數（預設 900） |
+| `--rate <pps>` | 掃描每秒探測數上限（預設 1000） |
+| `--version <tag>` | 自 GitHub Release 下載指定版本（預設 `latest`；例：`agent-v0.1.0`） |
+| `--source-dir <path>` | 改以既有 checkout 自原始碼建置（不自動下載；開發機／CI） |
+
+- 預設自 GitHub Release 下載對應架構的 **musl 靜態**產物（`asset-nest-agent-x86_64`／`asset-nest-agent-aarch64`）；未知架構或不存在的版本會明確拒絕。**下載失敗不會自動改為建置**，請依訊息排除，或改用 `--source-dir` 於本機建置（需要 Rust 與建置套件）。
+- 重跑同一行指令即完成更新；既有 `AGENT_INSTANCE_ID` 與認證碼會保留（除非本次明確覆寫）。
+- 移除：`sudo ./deploy/agent-uninstall.sh`（停用並移除服務與程式，保留 `/etc/asset-nest-agent`）；`--purge` 一併刪除設定。
+
+### 行為與覆蓋語意
+
+- **持續被動監聽**：只收不送地監聽 ARP；來源位址落在涵蓋網段**外**者記為「網段外觀測」（來源 `arp_passive`），網段內者由主動掃描負責。
+- **週期掃描**：每 `AGENT_SWEEP_INTERVAL_SECS`（預設 900 秒）對網段全部 host 位址限速探測；回報 `checked`（全數送出）與 `seen`（有回應），因此「檢查過、沒回應」與「沒有資料」可以區分；安靜但活著的設備仍會被驗證存活。
+- **心跳**：每 60 秒回報名稱、版本與涵蓋網段；後端 `AGENT_STALE_SECS`（預設 900 秒）內有回報視為「在線」。
+- **覆蓋語意**：網段「已觀測」＝至少有一個在線代理涵蓋（同網段多代理允許，取任一）；代理失聯時該網段顯示「未觀測」、既有觀測資料保留不清除，代理恢復後自然接續。「從未上線」＝有掃描紀錄但從未看到該位址，與「未觀測」不同。
+
+### 系統狀態頁的異常
+
+- **未對應**：代理回報的網段 CIDR 與受管網段無精確對應，觀測不入庫。請修正代理的 `--subnet`／`AGENT_SUBNET_CIDR`，或先在系統建立該網段。
+- **被拒回報**：認證碼不符的來源（來源 IP、自報名稱／版本、次數、最後嘗試）列於「被拒回報」表，不會寫入觀測；請修正該代理的認證碼或移除它。此表由後端每日清理（`AGENT_AUTH_FAILURE_RETENTION_DAYS`，預設 30 天）。
+
+### 認證碼輪替與 TLS
+
+- **輪替認證碼**：編輯後端 `/etc/asset-nest/asset-nest.env` 的 `AGENT_AUTH_CODE` → `sudo systemctl restart asset-nest`；再逐台更新代理（重跑安裝腳本帶新碼，或編輯 `/etc/asset-nest-agent/agent.env`）→ `sudo systemctl restart asset-nest-agent`。尚未更新的代理會被拒回報並顯示於系統狀態頁。
+- **TLS**：後端本身不提供 TLS；跨越不可信網路時，請以反向代理（如 Caddy／nginx）提供 HTTPS，並讓代理以 `https://` 的 `--server-url` 連線（憑證須受代理主機信任）。
 
 ## 環境需求
 

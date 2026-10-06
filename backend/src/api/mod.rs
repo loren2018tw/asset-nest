@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::AppState;
 
+mod agents;
 mod asset_assignments;
 mod assets;
 mod error;
@@ -51,6 +52,7 @@ mod v1 {
 
     pub fn router() -> Router<AppState> {
         Router::new()
+            .merge(super::agents::router())
             .merge(super::asset_assignments::router())
             .merge(super::assets::router())
             .merge(super::import::router())

@@ -24,8 +24,8 @@ export interface IpAssignmentTarget {
   hostname: string | null;
 }
 
-/** 觀測來源：本地 ARP 探測、Kea 租約或被動 ARP 監聽
- *  （見 GLOSSARY.md「觀測詞彙」、ADR-0017）。 */
+/** 觀測來源：觀測代理的主動 ARP 探測（`arp`）、Kea 租約（`kea_lease`）或
+ *  觀測代理的被動 ARP 監聽（`arp_passive`；見 GLOSSARY.md、ADR-0017）。 */
 export type IpSeenSource = "arp" | "kea_lease" | "arp_passive";
 
 /** IP 列（見 spec §4.3；v4 由後端自網段範圍枚舉、v6 僅列登錄位址）。 */
@@ -49,8 +49,8 @@ export interface IpEntry {
   last_seen_source: IpSeenSource | null;
   /** 最後檢查時間；尚未掃描為 null。 */
   last_checked_at: string | null;
-  /** 有效觀測涵蓋（網段已開觀測且本機同 L2；v6 恆為 false）；據此區分
-   *  「未觀測」與「從未上線」。 */
+  /** 有效觀測涵蓋＝v4 且該網段有在線觀測代理（v6 恆為 false）；據此區分
+   *  「未觀測」與「從未上線」（見 spec §讀取端）。 */
   observed: boolean;
 }
 
@@ -173,24 +173,4 @@ export function cancelAssignment(
   return apiDelete<AssignmentDeleted>(
     `/api/v1/subnets/${subnetId}/ips/${encodeURIComponent(address)}/assignment`
   );
-}
-
-/** 掃描摘要（見 spec §HTTP API）。 */
-export interface SweepReport {
-  mode: string;
-  /** 本次探測的目標位址數（快速掃描＝已指派位址）。 */
-  targets: number;
-  /** 有回應的目標位址數。 */
-  seen: number;
-  /** 掃描耗時（毫秒）。 */
-  duration_ms: number;
-  /** 本輪寫入的相異網段外位址數（被動監聽；快速掃描固定 0，見票 01）。 */
-  passive_seen: number;
-}
-
-/** 手動觸發快速掃描（同步執行；前提與錯誤訊息由後端驗證，見票 02）。 */
-export function quickSweep(subnetId: number): Promise<SweepReport> {
-  return apiPost<SweepReport>(`/api/v1/subnets/${subnetId}/sweeps`, {
-    mode: "quick"
-  });
 }

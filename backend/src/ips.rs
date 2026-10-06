@@ -222,8 +222,8 @@ pub struct IpEntry {
     pub last_seen_source: Option<String>,
     /// 最後檢查時間；尚未掃描為 `null`。
     pub last_checked_at: Option<String>,
-    /// 有效觀測涵蓋＝網段 `observed` ∧ 本機同 L2 ∧ v4；據此區分
-    /// 「未觀測」與「從未上線」（見 spec §讀取端）。
+    /// 有效觀測涵蓋＝v4 且該網段有在線代理（見票 08）；據此區分「未觀測」
+    /// 與「從未上線」（見 spec §讀取端）。
     pub observed: bool,
 }
 
@@ -887,10 +887,6 @@ mod tests {
             note: None,
             gateway: gateway.map(str::to_string),
             kea_subnet_id: None,
-            observed: false,
-            discovery_enabled: false,
-            discovery_interval_minutes: None,
-            last_discovery_at: None,
             pools: pools
                 .iter()
                 .enumerate()

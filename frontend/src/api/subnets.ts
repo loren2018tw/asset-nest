@@ -27,16 +27,6 @@ export interface Subnet {
   note: string | null;
   gateway: string | null;
   kea_subnet_id: number | null;
-  /** 觀測開關（見 ADR-0014）；v6 恆為 false。 */
-  observed: boolean;
-  /** 探索掃描開關（見票 05）；需 `observed`；v6 恆為 false。 */
-  discovery_enabled: boolean;
-  /** 探索間隔覆寫（分鐘）；`null`＝使用全站預設（見票 05）。 */
-  discovery_interval_minutes: number | null;
-  /** 上次探索時間（UTC）；從未探索為 `null`。 */
-  last_discovery_at: string | null;
-  /** 本機是否有介面位址落在該 v4 子網（同 L2；見 ADR-0015）。 */
-  local: boolean;
   pools: SubnetPool[];
   created_at: string;
   updated_at: string;
@@ -54,10 +44,6 @@ export interface SubnetSummary {
   total: number;
   /** 衝突數：命中至少一條語意規則的指派筆數。 */
   conflicts: number;
-  /** 觀測開關（見 ADR-0014）；v6 恆為 false。 */
-  observed: boolean;
-  /** 本機是否有介面位址落在該 v4 子網（同 L2）。 */
-  local: boolean;
 }
 
 /** pool 輸入（僅 IPv4）。 */
@@ -73,12 +59,6 @@ export interface SubnetInput {
   note: string | null;
   gateway: string | null;
   kea_subnet_id: number | null;
-  /** 觀測開關；僅編輯既有 IPv4 網段有效（新增由後端預設關閉）。 */
-  observed: boolean;
-  /** 探索掃描開關（見票 05）；需 `observed` 且為 IPv4。 */
-  discovery_enabled: boolean;
-  /** 探索間隔（分鐘）；`null`＝使用全站預設（見票 05）。 */
-  discovery_interval_minutes: number | null;
   pools: SubnetPoolInput[];
 }
 
@@ -164,28 +144,6 @@ export function updateSubnet(id: number, input: SubnetInput): Promise<Subnet> {
 /** 刪除網段（有指派時的防護見票 08）。 */
 export function deleteSubnet(id: number): Promise<void> {
   return apiDelete(`/api/v1/subnets/${id}`);
-}
-
-/** 掃描摘要（見 spec §HTTP API、票 02、票 05）。 */
-export interface SweepReport {
-  mode: "quick" | "discovery";
-  /** 本次探測的目標位址數。 */
-  targets: number;
-  /** 有證據（ARP 回應或有效租約）的相異位址數。 */
-  seen: number;
-  /** 掃描耗時（毫秒）。 */
-  duration_ms: number;
-  /** 本輪寫入的相異網段外位址數（被動監聽；快速掃描固定 0，見票 01）。 */
-  passive_seen: number;
-  /** 僅探索掃描回傳：本次寫入的上次探索時間（UTC）。 */
-  last_discovery_at?: string;
-}
-
-/** 手動觸發探索掃描（同步執行；前提與錯誤訊息由後端驗證，見票 05）。 */
-export function discoverySweep(subnetId: number): Promise<SweepReport> {
-  return apiPost<SweepReport>(`/api/v1/subnets/${subnetId}/sweeps`, {
-    mode: "discovery"
-  });
 }
 
 /** 下載全部網段 CSV（UTF-8 BOM；格式與檔名見 ADR-0009）。 */
