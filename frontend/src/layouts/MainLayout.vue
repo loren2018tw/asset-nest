@@ -25,6 +25,12 @@
           </q-item-section>
           <q-item-section> 資產管理 </q-item-section>
         </q-item>
+        <q-item clickable to="/lendings" :active="lendingsActive">
+          <q-item-section avatar>
+            <q-icon name="swap_horiz" />
+          </q-item-section>
+          <q-item-section> 資產借還 </q-item-section>
+        </q-item>
         <q-item clickable to="/ips" exact :active="ipSection">
           <q-item-section avatar>
             <q-icon name="lan" />
@@ -134,6 +140,9 @@ onMounted(() => {
 const outOfSubnetActive = computed(() =>
   route.path.startsWith("/observations/out-of-subnet")
 );
+
+/** 資產借還（/lendings）：資產管理區段、資產清單之下（見 asset-lending 票 04）。 */
+const lendingsActive = computed(() => route.path.startsWith("/lendings"));
 
 /** Kea 區段（/kea 前綴）：租約清單與系統狀態兩頁各自保持高亮。 */
 const keaLeasesActive = computed(() => route.path.startsWith("/kea/leases"));

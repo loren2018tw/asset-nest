@@ -281,6 +281,45 @@ async fn assigned_ips_of(pool: &SqlitePool, asset_id: i64) -> Vec<String> {
         .collect()
 }
 
+/// 讀取清單中某資產的「出借中摘要」欄（JSON null 映射為 `None`；見票 02）。
+async fn lending_of(pool: &SqlitePool, asset_id: i64) -> Option<Value> {
+    let (status, page) = send(pool, Method::GET, "/api/v1/assets?per_page=200", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let value = page["items"]
+        .as_array()
+        .expect("items 為陣列")
+        .iter()
+        .find(|item| item["id"].as_i64() == Some(asset_id))
+        .map(|item| item["lending"].clone())
+        .expect("清單含該資產");
+    if value.is_null() { None } else { Some(value) }
+}
+
+/// 建立借出並斷言成功，回傳借出紀錄 id（見票 02）。
+async fn create_lending(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/assets/{asset_id}/lendings"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "建立借出應成功：{json}");
+    json["id"].as_i64().expect("回應含 id")
+}
+
+/// 歸還借出紀錄並斷言成功（見票 02）。
+async fn return_lending(pool: &SqlitePool, lending_id: i64) {
+    let (status, json) = send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/lendings/{lending_id}/return"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "歸還應成功：{json}");
+}
+
 /// 將查詢值編碼為 URI 可接受的百分比格式（僅處理測試用到的字元）。
 fn encode(value: &str) -> String {
     value
@@ -1880,4 +1919,53 @@ async fn list_sorts_by_last_seen_with_nulls_last() {
     let (status, body) = send(&pool, Method::GET, "/api/v1/assets?sort=id", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["details"]["field"], "sort");
+}
+
+#[tokio::test]
+async fn list_rows_include_lending_brief() {
+    let pool = test_pool().await;
+
+    // 未出借：lending 為 null
+    let bare = create_asset(
+        &pool,
+        json!({ "description": "未出借資產", "location": "機房" }),
+    )
+    .await;
+    let bare_id = bare["id"].as_i64().expect("回應含 id");
+    assert_eq!(
+        lending_of(&pool, bare_id).await,
+        None,
+        "未出借資產 lending 為 null"
+    );
+
+    // 出借中：帶借出摘要（id／借用人／借出時間／預計歸還日）
+    let open = create_asset(
+        &pool,
+        json!({ "property_no": "PC-900", "description": "出借中資產", "location": "機房" }),
+    )
+    .await;
+    let open_id = open["id"].as_i64().expect("回應含 id");
+    let lending_id = create_lending(
+        &pool,
+        open_id,
+        json!({ "borrower": "王小明", "due_at": "2030-01-01" }),
+    )
+    .await;
+    let brief = lending_of(&pool, open_id)
+        .await
+        .expect("出借中資產含 lending");
+    assert_eq!(brief["id"], lending_id);
+    assert_eq!(brief["borrower"], "王小明");
+    assert_eq!(brief["due_at"], "2030-01-01");
+    assert!(brief["lent_at"].is_string(), "lent_at 非空");
+    assert!(brief.get("returned_at").is_none(), "摘要不含歸還時間");
+    assert_eq!(lending_of(&pool, bare_id).await, None, "未出借資產不受影響");
+
+    // 已歸還：lending 回 null（摘要只反映未歸還紀錄）
+    return_lending(&pool, lending_id).await;
+    assert_eq!(
+        lending_of(&pool, open_id).await,
+        None,
+        "歸還後 lending 回 null"
+    );
 }

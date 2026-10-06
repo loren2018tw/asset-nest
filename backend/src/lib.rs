@@ -14,6 +14,7 @@ pub mod interfaces;
 pub mod ip_candidates;
 pub mod ips;
 pub mod kea;
+pub mod lendings;
 pub mod observation;
 pub mod peer;
 pub mod subnet_import;

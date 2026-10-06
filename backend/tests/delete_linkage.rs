@@ -202,6 +202,37 @@ async fn subnet_assignment_count(pool: &SqlitePool, subnet_id: i64) -> i64 {
         .expect("查詢指派")
 }
 
+/// 直接查資料庫：某資產的借還紀錄筆數（見票 02）。
+async fn lending_count(pool: &SqlitePool, asset_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM lendings WHERE asset_id = ?")
+        .bind(asset_id)
+        .fetch_one(pool)
+        .await
+        .expect("查詢借還紀錄")
+}
+
+/// 建立借出（不檢查狀態碼，供各測試自行斷言；見票 02）。
+async fn create_lending(pool: &SqlitePool, asset_id: i64, body: Value) -> (StatusCode, Value) {
+    send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/assets/{asset_id}/lendings"),
+        Some(body),
+    )
+    .await
+}
+
+/// 歸還借出紀錄（不檢查狀態碼，供各測試自行斷言；見票 02）。
+async fn return_lending(pool: &SqlitePool, lending_id: i64) -> (StatusCode, Value) {
+    send(
+        pool,
+        Method::POST,
+        &format!("/api/v1/lendings/{lending_id}/return"),
+        None,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn deleting_asset_cascades_interfaces_assignments_and_reservations() {
     let pool = test_pool().await;
@@ -553,4 +584,71 @@ async fn empty_subnet_can_be_deleted_with_exclusions() {
         .await
         .expect("查詢排除範圍");
     assert_eq!(remaining, 0, "刪除網段連動刪除 subnet_exclusions");
+}
+
+#[tokio::test]
+async fn deleting_asset_cascades_lendings_and_blocks_open_lending() {
+    let pool = test_pool().await;
+
+    // 目標資產：一段完整借還歷史（已歸還）＋一筆出借中
+    let asset_id = create_asset(&pool, "借出主機", "機房 A").await;
+    let history = create_lending(&pool, asset_id, json!({ "borrower": "王小明" })).await;
+    let history_id = history.1["id"].as_i64().expect("回應含 id");
+    let (status, _) = return_lending(&pool, history_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let open = create_lending(&pool, asset_id, json!({ "borrower": "陳大頭" })).await;
+    let open_id = open.1["id"].as_i64().expect("回應含 id");
+
+    // 對照組：另一資產的借還歷史不受影響
+    let other_asset = create_asset(&pool, "保留主機", "機房 B").await;
+    let other = create_lending(&pool, other_asset, json!({ "borrower": "王小明" })).await;
+    let other_id = other.1["id"].as_i64().expect("回應含 id");
+    let (status, _) = return_lending(&pool, other_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 出借中不可刪除 → 409「此資產出借中，請先歸還」
+    let (status, body) = send(
+        &pool,
+        Method::DELETE,
+        &format!("/api/v1/assets/{asset_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["message"], "此資產出借中，請先歸還");
+
+    // 資產與借還紀錄仍在，未誤刪
+    let (status, _) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/assets/{asset_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lending_count(&pool, asset_id).await, 2);
+
+    // 歸還後可刪除 → 204
+    let (status, _) = return_lending(&pool, open_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(
+        &pool,
+        Method::DELETE,
+        &format!("/api/v1/assets/{asset_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+
+    // 借還紀錄（含已歸還歷史）連動刪除
+    assert_eq!(
+        lending_count(&pool, asset_id).await,
+        0,
+        "借還紀錄全數連動刪除（含已歸還歷史）"
+    );
+
+    // 對照組的借還歷史不受影響
+    assert_eq!(lending_count(&pool, other_asset).await, 1);
 }

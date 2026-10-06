@@ -16,6 +16,7 @@ mod interfaces;
 mod ip_candidates;
 mod ips;
 mod kea;
+mod lendings;
 mod observations;
 mod peer;
 mod subnet_import;
@@ -60,6 +61,7 @@ mod v1 {
             .merge(super::interfaces::router())
             .merge(super::ip_candidates::router())
             .merge(super::kea::router())
+            .merge(super::lendings::router())
             .merge(super::subnets::router())
             .merge(super::subnet_import::router())
             .merge(super::ips::router())

@@ -142,6 +142,21 @@
       </template>
       <template #body-cell-actions="props">
         <q-td :props="props" class="text-right">
+          <!-- 出借中：橘色停用按鈕＋借用人 tooltip；tooltip 掛在不被停用的外層 span
+               （停用按鈕不觸發滑鼠事件，tooltip 須以外層元素為錨點） -->
+          <span v-if="isLent(props.row)">
+            <q-btn flat dense no-caps color="orange" label="出借中" disable />
+            <q-tooltip>出借中：{{ props.row.lending.borrower }}</q-tooltip>
+          </span>
+          <q-btn
+            v-else
+            flat
+            dense
+            round
+            icon="person_add"
+            aria-label="借出"
+            @click="openLend(props.row)"
+          />
           <q-btn
             flat
             dense
@@ -158,15 +173,19 @@
             aria-label="編輯"
             @click="openEdit(props.row)"
           />
-          <q-btn
-            flat
-            dense
-            round
-            icon="delete"
-            color="negative"
-            aria-label="刪除"
-            @click="confirmDelete(props.row)"
-          />
+          <span>
+            <q-btn
+              flat
+              dense
+              round
+              icon="delete"
+              color="negative"
+              aria-label="刪除"
+              :disable="isLent(props.row)"
+              @click="confirmDelete(props.row)"
+            />
+            <q-tooltip v-if="isLent(props.row)"> 出借中，請先歸還 </q-tooltip>
+          </span>
         </q-td>
       </template>
     </q-table>
@@ -180,6 +199,13 @@
       v-model="assignOpen"
       :asset="assignAsset"
       @saved="onAssignSaved"
+    />
+
+    <lending-dialog
+      v-if="lendAsset !== null"
+      v-model="lendOpen"
+      :asset="lendAsset"
+      @saved="onLendSaved"
     />
   </q-page>
 </template>
@@ -206,6 +232,7 @@ import { saveBlob } from "@/api/client";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssetImportDialog from "@/components/AssetImportDialog.vue";
+import LendingDialog from "@/components/LendingDialog.vue";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
@@ -323,6 +350,9 @@ const exporting = ref(false);
 
 const assignOpen = ref(false);
 const assignAsset = ref<Asset | null>(null);
+
+const lendOpen = ref(false);
+const lendAsset = ref<Asset | null>(null);
 
 interface TableRequest {
   pagination: {
@@ -479,6 +509,21 @@ function openAssign(asset: Asset) {
 }
 
 function onAssignSaved() {
+  void fetchAssets();
+}
+
+/** 該列是否出借中：`lending` 摘要存在即出借中（見 asset-lending spec §4）。 */
+function isLent(row: AssetListRow): boolean {
+  return row.lending !== null && row.lending !== undefined;
+}
+
+/** 由資產列直接借出（見 asset-lending spec §5）；未出借才顯示按鈕。 */
+function openLend(asset: Asset) {
+  lendAsset.value = asset;
+  lendOpen.value = true;
+}
+
+function onLendSaved() {
   void fetchAssets();
 }
 

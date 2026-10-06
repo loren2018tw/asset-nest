@@ -7,6 +7,7 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: "", redirect: "/kea/status" },
       { path: "assets", component: () => import("@/pages/AssetsPage.vue") },
+      { path: "lendings", component: () => import("@/pages/LendingsPage.vue") },
       { path: "ips", component: () => import("@/pages/SubnetsPage.vue") },
       {
         path: "observations/out-of-subnet",

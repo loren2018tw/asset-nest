@@ -9,6 +9,7 @@ import {
 } from "@/api/client";
 import type { Interface } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
+import type { LendingBrief } from "@/api/lendings";
 
 /** 資產（見 spec §2.1；`expired` 由後端計算）。 */
 export interface Asset {
@@ -30,12 +31,14 @@ export interface Asset {
   updated_at: string;
 }
 
-/** 資產清單列：資產欄位＋全部已指派 IP（見 spec §2.1、票 12）＋最後可見（票 08）。 */
+/** 資產清單列：資產欄位＋全部已指派 IP（見 spec §2.1、票 12）＋最後可見（票 08）＋出借中摘要。 */
 export interface AssetListRow extends Asset {
   /** 全部已指派位址（跨介面、跨網段；v4 先、v6 後，同地址族依數值）。 */
   assigned_ips: string[];
   /** 最後可見（UTC）：介面指派位址或介面 MAC 命中的現況最大值；無命中為 null。 */
   last_seen_at: string | null;
+  /** 出借中摘要：未出借為 null（見 asset-lending spec §4、§5）。 */
+  lending?: LendingBrief | null;
 }
 
 /** 新增／編輯表單內容；`null` 或空字串代表清除選填欄位。 */

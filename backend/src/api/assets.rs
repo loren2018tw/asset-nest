@@ -18,6 +18,7 @@ use crate::assets::{
 };
 use crate::assignments::{self, AssetAssignment};
 use crate::interfaces::{self, Interface};
+use crate::lendings::{self, LendingBrief};
 
 /// 清單預設每頁筆數（見 spec §6）。
 const DEFAULT_PER_PAGE: i64 = 50;
@@ -87,8 +88,8 @@ impl ListQuery {
     }
 }
 
-/// 資產清單列：資產欄位攤平，加上全部已指派位址（「已指派 IP」欄；見票 12）
-/// 與「最後可見」（見票 08）。
+/// 資產清單列：資產欄位攤平，加上全部已指派位址（「已指派 IP」欄；見票 12）、
+/// 「最後可見」（見票 08）與出借中摘要（見 asset-lending spec §4）。
 #[derive(Debug, Serialize)]
 struct AssetListRow {
     #[serde(flatten)]
@@ -97,6 +98,8 @@ struct AssetListRow {
     assigned_ips: Vec<String>,
     /// 最後可見：介面指派位址或介面 MAC 命中的現況最大值；無命中為 `null`（見票 08）。
     last_seen_at: Option<String>,
+    /// 出借中摘要：未出借（或僅有已歸還紀錄）為 `null`。
+    lending: Option<LendingBrief>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,8 +144,8 @@ async fn list_assets(
         .await
         .map_err(|error| ApiError::internal("讀取資產清單失敗", error))?;
 
-    // 以各一筆查詢取當頁資產的已指派位址與最後可見，附入每列
-    // （見票 12、票 08；不以逐資產查詢避免 N+1）。
+    // 以各一筆查詢取當頁資產的已指派位址、最後可見與出借中摘要，附入每列
+    // （見票 12、票 08、asset-lending spec §4；不以逐資產查詢避免 N+1）。
     let ids: Vec<i64> = items.iter().map(|asset| asset.id).collect();
     let mut assigned = assignments::list_for_assets(&state.db, &ids)
         .await
@@ -150,11 +153,15 @@ async fn list_assets(
     let mut last_seen = assets::last_seen_for_assets(&state.db, &ids)
         .await
         .map_err(|error| ApiError::internal("讀取資產最後可見失敗", error))?;
+    let mut lending = lendings::open_briefs_for_assets(&state.db, &ids)
+        .await
+        .map_err(|error| ApiError::internal("讀取資產出借中摘要失敗", error))?;
     let items = items
         .into_iter()
         .map(|asset| AssetListRow {
             assigned_ips: assigned.remove(&asset.id).unwrap_or_default(),
             last_seen_at: last_seen.remove(&asset.id),
+            lending: lending.remove(&asset.id),
             asset,
         })
         .collect();
@@ -259,6 +266,15 @@ async fn delete_asset(
     id: Result<Path<i64>, PathRejection>,
 ) -> Result<StatusCode, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("資產 id 格式錯誤"))?;
+
+    // 出借中的資產不可刪除（見 asset-lending spec §2 不變量）；
+    // 借還紀錄由 FK CASCADE 於資產刪除時連動刪除。
+    if lendings::has_open_lending(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取借出紀錄失敗", error))?
+    {
+        return Err(ApiError::conflict("此資產出借中，請先歸還"));
+    }
 
     let deleted = assets::delete(&state.db, id)
         .await
