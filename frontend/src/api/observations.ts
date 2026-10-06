@@ -66,6 +66,30 @@ export interface MacObservationHistory {
   sightings: MacSighting[];
 }
 
+/** 網段外觀測清單的一列（`GET /api/v1/observations/unmanaged`；見票 01、02）。 */
+export interface UnmanagedObservation {
+  /** 探測時所屬的受管網段（同一 L2 多個網段可能各有一列，見 ADR-0017）。 */
+  subnet_id: number;
+  subnet_cidr: string;
+  subnet_name: string | null;
+  address: string;
+  /** 最後可見 MAC；無有效 MAC 為 null（被動列通常有值）。 */
+  mac: string | null;
+  /** 該列最早事件時間；事件經保留清理後退化為 `last_seen_at`。 */
+  first_seen_at: string;
+  last_seen_at: string;
+  source: IpSeenSource | null;
+  /** 是否為任一 Interface 的 MAC（不分大小寫）。 */
+  known: boolean;
+  /** 已知 MAC 的連結資產；未知時不帶此欄位。 */
+  asset?: ObservationAsset;
+}
+
+/** 網段外觀測清單回應（後端已依 `last_seen_at` 新到舊排序）。 */
+export interface UnmanagedObservationPage {
+  items: UnmanagedObservation[];
+}
+
 /** 讀取單一 IP 的觀測歷史（現況、事件時間軸、用過的 MAC）。 */
 export function fetchIpObservations(
   subnetId: number,
@@ -83,6 +107,11 @@ export function fetchMacObservations(
   return apiGet<MacObservationHistory>(
     `/api/v1/observations/mac/${encodeURIComponent(mac)}`
   );
+}
+
+/** 讀取被動監聽到的網段外位址清單（last_seen 新到舊；見票 01、02）。 */
+export function listUnmanagedObservations(): Promise<UnmanagedObservationPage> {
+  return apiGet<UnmanagedObservationPage>("/api/v1/observations/unmanaged");
 }
 
 /** 下載單一 IP 的觀測歷史 CSV（UTF-8 BOM；檔名由後端 Content-Disposition 提供）。 */

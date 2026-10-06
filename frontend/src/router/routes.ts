@@ -9,6 +9,10 @@ const routes: RouteRecordRaw[] = [
       { path: "assets", component: () => import("@/pages/AssetsPage.vue") },
       { path: "ips", component: () => import("@/pages/SubnetsPage.vue") },
       {
+        path: "observations/unmanaged",
+        component: () => import("@/pages/ObservationsUnmanagedPage.vue")
+      },
+      {
         path: "subnets/:id/ips",
         component: () => import("@/pages/IpListPage.vue")
       },

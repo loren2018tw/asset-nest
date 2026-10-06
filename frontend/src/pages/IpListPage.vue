@@ -513,13 +513,15 @@ function assignmentTargetLabel(target: IpAssignmentTarget): string {
     : `${target.asset_description}(${spec})`;
 }
 
-/** 觀測來源標籤（見票 02；未知或缺少顯示「—」）。 */
+/** 觀測來源標籤（見票 02、ADR-0017）；未知或缺少顯示「—」。 */
 function sourceLabel(source: IpSeenSource | null): string {
   switch (source) {
     case "arp":
       return "ARP";
     case "kea_lease":
       return "Kea 租約";
+    case "arp_passive":
+      return "ARP 被動";
     default:
       return "—";
   }

@@ -24,8 +24,9 @@ export interface IpAssignmentTarget {
   hostname: string | null;
 }
 
-/** 觀測來源：本地 ARP 探測或 Kea 租約（見 GLOSSARY.md「觀測詞彙」）。 */
-export type IpSeenSource = "arp" | "kea_lease";
+/** 觀測來源：本地 ARP 探測、Kea 租約或被動 ARP 監聽
+ *  （見 GLOSSARY.md「觀測詞彙」、ADR-0017）。 */
+export type IpSeenSource = "arp" | "kea_lease" | "arp_passive";
 
 /** IP 列（見 spec §4.3；v4 由後端自網段範圍枚舉、v6 僅列登錄位址）。 */
 export interface IpEntry {

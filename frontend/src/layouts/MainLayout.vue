@@ -31,6 +31,16 @@
           </q-item-section>
           <q-item-section> IP 管理 </q-item-section>
         </q-item>
+        <q-item
+          clickable
+          to="/observations/unmanaged"
+          :active="unmanagedActive"
+        >
+          <q-item-section avatar>
+            <q-icon name="travel_explore" />
+          </q-item-section>
+          <q-item-section> 網段外觀測 </q-item-section>
+        </q-item>
         <q-item-label header> Kea </q-item-label>
         <q-item clickable to="/kea/leases" :active="keaLeasesActive">
           <q-item-section avatar>
@@ -64,6 +74,11 @@ const leftDrawerOpen = ref(false);
 /** IP 管理區段：網段列表（/ips）與各網段的 IP 頁（/subnets/:id/ips）。 */
 const ipSection = computed(
   () => route.path.startsWith("/ips") || route.path.startsWith("/subnets/")
+);
+
+/** 網段外觀測（/observations/unmanaged）：IP 管理區段新增項目，獨立高亮。 */
+const unmanagedActive = computed(() =>
+  route.path.startsWith("/observations/unmanaged")
 );
 
 /** Kea 區段（/kea 前綴）：租約清單與系統狀態兩頁各自保持高亮。 */
