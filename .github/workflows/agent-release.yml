@@ -63,8 +63,8 @@ jobs:
         run: |
           BIN="agent/target/${{ matrix.target }}/release/asset-nest-agent"
           file "$BIN"
-          # musl 目標產物為靜態連結（x86_64 為 static-pie）。
-          file "$BIN" | grep -qE '(static|static-pie) linked'
+          # musl 目標產物為靜態連結（x86_64 為 static-pie、aarch64 為 statically）。
+          file "$BIN" | grep -qE '(statically|static-pie|static) linked'
           mkdir -p dist
           cp "$BIN" "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
