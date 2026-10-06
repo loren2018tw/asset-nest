@@ -33,8 +33,8 @@
         </q-item>
         <q-item
           clickable
-          to="/observations/unmanaged"
-          :active="unmanagedActive"
+          to="/observations/out-of-subnet"
+          :active="outOfSubnetActive"
         >
           <q-item-section avatar>
             <q-icon name="travel_explore" />
@@ -76,9 +76,9 @@ const ipSection = computed(
   () => route.path.startsWith("/ips") || route.path.startsWith("/subnets/")
 );
 
-/** 網段外觀測（/observations/unmanaged）：IP 管理區段新增項目，獨立高亮。 */
-const unmanagedActive = computed(() =>
-  route.path.startsWith("/observations/unmanaged")
+/** 網段外觀測（/observations/out-of-subnet）：IP 管理區段新增項目，獨立高亮。 */
+const outOfSubnetActive = computed(() =>
+  route.path.startsWith("/observations/out-of-subnet")
 );
 
 /** Kea 區段（/kea 前綴）：租約清單與系統狀態兩頁各自保持高亮。 */

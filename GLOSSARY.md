@@ -80,7 +80,7 @@ _Avoid_: 序號
 對某個位址在某一時刻所見狀態的記錄；由觀測來源產生、唯讀保存，與宣告（Assignment、Reservation）分離，不修改宣告。
 
 **觀測來源（observation source）**
-產生觀測的手段：本地 ARP 探測、Kea 租約；未來含遠端 agent。
+產生觀測的手段：本地 ARP 探測、Kea 租約、`arp_passive`（探索時被動 ARP 監聽）；未來含遠端 agent。
 
 **最後可見（last seen）**
 某位址最後一次被任一觀測來源實際看到的時間；已指派但從未看到顯示「從未上線」。
@@ -94,6 +94,9 @@ _Avoid_: 上線、在線
 
 **探索掃描（discovery sweep）**
 對網段內全部位址的整段探測；用於發現未指派卻有主、未登錄 MAC。
+
+**網段外觀測（out-of-subnet observation）**
+探索掃描時被動監聽到的、位址落在被探測網段 CIDR 外、歸屬於該探測網段的觀測；來源 `arp_passive`；UI 顯示於「網段外觀測」清單。
 
 **未知裝置（unknown device）**
 被觀測到、但不對應任何 Interface 的 MAC；為觀測值，不是實體。

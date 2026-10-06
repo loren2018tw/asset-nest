@@ -115,18 +115,18 @@ import type { QTableProps } from "quasar";
 import { useQuasar } from "quasar";
 import { onMounted, ref } from "vue";
 
-import type { IpSeenSource } from "@/api/ips";
 import {
-  listUnmanagedObservations,
-  type UnmanagedObservation
+  listOutOfSubnetObservations,
+  type OutOfSubnetObservation
 } from "@/api/observations";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import { assetLabel } from "@/utils/assetLabel";
+import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
 
-const observations = ref<UnmanagedObservation[]>([]);
+const observations = ref<OutOfSubnetObservation[]>([]);
 const loading = ref(false);
 /** 觀測歷史對話框（MAC 模式；mac 為 null 的列不開啟）。 */
 const historyOpen = ref(false);
@@ -152,7 +152,7 @@ const columns: QTableProps["columns"] = [
 ];
 
 /** 同一網段外位址可歸屬多個探測網段（ADR-0017），列鍵須含網段。 */
-function rowKey(row: UnmanagedObservation): string {
+function rowKey(row: OutOfSubnetObservation): string {
   return `${row.subnet_id}-${row.address}`;
 }
 
@@ -163,7 +163,7 @@ function messageOf(cause: unknown): string {
 async function fetchObservations() {
   loading.value = true;
   try {
-    observations.value = (await listUnmanagedObservations()).items;
+    observations.value = (await listOutOfSubnetObservations()).items;
   } catch (cause) {
     $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
@@ -174,20 +174,6 @@ async function fetchObservations() {
 function openHistory(mac: string) {
   historyMac.value = mac;
   historyOpen.value = true;
-}
-
-/** 觀測來源標籤（見票 02）；被動監聽為「ARP 被動」、未知或缺少為「—」。 */
-function sourceLabel(source: IpSeenSource | null): string {
-  switch (source) {
-    case "arp":
-      return "ARP";
-    case "kea_lease":
-      return "Kea 租約";
-    case "arp_passive":
-      return "ARP 被動";
-    default:
-      return "—";
-  }
 }
 
 /** 精確時間：顯示瀏覽器本地時間；解析失敗原樣顯示。 */

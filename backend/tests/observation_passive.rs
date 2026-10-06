@@ -198,8 +198,14 @@ async fn discovery_sweep(state: &AppState, id: i64) -> Value {
 }
 
 /// 讀取網段外觀測清單並斷言成功。
-async fn unmanaged_list(state: &AppState) -> Value {
-    let (status, json) = send(state, Method::GET, "/api/v1/observations/unmanaged", None).await;
+async fn out_of_subnet_list(state: &AppState) -> Value {
+    let (status, json) = send(
+        state,
+        Method::GET,
+        "/api/v1/observations/out-of-subnet",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "讀取網段外觀測清單應成功：{json}");
     json
 }
@@ -387,7 +393,7 @@ async fn unprivileged_style_empty_passive_yields_no_rows() {
     assert_eq!(report["passive_seen"], 0);
     assert!(presence_rows(&pool).await.is_empty());
     assert_eq!(
-        unmanaged_list(&state).await["items"]
+        out_of_subnet_list(&state).await["items"]
             .as_array()
             .map(Vec::len),
         Some(0)
@@ -395,7 +401,7 @@ async fn unprivileged_style_empty_passive_yields_no_rows() {
 }
 
 #[tokio::test]
-async fn unmanaged_endpoint_lists_newest_first_with_subnet_and_asset() {
+async fn out_of_subnet_endpoint_lists_newest_first_with_subnet_and_asset() {
     let pool = test_pool().await;
     let stub = Arc::new(StubProber::new(&["10.0.0.0/29"]));
     let state = test_state(&pool, stub, 60);
@@ -476,7 +482,7 @@ async fn unmanaged_endpoint_lists_newest_first_with_subnet_and_asset() {
     .await
     .expect("植入事件");
 
-    let json = unmanaged_list(&state).await;
+    let json = out_of_subnet_list(&state).await;
     let items = json["items"].as_array().expect("items 為陣列");
     assert_eq!(items.len(), 2, "只列 out_of_subnet=1：{items:?}");
 
@@ -516,8 +522,64 @@ async fn unmanaged_endpoint_lists_newest_first_with_subnet_and_asset() {
         .execute(&pool)
         .await
         .expect("清空現況");
-    let json = unmanaged_list(&state).await;
+    let json = out_of_subnet_list(&state).await;
     assert_eq!(json["items"].as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn out_of_subnet_endpoint_skips_rows_now_inside_edited_cidr() {
+    let pool = test_pool().await;
+    let stub = Arc::new(StubProber::new(&["10.0.0.0/29"]));
+    let state = test_state(&pool, stub, 60);
+
+    let id = create_subnet(&state, "10.0.0.0/29").await;
+
+    // 植入兩筆殘留列：10.0.0.9 原在 /29 外；10.0.9.9 之後仍在 /24 外。
+    for (address, seen_at) in [
+        ("10.0.0.9", "2026-10-06T12:00:00Z"),
+        ("10.0.9.9", "2026-10-06T11:00:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO ip_presence
+                 (subnet_id, address, last_seen_at, last_seen_mac, last_seen_source,
+                  out_of_subnet)
+             VALUES (?, ?, ?, 'aa:bb:cc:dd:ee:99', 'arp_passive', 1)",
+        )
+        .bind(id)
+        .bind(address)
+        .bind(seen_at)
+        .execute(&pool)
+        .await
+        .expect("植入殘留現況列");
+    }
+
+    // 編輯 CIDR 擴大為 /24：10.0.0.9 落入網段內、10.0.9.9 仍在外。
+    let updated = patch_subnet(&state, id, json!({ "cidr": "10.0.0.0/24" })).await;
+    assert_eq!(updated["cidr"], "10.0.0.0/24");
+
+    let json = out_of_subnet_list(&state).await;
+    let items = json["items"].as_array().expect("items 為陣列");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["address"].as_str().expect("位址"))
+            .collect::<Vec<_>>(),
+        vec!["10.0.9.9"],
+        "CIDR 擴大後僅列仍在網段外者：{items:?}"
+    );
+
+    // 自癒只作用於讀取：資料庫旗標不動。
+    let flagged: Vec<String> = sqlx::query_scalar(
+        "SELECT address FROM ip_presence WHERE out_of_subnet = 1 ORDER BY address",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("讀取旗標列");
+    assert_eq!(
+        flagged,
+        ["10.0.0.9".to_string(), "10.0.9.9".to_string()],
+        "殘留列仍在資料庫，只於清單讀取時跳過"
+    );
 }
 
 /// 真機唯讀：以系統探測器對本機所在 LAN 被動監聽 ARP 短窗（只收不送；

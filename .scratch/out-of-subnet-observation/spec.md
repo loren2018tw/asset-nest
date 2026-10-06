@@ -53,14 +53,14 @@
 
 ### HTTP API
 
-- `GET /api/v1/observations/unmanaged`：列出 `out_of_subnet=1` 的現況，last_seen 新→舊：
+- `GET /api/v1/observations/out-of-subnet`：列出 `out_of_subnet=1` 的現況，last_seen 新→舊：
   `{ items: [{ subnet_id, subnet_cidr, subnet_name, address, mac, first_seen_at, last_seen_at, source, known, asset }] }`
-  - `first_seen_at`＝該列最早事件時間（事件清理後退化為 last_seen）；`known`／`asset` 比照 MAC 歷史。
+  - `first_seen_at`＝該列最早**留存**事件時間；事件全數清理後為 `last_seen_at`；`known`／`asset` 比照 MAC 歷史。
 - 無需新寫入端點；資料只由探索掃描產生。
 
 ### 前端
 
-- 新頁「網段外觀測」：路由 `/observations/unmanaged`、側邊欄 IP 管理區段新增項目。
+- 新頁「網段外觀測」：路由 `/observations/out-of-subnet`、側邊欄 IP 管理區段新增項目。
 - 表格欄位：IP、MAC（未登錄／已知＋資產連結）、首次看到、最後看到、來源、觀測網段；點 MAC 開既有 `ObservationHistoryDialog`（MAC 模式）。
 - 空狀態說明：僅 raw 模式、探索掃描時被動監聽；窗長可調。
 

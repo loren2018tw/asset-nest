@@ -661,9 +661,11 @@ async function runDiscovery() {
   try {
     const report = await discoverySweep(props.subnet.id);
     lastDiscoveryAt.value = report.last_discovery_at ?? lastDiscoveryAt.value;
+    const passive =
+      report.passive_seen > 0 ? `｜被動看到 ${report.passive_seen}` : "";
     $q.notify({
       type: "positive",
-      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
+      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）${passive}`
     });
   } catch (cause) {
     $q.notify({ type: "negative", message: messageOf(cause) });

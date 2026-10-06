@@ -198,7 +198,6 @@ import { useQuasar } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import { saveBlob } from "@/api/client";
-import type { IpSeenSource } from "@/api/ips";
 import {
   downloadIpObservationsCsv,
   fetchIpObservations,
@@ -208,6 +207,7 @@ import {
   type ObservationEventKind
 } from "@/api/observations";
 import { assetLabel } from "@/utils/assetLabel";
+import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
 /**
@@ -290,20 +290,6 @@ async function exportCsv() {
     $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
     exporting.value = false;
-  }
-}
-
-/** 觀測來源標籤（見票 02、ADR-0017）；未知或缺少顯示「—」。 */
-function sourceLabel(source: IpSeenSource | null | undefined): string {
-  switch (source) {
-    case "arp":
-      return "ARP";
-    case "kea_lease":
-      return "Kea 租約";
-    case "arp_passive":
-      return "ARP 被動";
-    default:
-      return "—";
   }
 }
 

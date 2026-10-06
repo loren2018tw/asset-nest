@@ -97,9 +97,9 @@ pub struct MacHistory {
     pub sightings: Vec<MacSighting>,
 }
 
-/// 網段外觀測清單的一列（`GET /api/v1/observations/unmanaged`；見票 01）。
+/// 網段外觀測清單的一列（`GET /api/v1/observations/out-of-subnet`；見票 01）。
 #[derive(Debug, Serialize)]
-pub struct UnmanagedObservation {
+pub struct OutOfSubnetObservation {
     pub subnet_id: i64,
     pub subnet_cidr: String,
     pub subnet_name: Option<String>,
@@ -116,8 +116,8 @@ pub struct UnmanagedObservation {
 
 /// 網段外觀測清單回應。
 #[derive(Debug, Serialize)]
-pub struct UnmanagedList {
-    pub items: Vec<UnmanagedObservation>,
+pub struct OutOfSubnetList {
+    pub items: Vec<OutOfSubnetObservation>,
 }
 
 /// [`assets_for_macs`] 的查詢列。
@@ -130,9 +130,9 @@ struct LinkedMacRow {
     property_no: Option<String>,
 }
 
-/// [`unmanaged_observations`] 的查詢列。
+/// [`out_of_subnet_observations`] 的查詢列。
 #[derive(Debug, FromRow)]
-struct UnmanagedRow {
+struct OutOfSubnetRow {
     subnet_id: i64,
     subnet_cidr: String,
     subnet_name: Option<String>,
@@ -364,9 +364,11 @@ pub async fn mac_history(pool: &SqlitePool, mac: &str) -> Result<MacHistory, Api
 ///   後退化為 `last_seen_at`（現況不受清理影響）。
 /// - `known`／`asset` 比照 MAC 歷史：MAC 存在於任一 Interface 即已知，連結
 ///   取第一筆命中（不分大小寫）。
+/// - 殘留列自癒：網段 CIDR 之後擴大而涵蓋該位址時，於組裝回應時跳過該列
+///   （資料庫旗標不動；仍在外者照常列出）。
 /// - 唯讀；資料只由探索掃描的被動監聽產生。
-pub async fn unmanaged_observations(pool: &SqlitePool) -> Result<UnmanagedList, ApiError> {
-    let rows: Vec<UnmanagedRow> = sqlx::query_as(
+pub async fn out_of_subnet_observations(pool: &SqlitePool) -> Result<OutOfSubnetList, ApiError> {
+    let rows: Vec<OutOfSubnetRow> = sqlx::query_as(
         "SELECT p.subnet_id,
                 s.cidr AS subnet_cidr,
                 s.name AS subnet_name,
@@ -394,12 +396,13 @@ pub async fn unmanaged_observations(pool: &SqlitePool) -> Result<UnmanagedList, 
 
     let items = rows
         .into_iter()
+        .filter(|row| still_outside_subnet(&row.subnet_cidr, &row.address))
         .map(|row| {
             let asset = row
                 .mac
                 .as_deref()
                 .and_then(|mac| assets.get(&mac.to_ascii_lowercase()).cloned());
-            UnmanagedObservation {
+            OutOfSubnetObservation {
                 subnet_id: row.subnet_id,
                 subnet_cidr: row.subnet_cidr,
                 subnet_name: row.subnet_name,
@@ -414,7 +417,17 @@ pub async fn unmanaged_observations(pool: &SqlitePool) -> Result<UnmanagedList, 
         })
         .collect();
 
-    Ok(UnmanagedList { items })
+    Ok(OutOfSubnetList { items })
+}
+
+/// 網段外觀測列的殘留自癒判斷（純函式；見票 01）：位址已落在網段 CIDR 內
+/// 時不再列出；仍在外者保留。CIDR 或位址無法解析時保守保留（不隱藏資料）。
+fn still_outside_subnet(subnet_cidr: &str, address: &str) -> bool {
+    let (Ok(network), Ok(address)) = (subnet_cidr.parse::<Ipv4Net>(), address.parse::<Ipv4Addr>())
+    else {
+        return true;
+    };
+    !network.contains(&address)
 }
 
 /// 產生單一 IP 觀測歷史匯出 CSV（UTF-8 BOM＋標題列；見票 06、spec §HTTP API）。

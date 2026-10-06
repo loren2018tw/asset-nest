@@ -280,7 +280,6 @@ import {
   type IpAssignmentTarget,
   type IpEntry,
   type IpObservedFilter,
-  type IpSeenSource,
   type IpSortField,
   type IpStatus
 } from "@/api/ips";
@@ -294,6 +293,7 @@ import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { cancelAssignmentHint } from "@/utils/observationHint";
+import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
@@ -513,20 +513,6 @@ function assignmentTargetLabel(target: IpAssignmentTarget): string {
     : `${target.asset_description}(${spec})`;
 }
 
-/** 觀測來源標籤（見票 02、ADR-0017）；未知或缺少顯示「—」。 */
-function sourceLabel(source: IpSeenSource | null): string {
-  switch (source) {
-    case "arp":
-      return "ARP";
-    case "kea_lease":
-      return "Kea 租約";
-    case "arp_passive":
-      return "ARP 被動";
-    default:
-      return "—";
-  }
-}
-
 /** 最後檢查時間：顯示瀏覽器本地時間；缺值為「尚未檢查」。 */
 function checkedLabel(value: string | null): string {
   if (value === null) {
@@ -644,9 +630,11 @@ async function runDiscoverySweep() {
   discovering.value = true;
   try {
     const report = await discoverySweep(subnetId);
+    const passive =
+      report.passive_seen > 0 ? `｜被動看到 ${report.passive_seen}` : "";
     $q.notify({
       type: "positive",
-      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）`
+      message: `探索掃描完成：${report.seen}/${report.targets} 個位址有回應（${report.duration_ms} ms）${passive}`
     });
     if (subnet.value !== null && report.last_discovery_at !== undefined) {
       subnet.value = {

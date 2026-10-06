@@ -175,6 +175,8 @@ export interface SweepReport {
   seen: number;
   /** 掃描耗時（毫秒）。 */
   duration_ms: number;
+  /** 本輪寫入的相異網段外位址數（被動監聽；快速掃描固定 0，見票 01）。 */
+  passive_seen: number;
   /** 僅探索掃描回傳：本次寫入的上次探索時間（UTC）。 */
   last_discovery_at?: string;
 }

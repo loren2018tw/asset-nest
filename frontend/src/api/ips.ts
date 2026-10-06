@@ -184,6 +184,8 @@ export interface SweepReport {
   seen: number;
   /** 掃描耗時（毫秒）。 */
   duration_ms: number;
+  /** 本輪寫入的相異網段外位址數（被動監聽；快速掃描固定 0，見票 01）。 */
+  passive_seen: number;
 }
 
 /** 手動觸發快速掃描（同步執行；前提與錯誤訊息由後端驗證，見票 02）。 */
