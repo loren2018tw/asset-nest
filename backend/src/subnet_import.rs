@@ -516,7 +516,8 @@ fn validate_row(
         }
     };
 
-    // Kea subnet-id：僅 IPv4、正整數；v6 有值＝錯誤（見 ADR-0009）。
+    // Kea subnet-id：僅 IPv4、整數且 `0 < id < 4294967295`；v6 有值＝錯誤
+    //（見 ADR-0009、ADR-0023）。
     let parsed_kea = kea_text
         .as_deref()
         .and_then(|text| text.parse::<i64>().ok());
@@ -529,12 +530,12 @@ fn validate_row(
                 "IPv6 網段不支援 Kea subnet-id（請留空）",
             ));
         } else {
-            match text.parse::<i64>() {
-                Ok(id) if id >= 1 => kea_subnet_id = Some(id),
-                _ => issues.push(Issue::error(
+            match parse_kea_subnet_id(text) {
+                Ok(id) => kea_subnet_id = Some(id),
+                Err(message) => issues.push(Issue::error(
                     "invalid_kea_subnet_id",
                     Some(Field::KeaSubnetId),
-                    format!("Kea subnet-id 須為正整數：{text}"),
+                    message,
                 )),
             }
         }
@@ -748,6 +749,18 @@ fn validate_row(
         },
         plan,
     ))
+}
+
+/// 解析 CSV 的 Kea subnet-id：整數且 `0 < id < 4294967295`（Kea 限制；見 ADR-0023）。
+fn parse_kea_subnet_id(text: &str) -> Result<i64, String> {
+    match text.parse::<i64>() {
+        Ok(id) if (1..subnets::KEA_SUBNET_ID_LIMIT).contains(&id) => Ok(id),
+        Ok(id) if id >= 1 => Err(format!(
+            "Kea subnet-id 超出範圍（須小於 {}）：{id}",
+            subnets::KEA_SUBNET_ID_LIMIT
+        )),
+        _ => Err(format!("Kea subnet-id 須為正整數：{text}")),
+    }
 }
 
 /// 單段位址池解析：須為 `起點-終點`（兩端皆 IPv4，不含空白段）。
@@ -1017,6 +1030,25 @@ mod tests {
         let name = parsed.rows[0].text(Field::Name).expect("名稱");
         assert!(name.contains("核心, 第一區"));
         assert!(name.contains("第二行"), "引號內換行屬同一列");
+    }
+
+    #[test]
+    fn parse_kea_subnet_id_enforces_kea_range() {
+        assert_eq!(parse_kea_subnet_id("1"), Ok(1), "下界 1 允許");
+        assert_eq!(
+            parse_kea_subnet_id("4294967294"),
+            Ok(4294967294),
+            "上界 4294967294 允許（不含 4294967295）"
+        );
+
+        for text in ["4294967295", "4294967296", "9223372036854775807"] {
+            let error = parse_kea_subnet_id(text).expect_err("超出上界應拒絕");
+            assert!(error.contains("超出範圍"), "訊息說明超出範圍：{error}");
+        }
+        for text in ["0", "-1", "", "abc"] {
+            let error = parse_kea_subnet_id(text).expect_err("非正整數應拒絕");
+            assert!(error.contains("正整數"), "訊息：{error}");
+        }
     }
 
     #[test]

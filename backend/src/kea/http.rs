@@ -397,6 +397,17 @@ impl Client {
         expect_success(outcome).map(|_| ())
     }
 
+    /// 新增單一 Kea 網段（`subnet4-add`；需載入 subnet_cmds hook，見 ADR-0023）。
+    ///
+    /// 傳入完整的 `subnet4` 物件（`id` 明示且須與所有網段唯一、前綴不得重複；
+    /// 不得帶 `reservations`）；成功後由完整同步統一 `config-write` 持久化。
+    pub async fn subnet4_add(&self, subnet: &Value) -> Result<(), KeaError> {
+        let outcome = self
+            .command("subnet4-add", Some(json!({ "subnet4": [subnet] })))
+            .await?;
+        expect_success(outcome).map(|_| ())
+    }
+
     /// 列出 Kea 支援的命令（`list-commands`；唯讀）。
     ///
     /// 供診斷用（如確認 subnet_cmds hook 是否提供 `subnet4-update`）；

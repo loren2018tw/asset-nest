@@ -640,6 +640,12 @@ async fn validates_kea_subnet_id_rules() {
     let mut v6_with_id = CsvRow::new("fd00::/64");
     v6_with_id.kea_subnet_id = "5".to_string(); // 列 8
 
+    let mut too_large = CsvRow::new("10.0.6.0/24");
+    too_large.kea_subnet_id = "4294967295".to_string(); // 列 9
+
+    let mut max = CsvRow::new("10.0.7.0/24");
+    max.kea_subnet_id = "4294967294".to_string(); // 列 10
+
     let csv = build_csv(&[
         ok,
         duplicate_file,
@@ -648,11 +654,13 @@ async fn validates_kea_subnet_id_rules() {
         zero,
         negative,
         v6_with_id,
+        too_large,
+        max,
     ]);
     let (status, report) = post_csv(&pool, Some(true), csv.as_bytes()).await;
     assert_eq!(status, StatusCode::OK, "{report}");
-    assert_eq!(report["summary"]["ok"], 1);
-    assert_eq!(report["summary"]["errors"], 6);
+    assert_eq!(report["summary"]["ok"], 2);
+    assert_eq!(report["summary"]["errors"], 7);
 
     let row = row_at(&report, 2);
     assert_eq!(row["status"], "ok");
@@ -688,6 +696,18 @@ async fn validates_kea_subnet_id_rules() {
     let row = row_at(&report, 8);
     assert_eq!(row["status"], "error");
     assert!(has_code(row, "kea_subnet_id_for_v6"), "{row}");
+
+    let row = row_at(&report, 9);
+    assert_eq!(row["status"], "error");
+    assert!(has_code(row, "invalid_kea_subnet_id"), "{row}");
+    assert!(
+        message_of(row, "invalid_kea_subnet_id").contains("超出範圍"),
+        "上界（不含）應說明超出範圍：{row}"
+    );
+
+    let row = row_at(&report, 10);
+    assert_eq!(row["status"], "ok", "上界 4294967294 允許：{row}");
+    assert_eq!(row["data"]["kea_subnet_id"], 4294967294_i64);
 }
 
 #[tokio::test]

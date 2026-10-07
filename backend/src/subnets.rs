@@ -22,6 +22,9 @@ use crate::ips::HostRange;
 /// `subnets` 資料表完整欄位清單。
 const COLUMNS: &str = "id, cidr, name, note, gateway, kea_subnet_id, created_at, updated_at";
 
+/// Kea subnet-id 上界（不含）：合法範圍 `0 < id < KEA_SUBNET_ID_LIMIT`（見 ADR-0023）。
+pub(crate) const KEA_SUBNET_ID_LIMIT: i64 = 4294967295;
+
 /// `subnets` 資料表列。
 #[derive(Debug, FromRow)]
 struct SubnetRow {
@@ -284,6 +287,16 @@ fn validate_fields(
 
     if !is_v4 && kea_subnet_id.is_some() {
         return Err(ApiError::validation("IPv6 網段不支援 kea_subnet_id").field("kea_subnet_id"));
+    }
+    if let Some(id) = kea_subnet_id {
+        // Kea 限制：`0 < id < 4294967295`（見 ADR-0023）。
+        if id < 1 || id >= KEA_SUBNET_ID_LIMIT {
+            return Err(ApiError::validation(format!(
+                "kea_subnet_id 須介於 1 與 {}：{id}",
+                KEA_SUBNET_ID_LIMIT - 1
+            ))
+            .field("kea_subnet_id"));
+        }
     }
     if !is_v4 && !pools.is_empty() {
         return Err(ApiError::validation("IPv6 網段不支援 pool").field("pools"));
@@ -1120,6 +1133,37 @@ mod tests {
             .is_ok(),
             "v6 無 pool、無 kea_subnet_id 即可建立"
         );
+    }
+
+    #[test]
+    fn kea_subnet_id_must_be_within_kea_range() {
+        let validate = |id: i64| {
+            validate_fields(
+                Some("10.0.0.0/24".to_string()),
+                None,
+                None,
+                None,
+                Some(id),
+                vec![],
+                vec![],
+            )
+        };
+
+        assert!(validate(1).is_ok(), "下界 1 允許");
+        assert!(
+            validate(4294967294).is_ok(),
+            "上界 4294967294 允許（不含 4294967295）"
+        );
+
+        for id in [0, -1, 4294967295, i64::MAX] {
+            let error = validate(id).expect_err("超出 Kea 範圍應阻擋");
+            assert_eq!(error.field_name(), Some("kea_subnet_id"));
+            assert!(
+                error.message().contains("4294967294"),
+                "訊息說明範圍：{}",
+                error.message()
+            );
+        }
     }
 
     #[test]

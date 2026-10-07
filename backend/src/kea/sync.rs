@@ -3,7 +3,8 @@
 //! 單筆：指派／改用途／改 hostname／取消指派時即時推送該筆保留（僅受管網段＋
 //! 保留用途）；Kea 失敗僅警示、不阻擋本地儲存，由完整同步修復。
 //! 完整同步：以 asset-nest 為準對齊受管網段的 Kea 保留（新增／更新／刪除）
-//! 與網段層設定（pool、gateway；見 `docs/adr/0013`）；先產生計畫（dry-run）
+//! 與網段層設定（pool、gateway；見 `docs/adr/0013`），並建立 Kea 端缺少的
+//! 受管網段（`subnet4-add`；見 `docs/adr/0023`）；先產生計畫（dry-run）
 //! 再套用；有衝突標記的指派跳過並列入報告。
 //! upsert 以「先刪除（不存在視同已刪）再新增」實作，變更期間僅毫秒級空窗。
 
@@ -19,7 +20,9 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::KeaError;
-use super::http::{Client, Ipv4Range, ReservationRecord, is_routers_option, parse_pool_entry};
+use super::http::{
+    Client, Ipv4Range, KeaSubnet, ReservationRecord, is_routers_option, parse_pool_entry,
+};
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment};
 use crate::conflicts;
@@ -154,6 +157,8 @@ pub struct SyncTotals {
     pub pool_delete: usize,
     /// 要變更 gateway 的網段數（每網段至多 1）。
     pub gateway: usize,
+    /// 要建立的 Kea 網段筆數（見 ADR-0023）。
+    pub subnet_add: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,8 +179,20 @@ pub struct SyncPlanSubnet {
     /// gateway（routers option）變更；相同時省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayPlanItem>,
+    /// 要建立的 Kea 網段（Kea 查無該 id 且無相同 CIDR 時；見 ADR-0023）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subnet_add: Option<SubnetAddPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// 計畫的「新增網段」內容（見 ADR-0023）。
+#[derive(Debug, Serialize)]
+pub struct SubnetAddPlan {
+    /// 期望 pool 範圍（正規化 `start-end`、數值排序）。
+    pub pools: Vec<String>,
+    /// 期望 gateway（routers option）；未設為 `null`。
+    pub gateway: Option<String>,
 }
 
 /// gateway（routers option）變更；`None`＝未設／移除。
@@ -236,6 +253,11 @@ pub struct ApplySubnet {
     pub pool_deleted: usize,
     /// gateway 是否已更新。
     pub gateway_updated: bool,
+    /// 是否已建立 Kea 網段（見 ADR-0023）。
+    pub subnet_added: bool,
+    /// 建立 Kea 網段失敗訊息；成功時省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subnet_add_error: Option<String>,
     /// 網段層（pool／gateway）套用失敗訊息；成功時省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_error: Option<String>,
@@ -258,16 +280,38 @@ pub async fn plan(pool: &SqlitePool, client: &Client) -> Result<SyncPlan, ApiErr
     Ok(to_api_plan(plans))
 }
 
-/// 重算計畫並套用（新增／更新／刪除；見 ADR-0011）。
+/// 重算計畫並套用（建立缺少網段、新增／更新／刪除保留與網段層設定；
+/// 見 ADR-0011、ADR-0023）。
 pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport, ApiError> {
     let plans = compute_plans(pool, client).await?;
+
+    // ① 逐網段建立缺少者（序列；建立內容已含池與 gateway，成功者跳過後續
+    // 網段層設定；失敗者記錯誤並跳過該網段整段保留操作；見 ADR-0023）。
+    let mut subnet_added = vec![false; plans.len()];
+    let mut subnet_add_error: Vec<Option<String>> = (0..plans.len()).map(|_| None).collect();
+    for (index, plan) in plans.iter().enumerate() {
+        let Some(add) = &plan.subnet_add else {
+            continue;
+        };
+        let object = subnet_add_object(plan.kea_subnet_id, &plan.cidr, add);
+        match client.subnet4_add(&object).await {
+            Ok(()) => subnet_added[index] = true,
+            Err(error) => {
+                subnet_add_error[index] = Some(format!("建立 Kea 網段失敗：{error}"));
+            }
+        }
+    }
+    let created = subnet_added.iter().filter(|added| **added).count();
+    let blocked: Vec<bool> = subnet_add_error.iter().map(Option::is_some).collect();
+
+    // ② 保留三相位（現行）。
     let mut counts: Vec<[usize; 3]> = vec![[0; 3]; plans.len()];
     let mut failures: Vec<Vec<ApplyFailure>> = (0..plans.len()).map(|_| Vec::new()).collect();
 
     for phase in [Action::Delete, Action::Update, Action::Add] {
         let mut ops: Vec<(usize, Op)> = Vec::new();
         for (index, plan) in plans.iter().enumerate() {
-            if plan.error.is_some() {
+            if plan.error.is_some() || blocked[index] {
                 continue;
             }
             match phase {
@@ -307,11 +351,12 @@ pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport
         }
     }
 
-    // 網段層設定（pool／gateway）：逐網段序列執行、單一失敗續行（見 ADR-0013）。
+    // ③ 既有網段網段層設定（pool／gateway）：逐網段序列執行、單一失敗續行
+    //（新建者已含池與 gateway，跳過；見 ADR-0013、ADR-0023）。
     let mut settings: Vec<SettingsOutcome> = vec![SettingsOutcome::default(); plans.len()];
     let mut settings_mutated = false;
     for (index, plan) in plans.iter().enumerate() {
-        if plan.error.is_some() || !plan.has_settings_change() {
+        if plan.error.is_some() || plan.subnet_add.is_some() || !plan.has_settings_change() {
             continue;
         }
         match apply_settings(client, plan).await {
@@ -328,11 +373,13 @@ pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport
         }
     }
 
+    // ④ 任一成功變更（含建立網段）才 `config-write` 一次。
     let mutated: usize = counts
         .iter()
         .map(|counts| counts.iter().sum::<usize>())
         .sum();
-    let (config_write, config_write_message) = if mutated == 0 && !settings_mutated {
+    let (config_write, config_write_message) = if mutated == 0 && !settings_mutated && created == 0
+    {
         ("skipped", None)
     } else {
         match client.config_write().await {
@@ -341,28 +388,27 @@ pub async fn apply(pool: &SqlitePool, client: &Client) -> Result<SyncApplyReport
         }
     };
 
-    let subnets = plans
-        .into_iter()
-        .zip(counts)
-        .zip(failures)
-        .zip(settings)
-        .map(|(((plan, counts), failures), settings)| ApplySubnet {
+    let mut subnets = Vec::with_capacity(plans.len());
+    for (index, plan) in plans.into_iter().enumerate() {
+        subnets.push(ApplySubnet {
             subnet_id: plan.subnet_id,
             cidr: plan.cidr,
             name: plan.name,
             kea_subnet_id: plan.kea_subnet_id,
-            added: counts[Action::Add.index()],
-            updated: counts[Action::Update.index()],
-            deleted: counts[Action::Delete.index()],
+            added: counts[index][Action::Add.index()],
+            updated: counts[index][Action::Update.index()],
+            deleted: counts[index][Action::Delete.index()],
             skipped: plan.skipped.len(),
-            pool_added: settings.pool_added,
-            pool_deleted: settings.pool_deleted,
-            gateway_updated: settings.gateway_updated,
-            settings_error: settings.error,
-            failures,
+            pool_added: settings[index].pool_added,
+            pool_deleted: settings[index].pool_deleted,
+            gateway_updated: settings[index].gateway_updated,
+            subnet_added: subnet_added[index],
+            subnet_add_error: subnet_add_error[index].take(),
+            settings_error: settings[index].error.take(),
+            failures: std::mem::take(&mut failures[index]),
             error: plan.error,
-        })
-        .collect();
+        });
+    }
 
     Ok(SyncApplyReport {
         subnets,
@@ -401,16 +447,14 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
             pool_adds: Vec::new(),
             pool_deletes: Vec::new(),
             gateway_change: None,
+            subnet_add: None,
             raw_subnet: None,
             error: None,
         };
 
-        let kea_subnet = match kea_subnets.get(&kea_subnet_id) {
-            None => {
-                plan.error = Some(format!("Kea 端沒有 subnet-id {kea_subnet_id}"));
-                plans.push(plan);
-                continue;
-            }
+        // Kea 端對應網段：`Some`＝既有且 CIDR 相符；`None`＝缺少、將以
+        // `subnet4-add` 建立（同 CIDR 已掛其他 id 為預檢錯誤；見 ADR-0023）。
+        let existing = match kea_subnets.get(&kea_subnet_id) {
             Some(kea_subnet) if !same_network(&subnet.cidr, &kea_subnet.cidr) => {
                 plan.error = Some(format!(
                     "CIDR 不符：asset-nest {}／Kea {}",
@@ -419,10 +463,19 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
                 plans.push(plan);
                 continue;
             }
-            Some(kea_subnet) => kea_subnet,
+            Some(kea_subnet) => Some(kea_subnet),
+            None => {
+                if let Some(owner) = same_cidr_owner(&kea_subnets, &subnet.cidr) {
+                    plan.error = Some(format!("相同 CIDR 已由 Kea 網段 id {owner} 使用"));
+                    plans.push(plan);
+                    continue;
+                }
+                None
+            }
         };
 
-        // 網段層設定差異（pool／gateway；見 ADR-0013）。
+        // 網段層設定差異（pool／gateway；見 ADR-0013）；將建立的網段只記
+        // 建立內容，不重複填 pool／gateway 差異。
         plan.desired_pools = match subnet_pool_ranges(&subnet) {
             Ok(ranges) => ranges,
             Err(message) => {
@@ -431,14 +484,27 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
                 continue;
             }
         };
-        (plan.pool_adds, plan.pool_deletes) = pool_diff(&plan.desired_pools, &kea_subnet.pools);
-        if subnet.gateway != kea_subnet.gateway {
-            plan.gateway_change = Some(GatewayChange {
-                current: kea_subnet.gateway.clone(),
-                desired: subnet.gateway.clone(),
-            });
+        match existing {
+            Some(kea_subnet) => {
+                (plan.pool_adds, plan.pool_deletes) =
+                    pool_diff(&plan.desired_pools, &kea_subnet.pools);
+                if subnet.gateway != kea_subnet.gateway {
+                    plan.gateway_change = Some(GatewayChange {
+                        current: kea_subnet.gateway.clone(),
+                        desired: subnet.gateway.clone(),
+                    });
+                }
+                plan.raw_subnet = Some(kea_subnet.raw.clone());
+            }
+            None => {
+                let mut pools = plan.desired_pools.clone();
+                pools.sort();
+                plan.subnet_add = Some(SubnetAdd {
+                    pools,
+                    gateway: subnet.gateway.clone(),
+                });
+            }
         }
-        plan.raw_subnet = Some(kea_subnet.raw.clone());
 
         let assignments = assignments::list_for_subnet(pool, subnet.id)
             .await
@@ -479,13 +545,17 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
             }
         }
 
-        let hosts = match client.reservation_get_all(kea_subnet_id).await {
-            Ok(hosts) => hosts,
-            Err(error) => {
-                plan.error = Some(format!("讀取 Kea 保留失敗：{error}"));
-                plans.push(plan);
-                continue;
-            }
+        // 新建網段在 Kea 端視為空集合，不呼叫 `reservation-get-all`（見 ADR-0023）。
+        let hosts = match existing {
+            Some(_) => match client.reservation_get_all(kea_subnet_id).await {
+                Ok(hosts) => hosts,
+                Err(error) => {
+                    plan.error = Some(format!("讀取 Kea 保留失敗：{error}"));
+                    plans.push(plan);
+                    continue;
+                }
+            },
+            None => Vec::new(),
         };
 
         let mut existing: HashMap<String, RecordFields> = HashMap::new();
@@ -538,6 +608,8 @@ struct SubnetPlan {
     pool_deletes: Vec<Ipv4Range>,
     /// gateway 變更；相同時為 `None`。
     gateway_change: Option<GatewayChange>,
+    /// 將建立的 Kea 網段內容（缺少且無相同 CIDR 時；見 ADR-0023）。
+    subnet_add: Option<SubnetAdd>,
     /// 取自 `config-get` 的原始 `subnet4` 物件（供 `subnet4-update`）。
     raw_subnet: Option<Value>,
     error: Option<String>,
@@ -548,6 +620,37 @@ impl SubnetPlan {
     fn has_settings_change(&self) -> bool {
         !self.pool_adds.is_empty() || !self.pool_deletes.is_empty() || self.gateway_change.is_some()
     }
+}
+
+/// 將建立的 Kea 網段內容（見 ADR-0023）。
+struct SubnetAdd {
+    /// 期望 pool 範圍（數值排序；空＝不帶 `pools`）。
+    pools: Vec<Ipv4Range>,
+    /// gateway（routers option）；未設為 `None`。
+    gateway: Option<String>,
+}
+
+/// 相同 CIDR（`same_network` 正規化）已掛在 Kea 其他網段時回傳其 id（見 ADR-0023）。
+fn same_cidr_owner(kea_subnets: &HashMap<i64, KeaSubnet>, cidr: &str) -> Option<i64> {
+    kea_subnets
+        .iter()
+        .find(|(_, kea_subnet)| same_network(cidr, &kea_subnet.cidr))
+        .map(|(id, _)| *id)
+}
+
+/// 組裝 `subnet4-add` 的建立物件（僅 `id`／`subnet`／`pools`／routers；見 ADR-0023）。
+fn subnet_add_object(kea_subnet_id: i64, cidr: &str, add: &SubnetAdd) -> Value {
+    let mut subnet = json!({ "id": kea_subnet_id, "subnet": cidr });
+    if !add.pools.is_empty() {
+        subnet["pools"] = Value::Array(
+            add.pools
+                .iter()
+                .map(|range| json!({ "pool": range.to_kea_string() }))
+                .collect(),
+        );
+    }
+    set_gateway_option(&mut subnet, add.gateway.as_deref());
+    subnet
 }
 
 /// 單一網段的 gateway 變更。
@@ -765,6 +868,14 @@ fn to_api_plan(plans: Vec<SubnetPlan>) -> SyncPlan {
                 current: change.current,
                 desired: change.desired,
             });
+            let subnet_add = plan.subnet_add.map(|add| SubnetAddPlan {
+                pools: add
+                    .pools
+                    .iter()
+                    .map(|range| range.to_compact_string())
+                    .collect(),
+                gateway: add.gateway,
+            });
 
             totals.add += add.len();
             totals.update += update.len();
@@ -773,6 +884,7 @@ fn to_api_plan(plans: Vec<SubnetPlan>) -> SyncPlan {
             totals.pool_add += pool_add.len();
             totals.pool_delete += pool_delete.len();
             totals.gateway += usize::from(gateway.is_some());
+            totals.subnet_add += usize::from(subnet_add.is_some());
 
             SyncPlanSubnet {
                 subnet_id: plan.subnet_id,
@@ -786,6 +898,7 @@ fn to_api_plan(plans: Vec<SubnetPlan>) -> SyncPlan {
                 pool_add,
                 pool_delete,
                 gateway,
+                subnet_add,
                 error: plan.error,
             }
         })
@@ -1045,6 +1158,76 @@ mod tests {
         assert!(
             subnet["option-data"].as_array().expect("陣列").is_empty(),
             "gateway 未設＝移除 routers"
+        );
+    }
+
+    /// 建立物件組裝：`id`／`subnet`＋pools（`to_kea_string`）與 routers（形狀同
+    /// update 路徑；見 ADR-0023）。
+    #[test]
+    fn subnet_add_object_includes_pools_and_gateway() {
+        let add = SubnetAdd {
+            pools: vec![Ipv4Range {
+                start: "10.0.0.10".parse().expect("起點"),
+                end: "10.0.0.20".parse().expect("終點"),
+            }],
+            gateway: Some("10.0.0.1".to_string()),
+        };
+
+        assert_eq!(
+            subnet_add_object(7, "10.0.0.0/24", &add),
+            json!({
+                "id": 7,
+                "subnet": "10.0.0.0/24",
+                "pools": [{ "pool": "10.0.0.10 - 10.0.0.20" }],
+                "option-data": [
+                    { "name": "routers", "code": 3, "space": "dhcp4", "data": "10.0.0.1" }
+                ]
+            })
+        );
+    }
+
+    /// 無 pool 與 gateway 時省略對應欄位（空 `pools` 不帶；見 ADR-0023）。
+    #[test]
+    fn subnet_add_object_omits_empty_pools_and_gateway() {
+        let add = SubnetAdd {
+            pools: Vec::new(),
+            gateway: None,
+        };
+        let object = subnet_add_object(7, "10.9.0.0/24", &add);
+
+        assert_eq!(object, json!({ "id": 7, "subnet": "10.9.0.0/24" }));
+        assert!(object.get("pools").is_none());
+        assert!(object.get("option-data").is_none());
+    }
+
+    /// 同 CIDR 預檢：以 `same_network` 正規化比對（見 ADR-0023）。
+    #[test]
+    fn same_cidr_owner_matches_normalized_networks() {
+        let kea_subnet = |cidr: &str| KeaSubnet {
+            cidr: cidr.to_string(),
+            pools: Vec::new(),
+            gateway: None,
+            raw: json!({}),
+        };
+        let kea_subnets = HashMap::from([
+            (1, kea_subnet("10.0.0.0/24")),
+            (2, kea_subnet("192.168.0.0/16")),
+        ]);
+
+        assert_eq!(
+            same_cidr_owner(&kea_subnets, "10.0.0.5/24"),
+            Some(1),
+            "host bits 正規化後相同"
+        );
+        assert_eq!(
+            same_cidr_owner(&kea_subnets, "172.16.0.0/24"),
+            None,
+            "無相同 CIDR"
+        );
+        assert_eq!(
+            same_cidr_owner(&kea_subnets, "not-a-cidr"),
+            None,
+            "無法解析不誤判"
         );
     }
 }

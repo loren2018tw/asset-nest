@@ -902,6 +902,33 @@ async fn kea_subnet_id_is_unique_among_v4() {
 }
 
 #[tokio::test]
+async fn kea_subnet_id_must_be_within_kea_range() {
+    let pool = test_pool().await;
+
+    // 上下界允許
+    let min = create_subnet(&pool, json!({ "cidr": "10.4.0.0/24", "kea_subnet_id": 1 })).await;
+    assert_eq!(min["kea_subnet_id"], 1);
+    let max = create_subnet(
+        &pool,
+        json!({ "cidr": "10.5.0.0/24", "kea_subnet_id": 4294967294_i64 }),
+    )
+    .await;
+    assert_eq!(max["kea_subnet_id"], 4294967294_i64);
+
+    // 超出範圍（0 與 4294967295 皆不合法；見 ADR-0023）
+    for (cidr, id) in [("10.6.0.0/24", 0_i64), ("10.7.0.0/24", 4294967295_i64)] {
+        let body = reject_subnet(&pool, json!({ "cidr": cidr, "kea_subnet_id": id })).await;
+        assert_eq!(body["details"]["field"], "kea_subnet_id", "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("4294967294")),
+            "訊息說明範圍：{body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn export_subnets_returns_ordered_csv_with_bom() {
     let pool = test_pool().await;
 
