@@ -75,9 +75,9 @@ _Avoid_: 序號
 ## 同步詞彙
 
 **真實來源（source of truth）**：該類資料以哪一方為準。
-**受管網段（managed subnet）**：已設定 kea_subnet_id 的 IPv4 網段；其保留、位址池與 gateway 單向同步到 Kea。未受管網段不與 Kea 互動。
+**受管網段（managed subnet）**：已設定 kea_subnet_id 的 IPv4 網段；其保留、位址池與 gateway 單向同步到 Kea，Kea 端尚無該網段時由完整同步建立（不反向刪除）。未受管網段不與 Kea 互動。
 **推送（push）**：asset-nest 將保留寫入 Kea 的單向動作；指派／改用途／取消指派時即時推送單筆，失敗不阻擋本地儲存（見 ADR-0011）。
-**完整同步（full sync）**：以 asset-nest 為準，一次對齊受管網段的 Kea 保留與網段層設定（位址池、gateway；新增／更新／刪除）；先產生唯讀計畫再確認套用（見 ADR-0011、ADR-0013）。
+**完整同步（full sync）**：以 asset-nest 為準，一次對齊受管網段的 Kea 保留與網段層設定（位址池、gateway；新增／更新／刪除），並建立 Kea 端缺少的受管網段；先產生唯讀計畫再確認套用（見 ADR-0011、ADR-0013、ADR-0023）。
 **網段層設定（subnet settings）**：受管網段在 Kea 端屬網段本身的設定——DHCP 位址池（`pools`）與 gateway（`routers` option）；由完整同步對齊（見 ADR-0013）。
 **對帳（reconcile）**：由 Kea 讀回保留與租約、比對差異的唯讀動作；完整同步的計畫階段即為保留對帳（租約對帳後續階段）。
 
