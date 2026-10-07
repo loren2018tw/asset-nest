@@ -34,7 +34,7 @@ Rust（axum）後端 + Quasar（Vue 3 / Vite）前端的整合系統。資產、
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/loren2018tw/asset-nest/main/deploy/agent-install.sh | \
-  sudo bash -s -- --server-url http://<後端主機>:8080 \
+  sudo bash -s -- --server-url http://<後端主機> \
   --auth-code-file /etc/asset-nest/asset-nest.env
 ```
 
@@ -95,18 +95,21 @@ pnpm build        # quasar build → cargo build --release
 
 ## 一鍵安裝（全新 Ubuntu）
 
-在全新安裝的 Ubuntu 24.04／26.04（需 root、需網路）上，一行指令安裝並啟用 Kea DHCP 3.2 與本系統：
+在全新安裝的 Ubuntu 24.04／26.04（需 root、需網路）上，一行指令安裝並啟用 nginx 前門、Kea DHCP 3.2 與本系統：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/loren2018tw/asset-nest/main/deploy/install.sh | sudo bash
 ```
 
-腳本會安裝 `asset-nest` 與 `isc-kea-dhcp4-server` 兩個 systemd 服務：
+腳本會安裝並啟用 `nginx`、`asset-nest` 與 `isc-kea-dhcp4-server` 三個服務；本系統由 nginx 前門反向代理：
 
 | 服務 | 說明 |
 |------|------|
-| `asset-nest` | 本系統：`http://<主機>:8080`；資料庫 `/var/lib/asset-nest/asset-nest.db`；設定 `/etc/asset-nest/asset-nest.env` |
+| `nginx` | 反向代理：`http://<主機>/` → asset-nest `127.0.0.1:8080`（站台檔 `/etc/nginx/sites-available/asset-nest.conf`） |
+| `asset-nest` | 本系統：`http://<主機>/`；資料庫 `/var/lib/asset-nest/asset-nest.db`；設定 `/etc/asset-nest/asset-nest.env` |
 | `isc-kea-dhcp4-server` | Kea DHCPv4（ISC Cloudsmith 3.2）；控制通道 `127.0.0.1:8000`（Basic 認證，憑證 `/etc/kea/asset-nest-api.*`） |
+
+首次安裝會產生登入帳密：帳號 `admin`，密碼隨機產生並寫入 `/etc/asset-nest/asset-nest.env`（查看：`sudo grep '^AUTH_' /etc/asset-nest/asset-nest.env`）。未設定或留空時帳號與密碼皆為 `admin`／`admin`。登入狀態以 cookie 保存，固定 **30 天**不續期；變更帳密即所有裝置登出——編輯 env 檔的 `AUTH_USERNAME`／`AUTH_PASSWORD` 後 `sudo systemctl restart asset-nest` 即生效。本系統不含 TLS（cookie 不設 `Secure`），正式環境請由反向代理終結 TLS（見 `docs/adr/0022`）。
 
 亦可從本機 checkout 執行（CI、開發機）：
 
@@ -120,7 +123,9 @@ sudo ./deploy/install.sh --source-dir "$PWD"
 |------|------|
 | `--kea-interfaces eth0` | Kea 監聽介面，逗號分隔（預設空＝不監聽；`*` 表全部） |
 | `--kea-subnet 10.0.0.0/24` | 寫入單一 Kea 網段（id 1；供測試或單網段環境） |
-| `--bind 127.0.0.1:8080` | asset-nest 綁定位址（預設 `0.0.0.0:8080`） |
+| `--bind 127.0.0.1:8080` | asset-nest 綁定位址（預設 `127.0.0.1:8080`；`--no-nginx` 時 `0.0.0.0:8080`） |
+| `--no-nginx` | 不安裝／不設定 nginx；asset-nest 維持直接對外（舊行為） |
+| `--force-nginx-conf` | 覆寫既有 nginx 站台檔（預設保留，避免蓋掉日後 certbot 的修改） |
 | `--no-kea` | 只安裝 asset-nest；搭配 `--kea-url`／`--kea-username`／`--kea-password` 指向既有 Kea |
 | `--force-kea-config` | 備份後覆寫既有 Kea 設定並重新產生控制通道憑證（預設保留） |
 
@@ -128,12 +133,13 @@ sudo ./deploy/install.sh --source-dir "$PWD"
 
 - 產生的 Kea 設定於最上層 `Dhcp4.option-data` 預設 DNS `8.8.8.8`（`domain-name-servers`），未另行覆寫的網段皆適用。
 - **Kea 預設不監聽任何介面、也不含網段**（避免誤發 DHCP）。請編輯 `/etc/kea/kea-dhcp4.conf` 設定 `interfaces-config` 與 `subnet4`（記下 `id`）後 `systemctl restart isc-kea-dhcp4-server`；在本系統建立網段並填入相同 `kea_subnet_id`，保留、位址池與 gateway 由「Kea 同步」對齊（見 `docs/adr/0011`、`docs/adr/0013`）。
-- 本系統尚無登入驗證；請以防火牆限制 8080 來源，勿暴露公網。
-- 移除：`sudo ./deploy/uninstall.sh`（`--purge` 連資料與設定；`--remove-kea` 連 Kea 移除）。
+- 請以防火牆限制 80 來源（或僅允許區域網路），勿暴露公網。
+- HTTPS 尚未設定；日後以 certbot（Let's Encrypt）於 nginx 設定（站台檔 `/etc/nginx/sites-available/asset-nest.conf`）。
+- 移除：`sudo ./deploy/uninstall.sh`（一併移除 nginx 站台設定、保留 nginx 套件；`--purge` 連資料與設定；`--remove-kea` 連 Kea 移除）。
 
-**升級（已安裝系統）**：重跑上方一行安裝指令即完成——安裝腳本會在 `/opt/asset-nest/src` 以 `git fetch`＋`checkout` 更新至最新 `main`（可用 `--ref` 指定分支／標籤），重新建置並更新 `/opt/asset-nest`，最後重啟服務；Kea 設定與控制通道憑證保留、資料庫不動（migrations 於服務啟動時自動套用）。以 `--source-dir` 安裝者（開發機／CI）：在該 checkout `git pull` 後重跑 `sudo ./deploy/install.sh --source-dir "$PWD"`。
+**升級（已安裝系統）**：重跑上方一行安裝指令即完成——安裝腳本會在 `/opt/asset-nest/src` 以 `git fetch`＋`checkout` 更新至最新 `main`（可用 `--ref` 指定分支／標籤），重新建置並更新 `/opt/asset-nest`，最後重啟服務；Kea 設定與控制通道憑證保留、nginx 站台檔保留（`--force-nginx-conf` 才會覆寫，避免蓋掉日後 certbot 的修改）、資料庫不動（migrations 於服務啟動時自動套用）。以 `--source-dir` 安裝者（開發機／CI）：在該 checkout `git pull` 後重跑 `sudo ./deploy/install.sh --source-dir "$PWD"`。
 
-CI：`.github/workflows/install-test.yml` 為**手動觸發**（workflow_dispatch），在 `ubuntu-24.04`／`ubuntu-26.04` 實際執行安裝，驗證兩個服務、`/api/health` 與 Kea 保留 roundtrip（`pnpm test:kea`）；Cargo 建置有快取。
+CI：`.github/workflows/install-test.yml` 為**手動觸發**（workflow_dispatch），在 `ubuntu-24.04`／`ubuntu-26.04` 實際執行安裝，驗證 nginx／asset-nest／Kea 三個服務、`/api/health`（經 nginx）、Kea 保留 roundtrip（`pnpm test:kea`）與代理安裝後的心跳上線（含登入查詢）；Cargo 建置有快取。
 
 ## 常用指令
 

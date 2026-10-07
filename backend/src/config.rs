@@ -11,6 +11,10 @@ const DEFAULT_RETENTION_DAYS: u32 = 365;
 const DEFAULT_AGENT_STALE_SECS: u64 = 900;
 /// `AGENT_AUTH_FAILURE_RETENTION_DAYS` 的預設值（30 天；見票 08、spec §環境設定）。
 const DEFAULT_AGENT_AUTH_FAILURE_RETENTION_DAYS: u32 = 30;
+/// `AUTH_USERNAME` 的預設值（見 ADR-0021）。
+pub const DEFAULT_AUTH_USERNAME: &str = "admin";
+/// `AUTH_PASSWORD` 的預設值（見 ADR-0021）。
+pub const DEFAULT_AUTH_PASSWORD: &str = "admin";
 
 /// 後端啟動設定（見 `.env.example`）。
 #[derive(Debug, Clone)]
@@ -38,6 +42,12 @@ pub struct Config {
     /// 觀測事件保留天數；`OBSERVATION_RETENTION_DAYS`（正整數，預設 365；
     /// 見 `docs/adr/0016`）。僅影響事件歷史，不動 `ip_presence` 現況。
     pub observation_retention_days: u32,
+    /// 登入帳號；`AUTH_USERNAME`，未設定或（trim 後）空白為 `admin`
+    /// （見 `docs/adr/0021`）。
+    pub auth_username: String,
+    /// 登入密碼；`AUTH_PASSWORD`，未設定或（trim 後）空白為 `admin`
+    /// （見 `docs/adr/0021`）。
+    pub auth_password: String,
 }
 
 impl Config {
@@ -83,6 +93,11 @@ impl Config {
             Err(_) => DEFAULT_RETENTION_DAYS,
         };
 
+        let auth_username =
+            parse_auth_field(std::env::var("AUTH_USERNAME").ok(), DEFAULT_AUTH_USERNAME);
+        let auth_password =
+            parse_auth_field(std::env::var("AUTH_PASSWORD").ok(), DEFAULT_AUTH_PASSWORD);
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -94,6 +109,8 @@ impl Config {
             agent_stale_secs,
             agent_auth_failure_retention_days,
             observation_retention_days,
+            auth_username,
+            auth_password,
         })
     }
 }
@@ -126,6 +143,14 @@ fn parse_agent_auth_failure_retention_days(raw: &str) -> anyhow::Result<u32> {
 fn parse_agent_auth_code(raw: Option<String>) -> Option<String> {
     raw.map(|code| code.trim().to_string())
         .filter(|code| !code.is_empty())
+}
+
+/// 解析 `AUTH_USERNAME`／`AUTH_PASSWORD`：trim 後為空或未設定 → `default`；
+/// 非空原樣（trim 後；見 ADR-0021）。
+fn parse_auth_field(raw: Option<String>, default: &str) -> String {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// 解析 `AGENT_STALE_SECS`：須為正整數秒，缺值由呼叫端套用預設。
@@ -239,6 +264,63 @@ mod tests {
             parse_agent_auth_code(Some("  secret ".to_string())),
             Some("secret".to_string()),
             "前後空白應去除"
+        );
+    }
+
+    #[test]
+    fn auth_defaults_are_admin() {
+        assert_eq!(DEFAULT_AUTH_USERNAME, "admin");
+        assert_eq!(DEFAULT_AUTH_PASSWORD, "admin");
+    }
+
+    #[test]
+    fn auth_fields_missing_blank_or_whitespace_fall_back_to_default() {
+        assert_eq!(
+            parse_auth_field(None, DEFAULT_AUTH_USERNAME),
+            "admin",
+            "未設定 → 預設"
+        );
+        assert_eq!(
+            parse_auth_field(Some(String::new()), DEFAULT_AUTH_PASSWORD),
+            "admin",
+            "空字串 → 預設"
+        );
+        assert_eq!(
+            parse_auth_field(Some("   ".to_string()), DEFAULT_AUTH_USERNAME),
+            "admin",
+            "全空白 → 預設"
+        );
+        assert_eq!(
+            parse_auth_field(Some("\t \n".to_string()), DEFAULT_AUTH_PASSWORD),
+            "admin",
+            "各種空白 → 預設"
+        );
+    }
+
+    #[test]
+    fn auth_fields_trim_surrounding_whitespace() {
+        assert_eq!(
+            parse_auth_field(Some("  alice  ".to_string()), DEFAULT_AUTH_USERNAME),
+            "alice",
+            "前後空白應去除"
+        );
+        assert_eq!(
+            parse_auth_field(Some("\t s3cret \n".to_string()), DEFAULT_AUTH_PASSWORD),
+            "s3cret"
+        );
+    }
+
+    #[test]
+    fn auth_fields_keep_non_empty_values_verbatim() {
+        assert_eq!(
+            parse_auth_field(Some("admin root".to_string()), DEFAULT_AUTH_USERNAME),
+            "admin root",
+            "內部空白保留"
+        );
+        assert_eq!(
+            parse_auth_field(Some("p@ss|word".to_string()), DEFAULT_AUTH_PASSWORD),
+            "p@ss|word",
+            "特殊字元保留"
         );
     }
 }

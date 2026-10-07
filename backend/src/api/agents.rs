@@ -2,7 +2,9 @@
 //!
 //! 心跳與觀測回報端點以共用認證碼（`X-Auth-Code`）驗證：後端未設定
 //! `AGENT_AUTH_CODE` 一律 503；不符 401 且不寫入代理、改記被拒回報。
-//! 來源 IP 一律取連線來源、忽略 XFF（見 ADR-0019）。
+//! 來源 IP 以 [`crate::peer::resolve_peer_ip`] 判定：連線來源為 loopback
+//! （本機反向代理，如 nginx）時採 `X-Forwarded-For` 第一段，否則一律用
+//! 連線來源、忽略 XFF 以免遠端偽造（見 ADR-0022；ADR-0019 修訂）。
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -122,7 +124,13 @@ async fn heartbeat(
     headers: HeaderMap,
     payload: Result<Json<HeartbeatInput>, JsonRejection>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
-    let source_ip = remote.ip().to_string();
+    let source_ip = crate::peer::resolve_peer_ip(
+        remote.ip(),
+        headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .to_string();
     let now = Utc::now();
 
     // 認證不符：401、不寫入代理，改記被拒回報（自報名稱／版本 best-effort）。
@@ -162,7 +170,13 @@ async fn observations(
     headers: HeaderMap,
     payload: Result<Json<ObservationsInput>, JsonRejection>,
 ) -> Result<Json<ObservationsResponse>, ApiError> {
-    let source_ip = remote.ip().to_string();
+    let source_ip = crate::peer::resolve_peer_ip(
+        remote.ip(),
+        headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .to_string();
     let now = Utc::now();
 
     let claimed = match &payload {

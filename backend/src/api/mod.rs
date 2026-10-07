@@ -10,6 +10,7 @@ use crate::AppState;
 mod agents;
 mod asset_assignments;
 mod assets;
+mod auth;
 mod error;
 mod import;
 mod interfaces;
@@ -57,6 +58,7 @@ mod v1 {
             .merge(super::agents::router())
             .merge(super::asset_assignments::router())
             .merge(super::assets::router())
+            .merge(super::auth::router())
             .merge(super::import::router())
             .merge(super::interfaces::router())
             .merge(super::ip_candidates::router())

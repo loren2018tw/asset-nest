@@ -6,6 +6,8 @@ import {
   createWebHistory
 } from "vue-router";
 
+import { useAuthStore } from "@/stores/auth";
+
 import routes from "./routes";
 
 /*
@@ -17,7 +19,7 @@ import routes from "./routes";
  * with the Router instance.
  */
 
-export default defineRouter((/* { store, ssrContext } */) => {
+export default defineRouter(({ store }) => {
   const createHistory = import.meta.env.QUASAR_SERVER
     ? createMemoryHistory
     : import.meta.env.QUASAR_VUE_ROUTER_MODE === "history"
@@ -32,6 +34,26 @@ export default defineRouter((/* { store, ssrContext } */) => {
     // quasar.conf.js -> build -> vueRouterMode
     // quasar.conf.js -> build -> publicPath
     history: createHistory(import.meta.env.QUASAR_VUE_ROUTER_BASE)
+  });
+
+  // 全域登入守衛（見 spec §5.2）
+  Router.beforeEach(async to => {
+    const auth = useAuthStore(store);
+
+    if (to.path === "/login") {
+      // 重新載入後帳號尚未知，先以 cookie 確認；已登入者不停留登入頁
+      if (!auth.checked) {
+        await auth.ensureSession();
+      }
+      return auth.username === null ? true : "/kea/status";
+    }
+
+    await auth.ensureSession();
+    if (auth.username === null) {
+      return { path: "/login", query: { redirect: to.fullPath } };
+    }
+
+    return true;
   });
 
   return Router;

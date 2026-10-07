@@ -4,7 +4,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use asset_nest::{AppState, agents, config::Config, db, kea, observation};
+use asset_nest::config::{Config, DEFAULT_AUTH_PASSWORD, DEFAULT_AUTH_USERNAME};
+use asset_nest::{AppState, agents, db, kea, observation};
 use axum::serve;
 use chrono::Utc;
 use tokio::net::TcpListener;
@@ -30,6 +31,13 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env().context("讀取環境設定失敗")?;
     tracing::debug!(?config, "環境設定");
 
+    // 帳密仍為預設值時提醒；登入一律啟用、無停用開關（見 ADR-0021）。
+    if config.auth_username == DEFAULT_AUTH_USERNAME
+        || config.auth_password == DEFAULT_AUTH_PASSWORD
+    {
+        tracing::warn!("登入帳密仍為預設值（admin），建議設定 AUTH_USERNAME／AUTH_PASSWORD");
+    }
+
     let pool = db::init(&config.database_url)
         .await
         .context("初始化資料庫失敗")?;
@@ -49,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("asset-nest 後端：http://{}", listener.local_addr()?);
 
     let mut state = AppState::new(pool, config.web_dist_dir.clone())
+        .with_auth(config.auth_username.clone(), config.auth_password.clone())
         .with_agent_auth_code(config.agent_auth_code.clone())
         .with_agent_stale_secs(config.agent_stale_secs);
     if let Some(url) = config.kea_api_url.clone() {

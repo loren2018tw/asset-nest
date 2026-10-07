@@ -5,7 +5,8 @@
 //! 同交易套用、未對應網段只記代理狀態、認證與未設碼沿用心跳行為、
 //! 「有在線代理」的未觀測判定（含代理過期回到未觀測）。
 //! 記憶體 SQLite＋`sqlx::migrate!`＋`tower::ServiceExt::oneshot`；連線來源以
-//! 注入 `ConnectInfo` 模擬（比照 `agent_status.rs`）。
+//! 注入 `ConnectInfo` 模擬（比照 `agent_status.rs`）；loopback 來源另注入
+//! `X-Forwarded-For`，驗證本機反向代理情境的來源 IP 判定（見 spec §4）。
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -25,8 +26,10 @@ use asset_nest::{AppState, app};
 
 /// 測試用共用認證碼。
 const AUTH_CODE: &str = "agent-secret-02";
-/// 測試連線來源（TEST-NET-3；忽略 XFF 後即 `source_ip`）。
+/// 測試連線來源（TEST-NET-3；非 loopback，即 `source_ip`，偽造 XFF 不採信）。
 const REMOTE: &str = "203.0.113.9:40123";
+/// 本機反向代理（nginx）情境的連線來源（loopback；帶 XFF 時採第一段）。
+const LOOPBACK: &str = "127.0.0.1:40124";
 /// 測試用代理 instance id。
 const AGENT_ID: &str = "b3f1a2c4-0000-4000-8000-000000000201";
 
@@ -65,9 +68,26 @@ async fn send(
     body: Option<Value>,
     auth_code: Option<&str>,
 ) -> (StatusCode, Value) {
+    send_from(state, method, uri, REMOTE, None, body, auth_code).await
+}
+
+/// 以 `oneshot` 發送請求，可指定連線來源與 `X-Forwarded-For`：loopback
+/// 來源比照本機反向代理（nginx）注入 XFF（見 spec §4）。
+async fn send_from(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    remote: &str,
+    forwarded_for: Option<&str>,
+    body: Option<Value>,
+    auth_code: Option<&str>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(code) = auth_code {
         builder = builder.header("x-auth-code", code);
+    }
+    if let Some(value) = forwarded_for {
+        builder = builder.header("x-forwarded-for", value);
     }
     let body = match body {
         Some(value) => {
@@ -80,7 +100,7 @@ async fn send(
     let mut request = builder.body(body).expect("建立請求");
     request
         .extensions_mut()
-        .insert(ConnectInfo(REMOTE.parse::<SocketAddr>().expect("來源位址")));
+        .insert(ConnectInfo(remote.parse::<SocketAddr>().expect("來源位址")));
 
     let response = app(state.clone()).oneshot(request).await.expect("執行請求");
 
@@ -1181,5 +1201,213 @@ async fn online_agent_marks_subnet_observed_until_report_expires() {
     assert_eq!(
         history["presence"]["last_seen_source"], "arp",
         "過期不清資料"
+    );
+}
+
+#[tokio::test]
+async fn loopback_source_takes_first_xff_segment() {
+    let pool = test_pool().await;
+    let state = test_state(&pool);
+    let _ = create_subnet(&state, "10.41.0.0/24", "XFF 區").await;
+
+    // 本機反向代理（nginx）之後：連線來源為 loopback、XFF 為真實客戶端；
+    // 多段（客戶端, 近端代理）取第一段（見 spec §4）。
+    let xff = "203.0.113.7, 10.0.0.1";
+
+    // 心跳：代理來源取 XFF 第一段
+    let (status, body) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/heartbeat",
+        LOOPBACK,
+        Some(xff),
+        Some(json!({
+            "instance_id": AGENT_ID,
+            "name": "edge-agent",
+            "version": "0.1.0",
+            "subnet_cidr": "10.41.0.0/24",
+        })),
+        Some(AUTH_CODE),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "心跳應成功：{body}");
+
+    let (status, page) = send(&state, Method::GET, "/api/v1/agents", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page["items"][0]["source_ip"], "203.0.113.7",
+        "心跳來源取 XFF 第一段"
+    );
+
+    // 觀測回報：代理來源同樣取 XFF 第一段
+    let (status, body) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/observations",
+        LOOPBACK,
+        Some(xff),
+        Some(sweep_body(
+            AGENT_ID,
+            "10.41.0.0/24",
+            &ago(1),
+            &["10.41.0.1"],
+            &[],
+        )),
+        Some(AUTH_CODE),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "觀測應成功：{body}");
+
+    // 錯碼（同 loopback＋XFF）：被拒回報的 source_ip 亦取 XFF 第一段
+    let (status, response) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/observations",
+        LOOPBACK,
+        Some(xff),
+        Some(sweep_body(AGENT_ID, "10.41.0.0/24", &ago(2), &[], &[])),
+        Some("wrong-code"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "錯碼須拒收：{response}");
+
+    let (status, page) = send(&state, Method::GET, "/api/v1/agents", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page["items"][0]["source_ip"], "203.0.113.7",
+        "觀測回報後代理來源仍取 XFF 第一段"
+    );
+
+    let (status, page) = send(
+        &state,
+        Method::GET,
+        "/api/v1/agents/auth-failures",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let failure = &page["items"][0];
+    assert_eq!(
+        failure["source_ip"], "203.0.113.7",
+        "被拒回報來源取 XFF 第一段"
+    );
+    assert_eq!(failure["attempt_count"], 1);
+}
+
+#[tokio::test]
+async fn loopback_without_xff_uses_connection_source() {
+    let pool = test_pool().await;
+    let state = test_state(&pool);
+    let _ = create_subnet(&state, "10.42.0.0/24", "本機區").await;
+
+    // 無反向代理標頭時退回連線來源（127.0.0.1）
+    let (status, body) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/heartbeat",
+        LOOPBACK,
+        None,
+        Some(json!({
+            "instance_id": AGENT_ID,
+            "name": "edge-agent",
+            "version": "0.1.0",
+            "subnet_cidr": "10.42.0.0/24",
+        })),
+        Some(AUTH_CODE),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "心跳應成功：{body}");
+
+    let (status, page) = send(&state, Method::GET, "/api/v1/agents", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page["items"][0]["source_ip"], "127.0.0.1",
+        "loopback 無 XFF 用連線來源"
+    );
+
+    // 觀測回報亦然
+    let (status, body) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/observations",
+        LOOPBACK,
+        None,
+        Some(sweep_body(
+            AGENT_ID,
+            "10.42.0.0/24",
+            &ago(1),
+            &["10.42.0.1"],
+            &[],
+        )),
+        Some(AUTH_CODE),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "觀測應成功：{body}");
+
+    let (status, page) = send(&state, Method::GET, "/api/v1/agents", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page["items"][0]["source_ip"], "127.0.0.1",
+        "觀測後來源仍為連線來源"
+    );
+}
+
+#[tokio::test]
+async fn non_loopback_ignores_forged_forwarded_for() {
+    let pool = test_pool().await;
+    let state = test_state(&pool);
+    let _ = create_subnet(&state, "10.43.0.0/24", "偽造區").await;
+
+    // 直接連線（非 loopback）帶偽造 XFF：不得採信，仍用連線來源
+    let (status, body) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/heartbeat",
+        REMOTE,
+        Some("203.0.113.7, 10.0.0.1"),
+        Some(json!({
+            "instance_id": AGENT_ID,
+            "name": "edge-agent",
+            "version": "0.1.0",
+            "subnet_cidr": "10.43.0.0/24",
+        })),
+        Some(AUTH_CODE),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "心跳應成功：{body}");
+
+    let (status, page) = send(&state, Method::GET, "/api/v1/agents", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page["items"][0]["source_ip"], "203.0.113.9",
+        "非 loopback 偽造 XFF 不採信"
+    );
+
+    // 錯碼回報亦同
+    let (status, response) = send_from(
+        &state,
+        Method::POST,
+        "/api/v1/agents/observations",
+        REMOTE,
+        Some("203.0.113.7"),
+        Some(sweep_body(AGENT_ID, "10.43.0.0/24", &ago(1), &[], &[])),
+        Some("wrong-code"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "錯碼須拒收：{response}");
+
+    let (status, page) = send(
+        &state,
+        Method::GET,
+        "/api/v1/agents/auth-failures",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        page["items"][0]["source_ip"], "203.0.113.9",
+        "被拒回報亦用連線來源"
     );
 }

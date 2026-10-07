@@ -16,6 +16,18 @@ export class ApiError extends Error {
   }
 }
 
+/** 全域 401 處理器（見 spec §5.1）；由 `App.vue` 於啟動時註冊。 */
+type UnauthorizedHandler = () => void;
+
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+/** 設定全域 401 處理器；傳 `null` 可移除。 */
+export function setUnauthorizedHandler(
+  handler: UnauthorizedHandler | null
+): void {
+  unauthorizedHandler = handler;
+}
+
 interface ErrorBody {
   error?: string;
   message?: string;
@@ -39,6 +51,12 @@ async function send<T>(
   }
 
   const response = await fetch(`${BASE_URL}${path}`, init);
+
+  // 登入端點本身的 401 為帳密錯誤，由呼叫端顯示；其餘 401＝工作階段失效
+  // （見 spec §5.1）。處理器不改變呼叫端行為，錯誤仍照常拋出 `ApiError`。
+  if (response.status === 401 && path !== "/api/v1/login") {
+    unauthorizedHandler?.();
+  }
 
   if (!response.ok) {
     const error = await parseError(response, method, path);

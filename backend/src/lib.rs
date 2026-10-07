@@ -23,8 +23,7 @@ pub mod web;
 
 use std::path::PathBuf;
 
-use axum::Router;
-use axum::middleware;
+use axum::{Router, middleware};
 use sqlx::SqlitePool;
 use tower_http::trace::TraceLayer;
 
@@ -40,6 +39,9 @@ pub struct AppState {
     pub agent_auth_code: Option<String>,
     /// 代理「在線」門檻秒數（`AGENT_STALE_SECS`；見票 01）。
     pub agent_stale_secs: u64,
+    /// 登入認證設定；`None`＝不附掛登入（測試路徑），middleware 全數放行
+    /// （見 `docs/adr/0021`、spec §3.3）。
+    pub auth: Option<auth::AuthConfig>,
 }
 
 impl AppState {
@@ -50,7 +52,18 @@ impl AppState {
             kea: None,
             agent_auth_code: None,
             agent_stale_secs: 900,
+            auth: None,
         }
+    }
+
+    /// 附掛登入認證；正式啟動一律附掛（未設定即 `admin/admin`），
+    /// `new()` 維持不附掛供既有測試使用（見 spec §3.3）。
+    pub fn with_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth = Some(auth::AuthConfig {
+            username: username.into(),
+            password: password.into(),
+        });
+        self
     }
 
     /// 附掛代理入庫認證碼；`None` 維持未設定（入庫端點 503；見 ADR-0019）。
@@ -76,8 +89,11 @@ impl AppState {
 pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .nest("/api", api::router())
-        .with_state(state.clone())
-        .layer(middleware::from_fn(auth::noop_auth));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_login,
+        ))
+        .with_state(state.clone());
 
     api.fallback_service(web::service(&state.web_dist_dir))
         .layer(TraceLayer::new_for_http())

@@ -1,22 +1,28 @@
 [package]
 name = "asset-nest"
-version = "0.1.0"
+version = "2026.10.7"
 edition = "2024"
 description = "IT 資產整合管理系統"
 
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 csv = "1"
 dotenvy = "0.15"
 encoding_rs = "0.8"
+hmac = "0.12"
 ipnet = "2"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+subtle = "2"
 thiserror = "2"
+time = "0.3"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"

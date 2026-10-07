@@ -13,6 +13,8 @@ INSTALL_DIR="/opt/asset-nest"
 STATE_DIR="/var/lib/asset-nest"
 CONFIG_DIR="/etc/asset-nest"
 SERVICE_UNIT="/etc/systemd/system/asset-nest.service"
+NGINX_SITE_AVAILABLE="/etc/nginx/sites-available/asset-nest.conf"
+NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/asset-nest.conf"
 
 KEA_KEYRING="/usr/share/keyrings/isc-kea-3-2-archive-keyring.gpg"
 KEA_SOURCE_LIST="/etc/apt/sources.list.d/isc-kea-3-2.list"
@@ -34,6 +36,7 @@ usage() {
 用法：sudo ./deploy/uninstall.sh [--purge] [--remove-kea]
 
   （預設）        移除 asset-nest 服務與程式，保留資料庫與設定
+                  一併移除 asset-nest 的 nginx 站台設定（nginx 套件保留）
   --purge         一併刪除 /var/lib/asset-nest 與 /etc/asset-nest
   --remove-kea    一併停用並移除 Kea 3.2 套件、ISC 套件庫與控制通道憑證
                   （若 Kea 還被其他服務使用，請勿加此選項）
@@ -58,6 +61,13 @@ if systemctl list-unit-files asset-nest.service >/dev/null 2>&1; then
 fi
 rm -f "$SERVICE_UNIT"
 systemctl daemon-reload
+
+info "移除 nginx 站台設定（$NGINX_SITE_AVAILABLE）..."
+rm -f "$NGINX_SITE_ENABLED" "$NGINX_SITE_AVAILABLE"
+# nginx 套件保留（可能供其他站台使用）；nginx 存在時才 reload，失敗不影響移除。
+if command -v nginx >/dev/null 2>&1; then
+  systemctl reload nginx >/dev/null 2>&1 || true
+fi
 
 info "移除程式（$INSTALL_DIR）..."
 rm -rf "$INSTALL_DIR"

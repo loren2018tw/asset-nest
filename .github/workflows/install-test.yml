@@ -46,9 +46,10 @@ jobs:
 
       - name: 驗證服務與 Kea 保留 roundtrip
         run: |
+          systemctl is-active --quiet nginx
           systemctl is-active --quiet asset-nest
           systemctl is-active --quiet isc-kea-dhcp4-server
-          curl -fsS http://127.0.0.1:8080/api/health
+          curl -fsS http://127.0.0.1/api/health
           sudo grep '^KEA_' /etc/asset-nest/asset-nest.env > "$GITHUB_WORKSPACE/.env"
           cd "$GITHUB_WORKSPACE"
           sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
@@ -66,7 +67,7 @@ jobs:
           test -n "$SUBNET"
           sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
             bash -s -- --source-dir "$GITHUB_WORKSPACE" \
-            --server-url http://127.0.0.1:8080 --auth-code "$AUTH_CODE" \
+            --server-url http://127.0.0.1 --auth-code "$AUTH_CODE" \
             --subnet "$SUBNET" --sweep-interval 86400 < deploy/agent-install.sh
 
       - name: 驗證代理服務、環境檔權限與心跳上線
@@ -75,8 +76,14 @@ jobs:
           test "$(sudo stat -c '%a:%U:%G' /etc/asset-nest-agent/agent.env)" = "640:root:asset-nest-agent"
           INSTANCE_ID="$(sudo grep '^AGENT_INSTANCE_ID=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)"
           test -n "$INSTANCE_ID"
+          # /api/v1/agents 受登入保護（見 docs/adr/0021）：先以安裝產生的帳密
+          # 登入取 cookie，後續查詢帶 cookie（登入失敗 curl -f 即中止）。
+          PW="$(sudo grep '^AUTH_PASSWORD=' /etc/asset-nest/asset-nest.env | cut -d= -f2-)"
+          curl -fsS -c /tmp/an-cookies -H 'Content-Type: application/json' \
+            -d "{\"username\":\"admin\",\"password\":\"$PW\"}" \
+            -X POST http://127.0.0.1/api/v1/login >/dev/null
           for attempt in $(seq 1 12); do
-            if curl -fsS http://127.0.0.1:8080/api/v1/agents \
+            if curl -fsS -b /tmp/an-cookies http://127.0.0.1/api/v1/agents \
               | jq -e --arg id "$INSTANCE_ID" 'any(.items[]; .instance_id == $id and .online)' >/dev/null; then
               echo "代理 $INSTANCE_ID 已在線。"
               exit 0
@@ -84,7 +91,7 @@ jobs:
             sleep 5
           done
           echo "等待代理上線逾時（instance id：$INSTANCE_ID）。" >&2
-          curl -fsS http://127.0.0.1:8080/api/v1/agents || true
+          curl -fsS -b /tmp/an-cookies http://127.0.0.1/api/v1/agents || true
           exit 1
 
       - name: 重跑代理安裝（重跑＝更新；保留 instance id 與認證碼）
@@ -92,7 +99,7 @@ jobs:
           INSTANCE_ID_BEFORE="$(sudo grep '^AGENT_INSTANCE_ID=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)"
           sudo env CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
             bash -s -- --source-dir "$GITHUB_WORKSPACE" --sweep-interval 86400 \
-            --server-url http://127.0.0.1:8080 < deploy/agent-install.sh
+            --server-url http://127.0.0.1 < deploy/agent-install.sh
           systemctl is-active --quiet asset-nest-agent
           test "$(sudo grep '^AGENT_INSTANCE_ID=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)" = "$INSTANCE_ID_BEFORE"
           test "$(sudo grep '^AGENT_AUTH_CODE=' /etc/asset-nest-agent/agent.env | cut -d= -f2-)" \

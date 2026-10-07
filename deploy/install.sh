@@ -3,12 +3,13 @@
 # asset-nest 一鍵安裝腳本（全新 Ubuntu 24.04／26.04）
 #
 # 安裝內容：
+#   - nginx 前門（反向代理至 127.0.0.1:8080；--no-nginx 可跳過）
 #   - ISC Kea DHCP 3.2（Cloudsmith 套件庫）與 host_cmds、lease_cmds、
 #     subnet_cmds hook
 #   - asset-nest（自原始碼建置：Node.js 24、pnpm、Rust stable）
 #   - systemd 服務：asset-nest、isc-kea-dhcp4-server
 #
-# 決策見 docs/adr/0012、docs/adr/0013；使用說明見 README.md。
+# 決策見 docs/adr/0012、docs/adr/0013、docs/adr/0022；使用說明見 README.md。
 # 可直接 source 本檔取用函式做測試（不會執行安裝）。
 set -euo pipefail
 
@@ -24,8 +25,14 @@ CONFIG_DIR="/etc/asset-nest"
 ENV_FILE="$CONFIG_DIR/asset-nest.env"
 SERVICE_USER="asset-nest"
 SERVICE_UNIT="/etc/systemd/system/asset-nest.service"
-BIND_ADDR="0.0.0.0:8080"
+NGINX_SITE_AVAILABLE="/etc/nginx/sites-available/asset-nest.conf"
+NGINX_SITE_ENABLED="/etc/nginx/sites-enabled/asset-nest.conf"
 
+# 未明示 --bind 時留空，由 parse_args 依 nginx／--no-nginx 決定（見 spec §2）。
+BIND_ADDR=""
+
+WITH_NGINX=1
+FORCE_NGINX_CONF=0
 WITH_KEA=1
 KEA_PORT="8000"
 KEA_USERNAME=""
@@ -36,6 +43,8 @@ KEA_SUBNET=""
 FORCE_KEA_CONFIG=0
 KEA_PASSWORD=""
 AGENT_AUTH_CODE=""
+AUTH_USERNAME=""
+AUTH_PASSWORD=""
 KEA_HOOK_PATH=""
 KEA_LEASE_HOOK_PATH=""
 KEA_SUBNET_HOOK_PATH=""
@@ -61,15 +70,22 @@ usage() {
   cat <<'EOF'
 用法：sudo ./deploy/install.sh [選項]
 
-在全新 Ubuntu 24.04／26.04 上安裝 Kea DHCP 3.2 與 asset-nest，並建立
-systemd 服務（asset-nest、isc-kea-dhcp4-server）。可重複執行（重跑即更新；
-預設保留既有 Kea 設定與控制通道憑證）。
+在全新 Ubuntu 24.04／26.04 上安裝 Kea DHCP 3.2、asset-nest 與 nginx 前門
+（反向代理；asset-nest 預設僅綁 127.0.0.1），並建立 systemd 服務
+（asset-nest、isc-kea-dhcp4-server）。可重複執行（重跑即更新；預設保留既有
+Kea 設定、控制通道憑證與 nginx 站台檔）。
 
 一般選項：
   --ref <ref>               asset-nest 原始碼 git ref（預設 main）
   --source-dir <path>       使用既有 checkout（不 clone；CI／開發機用）
-  --bind <addr:port>        asset-nest 綁定位址（預設 0.0.0.0:8080）
+  --bind <addr:port>        asset-nest 綁定位址（預設 127.0.0.1:8080；
+                            --no-nginx 時 0.0.0.0:8080）
   -h, --help                顯示本說明
+
+nginx 前門選項：
+  --no-nginx                不安裝／不設定 nginx；asset-nest 維持直接對外（舊行為）
+  --force-nginx-conf        覆寫既有 nginx 站台檔（預設保留，避免蓋掉日後
+                            certbot 的修改）
 
 Kea 選項：
   --no-kea                  不安裝 Kea；可搭配 --kea-url 指向既有 Kea
@@ -85,6 +101,7 @@ Kea 選項：
   /opt/asset-nest                    程式與前端產物
   /etc/asset-nest/asset-nest.env     環境設定（含 Kea 憑證）
   /var/lib/asset-nest/asset-nest.db  資料庫
+  /etc/nginx/sites-available/asset-nest.conf  nginx 站台（反向代理）
   /etc/kea/asset-nest-api.{user,password}  Kea 控制通道憑證
 EOF
 }
@@ -141,6 +158,8 @@ parse_args() {
       --source-dir) SOURCE_DIR="${2:?--source-dir 需要值}"; shift 2 ;;
       --bind) BIND_ADDR="${2:?--bind 需要值}"; shift 2 ;;
       --no-kea) WITH_KEA=0; shift ;;
+      --no-nginx) WITH_NGINX=0; shift ;;
+      --force-nginx-conf) FORCE_NGINX_CONF=1; shift ;;
       --kea-url) KEA_URL="${2:?--kea-url 需要值}"; shift 2 ;;
       --kea-username) KEA_USERNAME="${2:?--kea-username 需要值}"; shift 2 ;;
       --kea-password) KEA_PASSWORD_ARG="${2:?--kea-password 需要值}"; shift 2 ;;
@@ -152,12 +171,27 @@ parse_args() {
       *) die "未知選項：$1（--help 看用法）" ;;
     esac
   done
+
+  # BIND 預設（見 docs/adr/0022、spec §2）：明示 --bind 一律優先；未明示時
+  # 預設安裝（nginx 前門）綁 loopback，--no-nginx（直接對外）維持舊行為。
+  if [ -z "$BIND_ADDR" ]; then
+    if [ "$WITH_NGINX" -eq 1 ]; then
+      BIND_ADDR="127.0.0.1:8080"
+    else
+      BIND_ADDR="0.0.0.0:8080"
+    fi
+  fi
   validate_args
 }
 
 validate_args() {
   case "$BIND_ADDR" in *:*) ;; *) die "--bind 需為 addr:port 形式（目前：$BIND_ADDR）。" ;; esac
   case "$KEA_PORT" in ''|*[!0-9]*) die "--kea-port 需為數字（目前：$KEA_PORT）。" ;; esac
+
+  if [ "$WITH_NGINX" -eq 0 ] && [ "$FORCE_NGINX_CONF" -eq 1 ]; then
+    warn "--force-nginx-conf 在 --no-nginx 模式無作用。"
+    FORCE_NGINX_CONF=0
+  fi
 
   if [ -n "$SOURCE_DIR" ]; then
     [ -f "$SOURCE_DIR/package.json" ] || die "--source-dir 內找不到 package.json：$SOURCE_DIR"
@@ -473,6 +507,92 @@ configure_kea() {
   rm -f "$check_log"
 }
 
+# ---- nginx 前門 -------------------------------------------------------------
+
+install_nginx() {
+  info "安裝 nginx ..."
+  apt_install nginx
+  # apt 通常已自動啟動 nginx；--now 確保未自動啟動的環境（如部分容器化 CI）
+  # 也已啟動，configure_nginx 才能 reload。
+  systemctl enable --now nginx >/dev/null
+}
+
+check_port_80() {
+  # 80 埠若已被非 nginx 程序佔用，本站台無法掛 default_server；安裝前明確
+  # 失敗並提示 --no-nginx（見 spec §2）。
+  if ! command -v ss >/dev/null 2>&1; then
+    warn "找不到 ss（iproute2），略過 80 埠佔用檢查。"
+    return 0
+  fi
+
+  local listeners
+  listeners="$(ss -ltnpH 'sport = :80' 2>/dev/null || true)"
+  [ -n "$listeners" ] || return 0
+
+  if printf '%s' "$listeners" | grep -qv 'users:(("nginx"'; then
+    printf '%s\n' "$listeners" >&2
+    die "80 埠已被非 nginx 程序佔用；請先停用該服務，或改用 --no-nginx（維持直接對外綁定）。"
+  fi
+  info "80 埠已由既有 nginx 使用，續行設定站台。"
+}
+
+render_nginx_site() {
+  # 站台 template（見 spec §3、docs/adr/0022）：全站反向代理至 loopback；
+  # XFF 以 $remote_addr 覆寫（後端信任第一段）。
+  cat <<'EOF'
+# asset-nest 反向代理（由 deploy/install.sh 產生；見 docs/adr/0022）
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    # HTTPS 尚未設定；日後以 certbot（Let's Encrypt）於本站台啟用。
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # 覆寫（非 $proxy_add_x_forwarded_for）：避免客戶端自帶值被視為第一段
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+
+    client_max_body_size 16m;  # CSV 匯入
+}
+EOF
+}
+
+configure_nginx() {
+  if [ -f "$NGINX_SITE_AVAILABLE" ] && [ "$FORCE_NGINX_CONF" -eq 0 ]; then
+    info "保留既有 nginx 站台檔（$NGINX_SITE_AVAILABLE）。"
+  else
+    info "寫入 nginx 站台檔（$NGINX_SITE_AVAILABLE）..."
+    render_nginx_site >"$NGINX_SITE_AVAILABLE"
+    chmod 0644 "$NGINX_SITE_AVAILABLE"
+  fi
+
+  ln -sf "$NGINX_SITE_AVAILABLE" "$NGINX_SITE_ENABLED"
+
+  # 原廠 default 站台同為 default_server，會與本站台衝突；僅當仍是原廠連結
+  # 時移除，不動其他既有站台。
+  if [ -L /etc/nginx/sites-enabled/default ] \
+    && [ "$(readlink -f /etc/nginx/sites-enabled/default)" = "/etc/nginx/sites-available/default" ]; then
+    info "移除原廠 nginx default 站台連結（/etc/nginx/sites-enabled/default）..."
+    rm -f /etc/nginx/sites-enabled/default
+  fi
+
+  local check_log
+  check_log="$(mktemp)"
+  if ! nginx -t >"$check_log" 2>&1; then
+    cat "$check_log" >&2
+    rm -f "$check_log"
+    die "nginx 設定驗證失敗；請檢查 $NGINX_SITE_AVAILABLE。"
+  fi
+  rm -f "$check_log"
+
+  info "重新載入 nginx ..."
+  systemctl reload nginx
+}
+
 # ---- asset-nest 服務 --------------------------------------------------------
 
 configure_agent_auth_code() {
@@ -488,6 +608,31 @@ configure_agent_auth_code() {
   fi
 }
 
+configure_auth_credentials() {
+  # 登入帳密（見 docs/adr/0021）：重跑一律沿用既有值；缺漏時帳號 admin、
+  # 密碼以 generate_password 隨機產生。訊息與摘要不得含密碼值。
+  local env_username="" env_password=""
+  if [ -f "$ENV_FILE" ]; then
+    env_username="$(grep -m1 '^AUTH_USERNAME=' "$ENV_FILE" | cut -d= -f2- || true)"
+    env_password="$(grep -m1 '^AUTH_PASSWORD=' "$ENV_FILE" | cut -d= -f2- || true)"
+  fi
+
+  if [ -n "$env_username" ]; then
+    AUTH_USERNAME="$env_username"
+    info "沿用既有登入帳號（$ENV_FILE）。"
+  else
+    AUTH_USERNAME="admin"
+  fi
+
+  if [ -n "$env_password" ]; then
+    AUTH_PASSWORD="$env_password"
+    info "沿用既有登入密碼（$ENV_FILE）。"
+  else
+    AUTH_PASSWORD="$(generate_password)"
+    info "已產生登入密碼（AUTH_PASSWORD）。"
+  fi
+}
+
 write_env_file() {
   install -d -m 0750 -o root -g "$SERVICE_USER" "$CONFIG_DIR"
   info "寫入環境設定（$ENV_FILE）..."
@@ -498,6 +643,9 @@ write_env_file() {
     printf 'WEB_DIST_DIR=%s/web\n' "$INSTALL_DIR"
     printf '# 代理入庫認證碼（見 docs/adr/0019；代理安裝時輸入同一組）\n'
     printf 'AGENT_AUTH_CODE=%s\n' "$AGENT_AUTH_CODE"
+    printf '# 登入帳密（見 docs/adr/0021、.env.example；變更即所有裝置登出）\n'
+    printf 'AUTH_USERNAME=%s\n' "$AUTH_USERNAME"
+    printf 'AUTH_PASSWORD=%s\n' "$AUTH_PASSWORD"
     if [ "$WITH_KEA" -eq 1 ]; then
       printf 'KEA_API_URL=http://127.0.0.1:%s\n' "$KEA_PORT"
       printf 'KEA_API_USERNAME=%s\n' "${KEA_USERNAME:-asset-nest}"
@@ -568,6 +716,14 @@ wait_health() {
   die "asset-nest 健康檢查逾時；請執行：journalctl -u asset-nest"
 }
 
+verify_nginx() {
+  [ "$WITH_NGINX" -eq 1 ] || return 0
+  info "驗證 nginx 前門（http://127.0.0.1/api/health）..."
+  curl -fsS http://127.0.0.1/api/health >/dev/null \
+    || die "nginx 前門驗證失敗；請檢查 systemctl status nginx 與 nginx -t。"
+  info "nginx 前門驗證通過。"
+}
+
 verify_kea() {
   [ "$WITH_KEA" -eq 1 ] || return 0
   info "驗證 Kea 控制通道（version-get）..."
@@ -580,24 +736,42 @@ verify_kea() {
 }
 
 print_summary() {
+  local port web_url proxy_url firewall_hint
+  port="${BIND_ADDR##*:}"
+  if [ "$WITH_NGINX" -eq 1 ]; then
+    web_url="http://<主機>/（nginx → 127.0.0.1:8080）"
+    proxy_url="http://<主機>"
+    firewall_hint="以防火牆限制 80 來源（或僅允許區域網路）。"
+  else
+    web_url="http://<主機>:${port}（BIND_ADDR=${BIND_ADDR}）"
+    proxy_url="http://<主機>:${port}"
+    firewall_hint="以防火牆限制 ${port} 來源。"
+  fi
+
   cat <<EOF
 
 安裝完成。
 
-  asset-nest：http://<主機>:${BIND_ADDR##*:}（BIND_ADDR=${BIND_ADDR}）
+  asset-nest：${web_url}
   資料庫：${STATE_DIR}/asset-nest.db
   環境檔：${ENV_FILE}
+  登入帳密：grep '^AUTH_' ${ENV_FILE}
   代理認證碼：grep AGENT_AUTH_CODE ${ENV_FILE}
   安裝觀測代理（於目標網段主機執行）：
-    sudo ./deploy/agent-install.sh --server-url http://<主機>:${BIND_ADDR##*:} --auth-code <認證碼>
+    sudo ./deploy/agent-install.sh --server-url ${proxy_url} --auth-code <認證碼>
 EOF
+  if [ "$WITH_NGINX" -eq 1 ]; then
+    cat <<EOF
+  HTTPS：尚未設定；日後以 certbot（Let's Encrypt）於 nginx 設定。
+EOF
+  fi
   if [ "$WITH_KEA" -eq 1 ]; then
     cat <<EOF
   Kea：isc-kea-dhcp4-server（控制通道 127.0.0.1:${KEA_PORT}）
   Kea 憑證：${KEA_USER_FILE}、${KEA_PASSWORD_FILE}
 
 後續：
-  1. 以防火牆限制 8080 來源（本系統尚無登入驗證）。
+  1. ${firewall_hint}
   2. 於 ${KEA_CONF} 設定 interfaces-config 與 subnet4 後：
      systemctl restart isc-kea-dhcp4-server
   3. 在本系統建立對應網段並填入 Kea subnet id（kea_subnet_id）；保留、位址池
@@ -614,8 +788,15 @@ main() {
   require_supported_os
   require_systemd
 
-  info "開始安裝 asset-nest$([ "$WITH_KEA" -eq 1 ] && printf ' 與 Kea DHCP 3.2' || true)。"
+  info "開始安裝 asset-nest$([ "$WITH_NGINX" -eq 1 ] && printf '（nginx 前門）' || true)$([ "$WITH_KEA" -eq 1 ] && printf ' 與 Kea DHCP 3.2' || true)。"
   install_base_packages
+
+  if [ "$WITH_NGINX" -eq 1 ]; then
+    check_port_80
+    install_nginx
+    configure_nginx
+  fi
+
   install_node
   prepare_source
   install_pnpm
@@ -634,6 +815,7 @@ main() {
   fi
 
   configure_agent_auth_code
+  configure_auth_credentials
   write_env_file
   write_unit_file
   systemctl daemon-reload
@@ -641,6 +823,7 @@ main() {
   systemctl restart asset-nest
 
   wait_health
+  verify_nginx
   verify_kea
   print_summary
 }

@@ -1,6 +1,6 @@
 {
   "name": "asset-nest",
-  "version": "0.1.0",
+  "version": "2026.10.7",
   "private": true,
   "description": "IT 資產整合管理系統",
   "packageManager": "pnpm@11.9.0",

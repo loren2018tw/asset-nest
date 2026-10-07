@@ -13,7 +13,44 @@
 
         <q-toolbar-title> IT 資產整合管理系統 </q-toolbar-title>
 
-        <div>Quasar v{{ $q.version }}</div>
+        <!-- 右上角資訊叢集（見 spec §5.3）：Loren → GitHub → 版本 → 登出 -->
+        <div class="row items-center">
+          <div class="text-caption">Loren</div>
+          <q-btn
+            flat
+            dense
+            round
+            type="a"
+            :href="'https://github.com/loren2018tw/asset-nest'"
+            target="_blank"
+            rel="noopener"
+            aria-label="GitHub 專案首頁"
+          >
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 16 16"
+              width="20"
+              height="20"
+              fill="currentColor"
+            >
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+              />
+            </svg>
+          </q-btn>
+          <div v-if="version" class="text-caption">V{{ version }}</div>
+          <q-separator vertical class="q-mx-sm" />
+          <q-btn
+            flat
+            dense
+            round
+            icon="logout"
+            aria-label="登出"
+            @click="onLogout"
+          >
+            <q-tooltip>登出</q-tooltip>
+          </q-btn>
+        </div>
       </q-toolbar>
     </q-header>
 
@@ -92,13 +129,22 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useQuasar } from "quasar";
+import { useRoute, useRouter } from "vue-router";
 
+import { fetchHealth } from "@/api/health";
 import { listSubnets, type SubnetSummary } from "@/api/subnets";
+import { useAuthStore } from "@/stores/auth";
 
+const $q = useQuasar();
 const route = useRoute();
+const router = useRouter();
+const auth = useAuthStore();
 
 const leftDrawerOpen = ref(false);
+
+/** 後端版本號（顯示為 `V{version}`；取得失敗時為 null，不顯示）。 */
+const version = ref<string | null>(null);
 
 /** 已設定網段（側欄快速入口；見票 23）。 */
 const subnets = ref<SubnetSummary[]>([]);
@@ -124,6 +170,27 @@ async function loadSubnets() {
   }
 }
 
+/** 右上角版本號：以 `GET /api/health` 為真實來源（見 spec §5.3）；失敗不顯示。 */
+async function loadVersion() {
+  try {
+    const health = await fetchHealth();
+    version.value = health.version;
+  } catch {
+    // 版本僅為顯示資訊；取得失敗時不顯示
+  }
+}
+
+/** 登出（見 spec §5.3）：成功通知並轉登入頁；失敗維持登入狀態。 */
+async function onLogout(): Promise<void> {
+  try {
+    await auth.logout();
+    $q.notify({ type: "positive", message: "已登出" });
+    await router.replace("/login");
+  } catch {
+    $q.notify({ type: "negative", message: "登出失敗，請重試" });
+  }
+}
+
 // 每次換頁重新載入，讓新增／刪除／改名後的網段在側欄保持最新
 watch(
   () => route.path,
@@ -134,6 +201,7 @@ watch(
 
 onMounted(() => {
   void loadSubnets();
+  void loadVersion();
 });
 
 /** 網段外觀測（/observations/out-of-subnet）：IP 管理區段新增項目，獨立高亮。 */
