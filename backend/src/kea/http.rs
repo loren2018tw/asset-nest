@@ -125,7 +125,8 @@ pub struct KeaHost {
 /// `lease4-get-all` 的一筆 DHCPv4 動態租約；空字串視為未提供。
 ///
 /// `cltt`／`valid_lft` 為秒數（`cltt` 為 Unix epoch）；`state` 已正規化：
-/// 數字 0／1／2／3 → `default`／`declined`／`expired`／`released`、文字小寫、
+/// 數字 0／1／2／3／4 → `default`／`declined`／`expired-reclaimed`／
+/// `released`／`registered`（Kea 3.2 `basicStatesToText`）、文字小寫、
 /// 未知保留原值；缺欄位為 `None`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeaLease {
@@ -658,15 +659,17 @@ fn parse_lease(lease: &Value) -> KeaLease {
     }
 }
 
-/// `state` 正規化：數字 0／1／2／3 → `default`／`declined`／`expired`／`released`；
+/// `state` 正規化：數字 0／1／2／3／4 → `default`／`declined`／
+/// `expired-reclaimed`／`released`／`registered`（Kea 3.2 `basicStatesToText`）；
 /// 文字原樣小寫；未知保留原值；缺欄位為 `None`。
 fn normalize_state(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::Number(number) => Some(match number.as_i64() {
             Some(0) => "default".to_string(),
             Some(1) => "declined".to_string(),
-            Some(2) => "expired".to_string(),
+            Some(2) => "expired-reclaimed".to_string(),
             Some(3) => "released".to_string(),
+            Some(4) => "registered".to_string(),
             _ => number.to_string(),
         }),
         Value::String(text) => Some(text.to_lowercase()),
@@ -710,7 +713,7 @@ mod tests {
         assert_eq!(parsed.subnet_id, Some(1), "數字字串可解析");
         assert_eq!(parsed.cltt, Some(1791201600));
         assert_eq!(parsed.valid_lft, Some(3600));
-        assert_eq!(parsed.state.as_deref(), Some("expired"));
+        assert_eq!(parsed.state.as_deref(), Some("expired-reclaimed"));
     }
 
     #[test]
@@ -738,10 +741,19 @@ mod tests {
             normalize_state(Some(&json!(1))).as_deref(),
             Some("declined")
         );
-        assert_eq!(normalize_state(Some(&json!(2))).as_deref(), Some("expired"));
+        assert_eq!(
+            normalize_state(Some(&json!(2))).as_deref(),
+            Some("expired-reclaimed"),
+            "Kea 3.2 正式名稱（已過期且被回收）"
+        );
         assert_eq!(
             normalize_state(Some(&json!(3))).as_deref(),
             Some("released")
+        );
+        assert_eq!(
+            normalize_state(Some(&json!(4))).as_deref(),
+            Some("registered"),
+            "Kea 3.2 狀態 4"
         );
         assert_eq!(
             normalize_state(Some(&json!(9))).as_deref(),

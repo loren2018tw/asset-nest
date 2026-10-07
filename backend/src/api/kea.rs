@@ -6,7 +6,7 @@
 //! `POST /kea/sync`：重算計畫並套用；回傳每網段增／改／刪計數、失敗清單與
 //! `config-write` 狀態。`KEA_API_URL` 未設定時回 400。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -174,6 +174,10 @@ struct KeaLeases {
 }
 
 /// 租約清單中的一筆；本地無對應受管網段時 `subnet_cidr`／`subnet_name` 為 null。
+///
+/// `is_reservation` 僅在「本地受管網段（`kea_subnet_id` 相符）內、且位址與
+/// `purpose = 'reservation'` 指派完全相符」時為 true；無對應受管網段一律 false
+/// （無從判定，不得誤標）。
 #[derive(Serialize)]
 struct KeaLeaseEntry {
     ip_address: Option<String>,
@@ -185,6 +189,8 @@ struct KeaLeaseEntry {
     /// `cltt + valid_lft`（ISO 8601 UTC）；任一缺欄位為 null。
     expires_at: Option<String>,
     state: Option<String>,
+    /// 是否為本地「保留」（受管網段內、位址與 reservation 指派相符）。
+    is_reservation: bool,
 }
 
 /// Kea 動態租約清單：未設定 `KEA_API_URL` 回 400、命令失敗回 502。
@@ -196,17 +202,27 @@ async fn leases(State(state): State<AppState>) -> Result<Json<KeaLeases>, ApiErr
         .await
         .map_err(|error| ApiError::kea(format!("讀取 Kea 租約失敗：{error}")))?;
 
-    // 本地受管網段（`kea_subnet_id` → CIDR＋名稱），供租約對應顯示。
-    let rows = sqlx::query_as::<_, (i64, String, Option<String>)>(
-        "SELECT kea_subnet_id, cidr, name FROM subnets WHERE kea_subnet_id IS NOT NULL",
+    // 本地受管網段（`kea_subnet_id` → CIDR＋名稱）與其中的保留位址集合
+    // （`(kea_subnet_id, address)`），供租約對應顯示與「保留」標示。
+    let rows = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>)>(
+        "SELECT s.kea_subnet_id, s.cidr, s.name, a.address
+         FROM subnets s
+         LEFT JOIN ip_assignments a
+           ON a.subnet_id = s.id AND a.purpose = 'reservation'
+         WHERE s.kea_subnet_id IS NOT NULL",
     )
     .fetch_all(&state.db)
     .await
     .map_err(|error| ApiError::internal("讀取網段失敗", error))?;
-    let subnets: HashMap<i64, (String, Option<String>)> = rows
-        .into_iter()
-        .map(|(kea_subnet_id, cidr, name)| (kea_subnet_id, (cidr, name)))
-        .collect();
+
+    let mut subnets: HashMap<i64, (String, Option<String>)> = HashMap::new();
+    let mut reservations: HashSet<(i64, String)> = HashSet::new();
+    for (kea_subnet_id, cidr, name, address) in rows {
+        subnets.insert(kea_subnet_id, (cidr, name));
+        if let Some(address) = address {
+            reservations.insert((kea_subnet_id, address));
+        }
+    }
 
     let leases = leases
         .into_iter()
@@ -217,6 +233,12 @@ async fn leases(State(state): State<AppState>) -> Result<Json<KeaLeases>, ApiErr
                 .map(|(cidr, name)| (Some(cidr.clone()), name.clone()))
                 .unwrap_or((None, None));
 
+            // 保留判定：受管網段內、位址與本地 reservation 指派完全相符。
+            let is_reservation = lease
+                .subnet_id
+                .zip(lease.ip_address.as_deref())
+                .is_some_and(|(subnet_id, ip)| reservations.contains(&(subnet_id, ip.to_string())));
+
             KeaLeaseEntry {
                 expires_at: expires_at(lease.cltt, lease.valid_lft),
                 ip_address: lease.ip_address,
@@ -226,6 +248,7 @@ async fn leases(State(state): State<AppState>) -> Result<Json<KeaLeases>, ApiErr
                 subnet_cidr,
                 subnet_name,
                 state: lease.state,
+                is_reservation,
             }
         })
         .collect();

@@ -230,7 +230,14 @@ async fn lease4_get_all_against_live_server() {
                 );
                 assert!(
                     lease.state.as_deref().is_none_or(|state| {
-                        matches!(state, "default" | "declined" | "expired" | "released")
+                        matches!(
+                            state,
+                            "default"
+                                | "declined"
+                                | "expired-reclaimed"
+                                | "released"
+                                | "registered"
+                        )
                     }),
                     "租約 state 非預期值：{lease:#?}"
                 );

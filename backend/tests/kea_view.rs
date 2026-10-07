@@ -238,20 +238,51 @@ async fn get_leases(state: &AppState) -> (StatusCode, Value) {
     get_json(state, "/api/v1/kea/leases").await
 }
 
-/// 直接寫入本地網段（選填名稱與 `kea_subnet_id`）。
+/// 直接寫入本地網段（選填名稱與 `kea_subnet_id`）；回傳本地網段 id。
 async fn insert_subnet(
     state: &AppState,
     cidr: &str,
     name: Option<&str>,
     kea_subnet_id: Option<i64>,
-) {
+) -> i64 {
     sqlx::query("INSERT INTO subnets (cidr, name, kea_subnet_id) VALUES (?, ?, ?)")
         .bind(cidr)
         .bind(name)
         .bind(kea_subnet_id)
         .execute(&state.db)
         .await
-        .expect("新增測試網段");
+        .expect("新增測試網段")
+        .last_insert_rowid()
+}
+
+/// 直接寫入一筆本地指派（自建資產與介面滿足外鍵）；`purpose` 為 `static`／`reservation`。
+async fn insert_assignment(state: &AppState, subnet_id: i64, address: &str, purpose: &str) {
+    let asset_id =
+        sqlx::query("INSERT INTO assets (description, location) VALUES ('測試資產', '機房 A')")
+            .execute(&state.db)
+            .await
+            .expect("新增測試資產")
+            .last_insert_rowid();
+    let interface_id = sqlx::query(
+        "INSERT INTO interfaces (asset_id, name, mac) VALUES (?, 'eth0', 'aa:bb:cc:dd:ee:ff')",
+    )
+    .bind(asset_id)
+    .execute(&state.db)
+    .await
+    .expect("新增測試介面")
+    .last_insert_rowid();
+
+    sqlx::query(
+        "INSERT INTO ip_assignments (subnet_id, address, interface_id, purpose)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .bind(interface_id)
+    .bind(purpose)
+    .execute(&state.db)
+    .await
+    .expect("新增測試指派");
 }
 
 // ---------- 測試 ----------
@@ -469,6 +500,7 @@ async fn leases_happy_path_maps_subnets_state_and_expires_at() {
     assert_eq!(first["subnet_name"], "辦公區");
     assert_eq!(first["expires_at"], "2026-10-05T13:00:00Z");
     assert_eq!(first["state"], "default", "數字 state 0 正規化");
+    assert_eq!(first["is_reservation"], false, "無指派不標示保留");
 
     let second = &leases[1];
     assert!(second["hostname"].is_null(), "空字串視為未提供");
@@ -476,12 +508,14 @@ async fn leases_happy_path_maps_subnets_state_and_expires_at() {
     assert!(second["subnet_name"].is_null(), "無對應網段 → 名稱 null");
     assert_eq!(second["expires_at"], "2026-10-05T12:10:00Z");
     assert_eq!(second["state"], "declined", "文字 state 正規化小寫");
+    assert_eq!(second["is_reservation"], false, "無對應受管網段不標示");
 
     let third = &leases[2];
     assert!(third["cltt"].is_null());
     assert!(third["expires_at"].is_null(), "缺 cltt → expires_at null");
     assert_eq!(third["state"], "released", "數字 state 3 正規化");
     assert_eq!(third["subnet_cidr"], "10.0.0.0/24", "同一受管網段對應");
+    assert_eq!(third["is_reservation"], false, "無指派不標示保留");
 
     let requests = stub.requests();
     assert_eq!(requests.len(), 1, "只送一個命令");
@@ -491,6 +525,74 @@ async fn leases_happy_path_maps_subnets_state_and_expires_at() {
         "唯讀命令不帶 arguments：{}",
         requests[0]
     );
+}
+
+#[tokio::test]
+async fn leases_mark_reservation_only_for_managed_matching_assignments() {
+    let (state, stub, _url) = test_state().await;
+    // 受管網段（kea_subnet_id 1）與未受管網段；種入保留與 static 指派。
+    let managed = insert_subnet(&state, "10.0.0.0/24", Some("辦公區"), Some(1)).await;
+    let unmanaged = insert_subnet(&state, "10.9.0.0/24", Some("未受管"), None).await;
+    insert_assignment(&state, managed, "10.0.0.5", "reservation").await;
+    insert_assignment(&state, managed, "10.0.0.6", "static").await;
+    insert_assignment(&state, unmanaged, "10.9.0.5", "reservation").await;
+
+    stub.set_leases(&[
+        json!({
+            "ip-address": "10.0.0.5",
+            "hw-address": "aa:bb:cc:dd:ee:05",
+            "subnet-id": 1,
+            "state": 2,
+        }),
+        json!({
+            "ip-address": "10.0.0.6",
+            "hw-address": "aa:bb:cc:dd:ee:06",
+            "subnet-id": 1,
+            "state": 4,
+        }),
+        json!({
+            "ip-address": "10.9.0.5",
+            "hw-address": "aa:bb:cc:dd:ee:09",
+            "subnet-id": 9,
+            "state": 0,
+        }),
+        json!({
+            "ip-address": "10.0.0.7",
+            "hw-address": "aa:bb:cc:dd:ee:07",
+            "subnet-id": 1,
+            "state": 9,
+        }),
+    ]);
+
+    let (status, body) = get_leases(&state).await;
+
+    assert_eq!(status, StatusCode::OK, "租約端點應成功：{body}");
+    let leases = body["leases"].as_array().expect("leases 為陣列");
+    assert_eq!(leases.len(), 4);
+
+    assert_eq!(
+        leases[0]["is_reservation"], true,
+        "受管網段內且位址與 reservation 指派相符 → 標示保留"
+    );
+    assert_eq!(
+        leases[0]["state"], "expired-reclaimed",
+        "數字 state 2 正規化"
+    );
+
+    assert_eq!(
+        leases[1]["is_reservation"], false,
+        "受管網段內但為 static 指派 → 不標示"
+    );
+    assert_eq!(leases[1]["state"], "registered", "數字 state 4 正規化");
+
+    assert_eq!(
+        leases[2]["is_reservation"], false,
+        "本地無對應受管網段（位址雖有 reservation 指派）→ 不標示"
+    );
+    assert_eq!(leases[2]["state"], "default", "數字 state 0 維持 default");
+
+    assert_eq!(leases[3]["state"], "9", "未知狀態保留原值");
+    assert_eq!(leases[3]["is_reservation"], false, "無指派不標示保留");
 }
 
 #[tokio::test]

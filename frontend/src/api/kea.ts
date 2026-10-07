@@ -176,8 +176,16 @@ export interface KeaLease {
   subnet_name: string | null;
   /** `cltt + valid_lft`（ISO 8601 UTC）；缺欄位為 null。 */
   expires_at: string | null;
-  /** 狀態：`default`／`declined`／`expired`／`released`，未知保留原值。 */
+  /**
+   * 狀態：`default`／`declined`／`expired-reclaimed`／`released`／`registered`
+   * （Kea 3.2 定義），未知保留原值。
+   */
   state: string | null;
+  /**
+   * 本地「保留」：受管網段內、位址與 `purpose=reservation` 指派完全相符；
+   * 無對應受管網段一律 false。
+   */
+  is_reservation: boolean;
 }
 
 /** Kea 系統狀態（唯讀診斷；見票 01）。 */

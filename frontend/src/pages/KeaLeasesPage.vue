@@ -66,6 +66,14 @@
       <template #body-cell-ip_address="props">
         <q-td :props="props" class="lease-mono">
           {{ props.value ?? "—" }}
+          <q-badge
+            v-if="props.row.is_reservation"
+            color="purple"
+            class="q-ml-xs"
+          >
+            保留
+            <q-tooltip>{{ reservationHint }}</q-tooltip>
+          </q-badge>
         </q-td>
       </template>
       <template #body-cell-hw_address="props">
@@ -117,12 +125,16 @@ const updatedAt = ref<Date | null>(null);
 const search = ref<string | null>(null);
 const stateFilter = ref<string | null>(null);
 
-/** 狀態正規化值（後端已小寫；未知值不在選項內）。 */
+/** 租約列「保留」標記的 tooltip（受管網段內與 reservation 指派相符）。 */
+const reservationHint = "本地保留位址（受管網段內與 reservation 指派相符）";
+
+/** 狀態正規化值（後端已正規化；未知值不在選項內）。 */
 const stateOptions = [
   { label: "使用中", value: "default" },
   { label: "已拒絕", value: "declined" },
-  { label: "已過期", value: "expired" },
-  { label: "已釋放", value: "released" }
+  { label: "已過期（已回收）", value: "expired-reclaimed" },
+  { label: "已釋放", value: "released" },
+  { label: "已註冊", value: "registered" }
 ];
 
 /** 客戶端分頁；預設 IP 升冪（欄位自訂八位元組數值比較）。 */
@@ -176,8 +188,9 @@ const filteredLeases = computed(() => {
 const stateInfo: Record<string, { label: string; color: string }> = {
   default: { label: "使用中", color: "positive" },
   declined: { label: "已拒絕", color: "warning" },
-  expired: { label: "已過期", color: "grey-5" },
-  released: { label: "已釋放", color: "blue-grey" }
+  "expired-reclaimed": { label: "已過期（已回收）", color: "grey-5" },
+  released: { label: "已釋放", color: "blue-grey" },
+  registered: { label: "已註冊", color: "teal" }
 };
 
 function stateLabel(state: string): string {
