@@ -77,4 +77,8 @@ pnpm --filter frontend typecheck
 
 ## 實作記錄
 
-（待實作）
+- 票 01（後端）：主實作 commit `d022a89`（`01 Kea 網段建立：後端 subnet4-add 與 sync 建立缺少網段（含 stub 測試）`）。`kea::http::Client::subnet4_add`（`arguments.subnet4=[物件]`）；`kea::sync` 計畫 `subnet_add`／`totals.subnet_add`、同 CIDR 預檢（`same_cidr_owner`）、缺少網段不呼叫 `reservation-get-all`；套用「建立（序列）→ 保留三相位 → 既有網段設定 → 單次 `config-write`」，建立失敗記 `subnet_add_error`、孤立並續行、不重複計 pool／gateway；`kea_subnet_id` 範圍 `0 < id < 4294967295`（API＋CSV 匯入）。驗收：`cargo test --manifest-path backend/Cargo.toml` 406 passed／0 failed／5 ignored（新增 13 測試）；`cargo fmt --check` 綠。
+- 票 02（前端）：主實作 commit `4bf3146`（`02 Kea 網段建立：前端「新增網段」呈現與表單提示`）。`api/kea.ts` 型別（`KeaSubnetAddPlan`／`subnet_add?`／`totals.subnet_add`／`subnet_added`／`subnet_add_error?`）；`KeaSyncDialog` 計畫與結果「新增網段」呈現、`canApply` 納入、部分失敗通知；`SubnetFormDialog`／`SubnetImportDialog` hint 與範圍；`KeaStatusPage` 不一致提示鬆綁。驗收：`pnpm lint:check`、`pnpm --filter frontend typecheck` 綠。
+- 票 03（文件＋真機驗證）：主實作 commit `d026b35`（`03 Kea 網段建立：文件與真機驗證（subnet4-add 建立／清理 roundtrip）`）。`README.md`、`deploy/install.sh` 安裝後提示改 Kea-first／asset-nest-first 並存（`bash -n` 通過）；`.scratch/kea-subnet-sync/spec.md` 加註記；`tests/kea_connectivity.rs` 新增 `#[ignore]` 真機建立 roundtrip（`sync::plan`／`apply`＋臨時 in-memory SQLite；清理 `reservation-del` → `subnet4-del`（測試內 reqwest 直送）→ `config-write`）與變更型測試序列鎖；檔頭註解更新。
+- 驗收：`cargo test --manifest-path backend/Cargo.toml` 406 passed／0 failed／6 ignored；`cargo fmt --check`；`pnpm test:kea` 6 passed（真機）。
+- 真機（`10.1.0.2`、Kea 3.2.1；RFC 5737 `192.0.2.0/24`、未用 id 3）：前置掃描現有 id `[1, 2]` 且測試段不存在 → 計畫 `subnet_add` pools 排序正確、gateway `192.0.2.1`、保留差異 1 筆 → 套用 `subnet_added=true`、保留同回合推送、`config_write=ok` → `config-get`／`reservation-get-all` 驗證 CIDR／pools／routers／保留落地 → 重送 `subnet4-add` 遭拒（`Kea 回應錯誤（result=1）：ID of the new IPv4 subnet '3' is already in use`，狀態不變）→ 清理後 `config-get` 僅 id `[1, 2]`、無殘留保留。既有網段與保留全程未動。
