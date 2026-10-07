@@ -203,8 +203,9 @@
                     >
                       不一致
                       <q-tooltip>
-                        Kea 的網段數與本地受管網段數不一致，請確認 kea_subnet_id
-                        設定
+                        本地受管網段數與 Kea
+                        不一致；可能只是尚未完整同步（可由完整同步補建缺少的受管網段），也可能是
+                        kea_subnet_id 設定待確認
                       </q-tooltip>
                     </q-chip>
                   </div>

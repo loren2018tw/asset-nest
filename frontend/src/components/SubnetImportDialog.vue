@@ -82,8 +82,9 @@
                     <q-icon name="settings_ethernet" color="primary" />
                   </q-item-section>
                   <q-item-section>
-                    Gateway 須在該 CIDR 內；Kea subnet-id
-                    為正整數、全系統唯一，僅 IPv4
+                    Gateway 須在該 CIDR 內；Kea subnet-id 為整數、介於 1 與
+                    4294967294、全系統唯一，僅 IPv4；Kea 尚無此 subnet-id
+                    時，可由完整同步建立
                   </q-item-section>
                 </q-item>
                 <q-item>

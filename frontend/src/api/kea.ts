@@ -31,6 +31,14 @@ export interface KeaGatewayPlan {
   desired: string | null;
 }
 
+/** 將建立的 Kea 網段內容（見 ADR-0023）。 */
+export interface KeaSubnetAddPlan {
+  /** 期望 pool 範圍（正規化 `start-end`、數值排序）。 */
+  pools: string[];
+  /** 期望 gateway（routers option）；未設為 null。 */
+  gateway: string | null;
+}
+
 export interface KeaPlanSubnet {
   /** asset-nest 的網段 id。 */
   subnet_id: number;
@@ -47,6 +55,8 @@ export interface KeaPlanSubnet {
   pool_delete: string[];
   /** gateway 變更；相同時省略。 */
   gateway?: KeaGatewayPlan | null;
+  /** 要建立的 Kea 網段；Kea 查無該 id 且無相同 CIDR 時出現（見 ADR-0023）。 */
+  subnet_add?: KeaSubnetAddPlan | null;
   error?: string | null;
 }
 
@@ -63,6 +73,8 @@ export interface KeaSyncPlan {
     pool_delete: number;
     /** 要變更 gateway 的網段數。 */
     gateway: number;
+    /** 要建立的 Kea 網段筆數（見 ADR-0023）。 */
+    subnet_add: number;
   };
 }
 
@@ -87,6 +99,10 @@ export interface KeaApplySubnet {
   pool_deleted: number;
   /** gateway 是否已更新。 */
   gateway_updated: boolean;
+  /** 是否已建立 Kea 網段（見 ADR-0023）。 */
+  subnet_added: boolean;
+  /** 建立 Kea 網段失敗訊息；成功時省略。 */
+  subnet_add_error?: string | null;
   /** 網段層（pool／gateway）套用失敗訊息；成功時省略。 */
   settings_error?: string | null;
   failures: KeaApplyFailure[];

@@ -32,7 +32,8 @@
           {{ reportTotals.updated }}／刪除 {{ reportTotals.deleted }}；位址池
           新增 {{ reportTotals.poolAdded }}／刪除
           {{ reportTotals.poolDeleted }}、gateway 更新
-          {{ reportTotals.gateways }} 個網段；Kea 設定檔寫入：{{
+          {{ reportTotals.gateways }} 個網段、已建立網段
+          {{ reportTotals.subnetAdded }}；Kea 設定檔寫入：{{
             configWriteLabel
           }}。
         </q-banner>
@@ -47,6 +48,13 @@
               {{ subnet.deleted }}（跳過 {{ subnet.skipped }}）；位址池 新增
               {{ subnet.pool_added }}／刪除 {{ subnet.pool_deleted
               }}<span v-if="subnet.gateway_updated">、gateway 已更新</span>
+              <span v-if="subnet.subnet_added">、已建立 Kea 網段</span>
+            </div>
+            <div
+              v-if="subnet.subnet_add_error"
+              class="text-negative text-body2"
+            >
+              {{ subnet.subnet_add_error }}
             </div>
             <div v-if="subnet.settings_error" class="text-negative text-body2">
               網段層設定同步失敗：{{ subnet.settings_error }}
@@ -86,7 +94,8 @@
             {{ plan.totals.skipped }}；位址池 新增
             {{ plan.totals.pool_add }}／刪除
             {{ plan.totals.pool_delete }}、gateway 變更
-            {{ plan.totals.gateway }}。刪除只限受管網段中多餘的保留與位址池。
+            {{ plan.totals.gateway }}、新增網段
+            {{ plan.totals.subnet_add }}。刪除只限受管網段中多餘的保留與位址池。
           </q-banner>
           <div v-for="subnet in plan.subnets" :key="subnet.subnet_id">
             <div class="text-subtitle2">{{ label(subnet) }}</div>
@@ -101,6 +110,7 @@
                 {{ subnet.skipped.length }}；位址池 新增
                 {{ subnet.pool_add.length }}／刪除 {{ subnet.pool_delete.length
                 }}<span v-if="subnet.gateway">、gateway 變更</span>
+                <span v-if="subnet.subnet_add">、將建立 Kea 網段</span>
               </div>
               <q-expansion-item
                 v-if="hasDetail(subnet)"
@@ -109,6 +119,34 @@
                 label="查看明細"
               >
                 <q-list dense class="text-body2">
+                  <q-item v-if="subnet.subnet_add" dense>
+                    <q-item-section>
+                      <div>
+                        新增網段（Kea id
+                        <span class="text-mono">{{ subnet.kea_subnet_id }}</span
+                        >）
+                      </div>
+                      <div
+                        v-for="range in subnet.subnet_add.pools"
+                        :key="`subnet-add-${range}`"
+                        class="q-pl-md"
+                      >
+                        位址池 <span class="text-mono">{{ range }}</span>
+                      </div>
+                      <div
+                        v-if="subnet.subnet_add.pools.length === 0"
+                        class="q-pl-md"
+                      >
+                        無位址池
+                      </div>
+                      <div class="q-pl-md">
+                        gateway
+                        <span class="text-mono">{{
+                          subnet.subnet_add.gateway ?? "（未設）"
+                        }}</span>
+                      </div>
+                    </q-item-section>
+                  </q-item>
                   <q-item
                     v-for="item in subnet.add"
                     :key="`add-${item.ip_address}`"
@@ -248,7 +286,8 @@ const canApply = computed(() => {
       totals.delete +
       totals.pool_add +
       totals.pool_delete +
-      totals.gateway >
+      totals.gateway +
+      totals.subnet_add >
     0
   );
 });
@@ -260,7 +299,8 @@ const reportTotals = computed(() => {
     deleted: 0,
     poolAdded: 0,
     poolDeleted: 0,
-    gateways: 0
+    gateways: 0,
+    subnetAdded: 0
   };
   for (const subnet of report.value?.subnets ?? []) {
     totals.added += subnet.added;
@@ -270,6 +310,9 @@ const reportTotals = computed(() => {
     totals.poolDeleted += subnet.pool_deleted;
     if (subnet.gateway_updated) {
       totals.gateways += 1;
+    }
+    if (subnet.subnet_added) {
+      totals.subnetAdded += 1;
     }
   }
   return totals;
@@ -316,7 +359,10 @@ async function apply() {
     const failed =
       report.value.config_write === "failed" ||
       report.value.subnets.some(
-        subnet => subnet.failures.length > 0 || Boolean(subnet.settings_error)
+        subnet =>
+          subnet.failures.length > 0 ||
+          Boolean(subnet.settings_error) ||
+          Boolean(subnet.subnet_add_error)
       );
     $q.notify({
       type: failed ? "warning" : "positive",
@@ -359,7 +405,7 @@ function hasDetail(subnet: KeaPlanSubnet): boolean {
     subnet.skipped.length +
     subnet.pool_add.length +
     subnet.pool_delete.length;
-  return items > 0 || Boolean(subnet.gateway);
+  return items > 0 || Boolean(subnet.gateway) || Boolean(subnet.subnet_add);
 }
 
 /** gateway 變更顯示：null 以「未設」／「移除」呈現。 */

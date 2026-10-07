@@ -61,7 +61,7 @@
             label="Kea subnet-id"
             :rules="[keaSubnetIdRule]"
             lazy-rules
-            hint="選填；僅 IPv4，全系統唯一"
+            hint="選填；僅 IPv4，全系統唯一；Kea 尚無此 subnet-id 時，完整同步會建立"
           />
 
           <q-input
@@ -644,7 +644,13 @@ function keaSubnetIdRule(value: string | null) {
   if (text === "") {
     return true;
   }
-  return Number.isInteger(Number(text)) || "Kea subnet-id 須為整數";
+  const id = Number(text);
+  if (!Number.isInteger(id)) {
+    return "Kea subnet-id 須為整數";
+  }
+  return id > 0 && id < 4294967295
+    ? true
+    : "Kea subnet-id 須介於 1 與 4294967294";
 }
 
 function addressRule(label: string) {
