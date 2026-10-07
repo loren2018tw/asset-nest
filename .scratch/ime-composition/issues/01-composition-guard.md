@@ -42,4 +42,4 @@
 - 使用者 Chrome 手動快打驗收（快打／慢打／連續多字／各對話框欄位）。
 - （可選）整理 Quasar 上游 issue 草稿（含本平台生命週期實測與 revert 脈絡）。
 - 重現工具暫存 `/tmp/opencode/ime-repro/`（CDP driver＋XTEST 送鍵＋場景腳本）；是否納入 repo 測試基建另議。
-- 實作 commit：未提交（待確認）。
+- 實作 commit：`e8a26a6`（注音組字修正：搜尋欄位組字守衛、查詢去抖上移 app 層）。
