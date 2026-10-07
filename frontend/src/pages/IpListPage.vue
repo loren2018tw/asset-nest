@@ -20,13 +20,13 @@
     <div class="row q-col-gutter-sm q-mb-md">
       <div class="col-12 col-md-3">
         <q-input
+          ref="searchInputRef"
           v-model="filters.q"
           outlined
           dense
           clearable
-          debounce="300"
           placeholder="搜尋 IP／資產描述／位置／MAC／介面名稱"
-          @update:model-value="reload"
+          @update:model-value="onSearchInput"
         >
           <template #prepend>
             <q-icon name="search" />
@@ -265,9 +265,9 @@
 </template>
 
 <script setup lang="ts">
-import type { QTableProps } from "quasar";
+import type { QInput, QTableProps } from "quasar";
 import { useQuasar } from "quasar";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 
 import { fetchAsset, type Asset } from "@/api/assets";
@@ -283,6 +283,8 @@ import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
+import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import { debounce } from "@/utils/debounce";
 import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
@@ -294,6 +296,10 @@ const subnetId = computed(() => Number(route.params.id));
 const subnet = ref<Subnet | null>(null);
 const ips = ref<IpEntry[]>([]);
 const loading = ref(false);
+
+/** 搜尋輸入框的組字守衛（見 .scratch/ime-composition/spec.md）。 */
+const searchInputRef = ref<QInput | null>(null);
+useCompositionGuard(searchInputRef);
 const filters = ref<{
   q: string | null;
   status: IpStatus | null;
@@ -539,6 +545,15 @@ function reload() {
   pagination.value.page = 1;
   void fetchIps();
 }
+
+/** 搜尋輸入去抖：q-input 即時 emit（見 .scratch/ime-composition/spec.md），查詢仍 300ms 去抖。 */
+const searchDebounced = debounce(reload, 300);
+
+function onSearchInput() {
+  searchDebounced.call();
+}
+
+onBeforeUnmount(() => searchDebounced.cancel());
 
 interface TableRequest {
   pagination: {

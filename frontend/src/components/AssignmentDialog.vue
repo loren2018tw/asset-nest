@@ -60,6 +60,7 @@
           <!-- 未指派：搜尋資產 → 選介面（或當場新增） -->
           <template v-else>
             <q-select
+              ref="assetSelectRef"
               v-model="selectedAsset"
               :options="assetOptions"
               :option-label="assetOptionLabel"
@@ -229,7 +230,7 @@
 </template>
 
 <script setup lang="ts">
-import { useQuasar } from "quasar";
+import { useQuasar, type QSelect } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import { fetchAsset, listAssets, type Asset } from "@/api/assets";
@@ -243,6 +244,7 @@ import {
 } from "@/api/ips";
 import type { AddressFamily } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
+import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { assetLabel } from "@/utils/assetLabel";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { cancelAssignmentHint } from "@/utils/observationHint";
@@ -292,6 +294,10 @@ const submitLabel = computed(() => {
   }
   return isEdit.value ? "儲存" : "指派";
 });
+
+/** 資產搜尋欄的組字守衛（見 .scratch/ime-composition/spec.md）。 */
+const assetSelectRef = ref<QSelect | null>(null);
+useCompositionGuard(assetSelectRef);
 
 const selectedAsset = ref<Asset | null>(null);
 const assetOptions = ref<Asset[]>([]);

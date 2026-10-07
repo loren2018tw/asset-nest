@@ -16,6 +16,7 @@
         <q-card-section class="q-gutter-y-sm">
           <!-- 借用人：既有借用人下拉建議，仍可自由輸入新名 -->
           <q-select
+            ref="borrowerSelectRef"
             v-model="borrower"
             :options="borrowerOptions"
             use-input
@@ -69,11 +70,12 @@
 </template>
 
 <script setup lang="ts">
-import { useQuasar } from "quasar";
+import { useQuasar, type QSelect } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import type { Asset } from "@/api/assets";
 import { createLending, listBorrowers } from "@/api/lendings";
+import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { assetLabel } from "@/utils/assetLabel";
 
 const props = defineProps<{
@@ -92,6 +94,10 @@ const open = computed({
   get: () => props.modelValue,
   set: value => emit("update:modelValue", value)
 });
+
+/** 借用人欄的組字守衛（見 .scratch/ime-composition/spec.md）。 */
+const borrowerSelectRef = ref<QSelect | null>(null);
+useCompositionGuard(borrowerSelectRef);
 
 const borrower = ref("");
 /** 借用人建議（後端去重、最近使用者在前）；篩選後供 q-select 顯示。 */

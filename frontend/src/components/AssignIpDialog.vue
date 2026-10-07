@@ -25,6 +25,7 @@
 
           <!-- 位址欄：輸入前綴即時查詢候選，仍可自由輸入（如移轉既有指派） -->
           <q-select
+            ref="addressSelectRef"
             v-model="address"
             :options="candidates"
             option-label="address"
@@ -235,7 +236,7 @@
 </template>
 
 <script setup lang="ts">
-import { useQuasar } from "quasar";
+import { useQuasar, type QSelect } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import { fetchAsset, type Asset, type AssetAssignment } from "@/api/assets";
@@ -254,6 +255,7 @@ import {
   parseIpv4Prefix,
   type ParsedIpv4Prefix
 } from "@/utils/cidr";
+import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { assetLabel } from "@/utils/assetLabel";
 import { notifyKeaSync } from "@/utils/keaSync";
 
@@ -275,6 +277,10 @@ const open = computed({
   get: () => props.modelValue,
   set: value => emit("update:modelValue", value)
 });
+
+/** 位址候選欄的組字守衛（見 .scratch/ime-composition/spec.md）。 */
+const addressSelectRef = ref<QSelect | null>(null);
+useCompositionGuard(addressSelectRef);
 
 const address = ref("");
 /** 位址欄候選（`@filter` 查詢結果；上限 20 筆）。 */

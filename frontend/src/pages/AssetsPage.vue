@@ -24,13 +24,13 @@
     <div class="row q-col-gutter-sm q-mb-md">
       <div class="col-12 col-md-6">
         <q-input
+          ref="searchInputRef"
           v-model="filters.q"
           outlined
           dense
           clearable
-          debounce="300"
           placeholder="搜尋財產編號／描述／設備序號／廠牌／型號／備註／MAC／已指派 IP"
-          @update:model-value="reload"
+          @update:model-value="onSearchInput"
         >
           <template #prepend>
             <q-icon name="search" />
@@ -211,9 +211,9 @@
 </template>
 
 <script setup lang="ts">
-import type { QTableProps } from "quasar";
+import type { QInput, QTableProps } from "quasar";
 import { useQuasar } from "quasar";
-import { onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import {
   deleteAsset,
@@ -233,12 +233,18 @@ import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssetImportDialog from "@/components/AssetImportDialog.vue";
 import LendingDialog from "@/components/LendingDialog.vue";
+import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import { debounce } from "@/utils/debounce";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
 
 const assets = ref<AssetListRow[]>([]);
 const loading = ref(false);
+
+/** 搜尋輸入框的組字守衛（見 .scratch/ime-composition/spec.md）。 */
+const searchInputRef = ref<QInput | null>(null);
+useCompositionGuard(searchInputRef);
 /** 全部位置選項；位置篩選的本地過濾來源。 */
 const allLocationOptions = ref<string[]>([]);
 /** 依輸入過濾後顯示的位置選項。 */
@@ -452,6 +458,15 @@ function reload() {
   pagination.value.page = 1;
   void fetchAssets();
 }
+
+/** 搜尋輸入去抖：q-input 即時 emit（見 .scratch/ime-composition/spec.md），查詢仍 300ms 去抖。 */
+const searchDebounced = debounce(reload, 300);
+
+function onSearchInput() {
+  searchDebounced.call();
+}
+
+onBeforeUnmount(() => searchDebounced.cancel());
 
 /** q-table 的排序欄位名即欄位 `name`；僅白名單欄位可送後端（見票 08）。 */
 function toSortField(value: string | null): AssetSortField {
