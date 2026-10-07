@@ -93,7 +93,10 @@ sudo ./deploy/install.sh --source-dir "$PWD"
 安裝後注意：
 
 - 產生的 Kea 設定於最上層 `Dhcp4.option-data` 預設 DNS `8.8.8.8`（`domain-name-servers`），未另行覆寫的網段皆適用。
-- **Kea 預設不監聽任何介面、也不含網段**（避免誤發 DHCP）。請編輯 `/etc/kea/kea-dhcp4.conf` 設定 `interfaces-config` 與 `subnet4`（記下 `id`）後 `systemctl restart isc-kea-dhcp4-server`；在本系統建立網段並填入相同 `kea_subnet_id`，保留、位址池與 gateway 由「Kea 同步」對齊（見 `docs/adr/0011`、`docs/adr/0013`）。
+- **Kea 預設不監聽任何介面、也不含網段**（避免誤發 DHCP）。請編輯 `/etc/kea/kea-dhcp4.conf` 設定 `interfaces-config`；網段建立有**兩種流程並存**（可混用）：
+  - **Kea-first**：先在 `subnet4` 建立網段（記下 `id`）後 `systemctl restart isc-kea-dhcp4-server`，再回本系統建立網段並填入相同 `kea_subnet_id`；保留、位址池與 gateway 由「Kea 同步」對齊。
+  - **asset-nest-first**：直接在本系統建立／匯入網段並填入 `kea_subnet_id`，於「Kea 同步」按套用——Kea 端缺少的受管網段會以 `subnet4-add` 一併建立（含位址池與 gateway）；**僅增不刪**，Kea 端多出的網段不會被刪除。
+  決策見 `docs/adr/0011`、`docs/adr/0013`（網段層同步）與 `docs/adr/0023`（完整同步建立缺少的受管網段）。
 - 請以防火牆限制 80 來源（或僅允許區域網路），勿暴露公網。
 - HTTPS 尚未設定；日後以 certbot（Let's Encrypt）於 nginx 設定（站台檔 `/etc/nginx/sites-available/asset-nest.conf`）。
 - 移除：`sudo ./deploy/uninstall.sh`（一併移除 nginx 站台設定、保留 nginx 套件；`--purge` 連資料與設定；`--remove-kea` 連 Kea 移除）。

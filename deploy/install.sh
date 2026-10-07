@@ -772,10 +772,13 @@ EOF
 
 後續：
   1. ${firewall_hint}
-  2. 於 ${KEA_CONF} 設定 interfaces-config 與 subnet4 後：
+  2. 於 ${KEA_CONF} 設定 interfaces-config 後：
      systemctl restart isc-kea-dhcp4-server
-  3. 在本系統建立對應網段並填入 Kea subnet id（kea_subnet_id）；保留、位址池
-     與 gateway 由「Kea 同步」對齊（見 docs/adr/0011、docs/adr/0013）。
+  3. 網段建立有兩種流程並存（可混用；見 docs/adr/0011、0013、0023）：
+     Kea-first：先在設定檔 subnet4 建立網段（記下 id）並重新啟動，再於本系統
+       建立網段並填入相同 kea_subnet_id；保留、位址池與 gateway 由「Kea 同步」對齊。
+     asset-nest-first：直接在本系統建立／匯入網段並填入 kea_subnet_id，於
+       「Kea 同步」套用；Kea 端缺少的受管網段會自動建立（僅增不刪，含位址池與 gateway）。
 EOF
   fi
 }

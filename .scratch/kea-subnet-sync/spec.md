@@ -16,6 +16,10 @@
 - 僅受管網段（v4＋`kea_subnet_id`）；v6 與未受管網段完全不碰。
 - **網段本身不新增／刪除**：受管網段必須已存在於 Kea，且 `subnet-id` 與 CIDR 相符才同步；
   不符者整段跳過並回報（沿用 ADR-0011）。
+
+  > **後續修訂（2026-10-07）**：上述「網段本身不新增」的**新增**部分已由
+  > `.scratch/kea-subnet-create/spec.md`（ADR-0023）修訂——完整同步會以 `subnet4-add`
+  > 補建缺少的受管網段（含位址池與 gateway）；「刪除」維持不變。原文保留。
 - **嚴格對齊**（以 asset-nest 為準）：
   - pool：Kea 端多出的 pool 刪除；asset-nest 空 pool＝該網段無動態配發。
   - gateway：Kea 端 `routers` 與 asset-nest `gateway` 不符即改；`gateway` 未設＝移除 `routers`。
