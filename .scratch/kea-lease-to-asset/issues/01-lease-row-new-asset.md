@@ -23,7 +23,7 @@
 
 ## Comments
 
-實作完成（未 commit）：
+實作完成（主實作 commit `c80950f`）：
 
 - `KeaLeasesPage.vue`：篩選列新增「保留」`q-select`（保留位址／非保留位址；clearable、`emit-value`＋`map-options`；與搜尋／狀態 AND）；表格尾欄「操作」與「新增資產及指派 IP」按鈕（一律顯示；停用＋tooltip 四條件：已是保留／未受管／缺 IP／缺 MAC〔防禦〕）；點擊以該列租約預填（描述＝hostname、eth0＋MAC）並開啟 `AssetFormDialog`（`:asset="null"`）；`@saved` 重載租約清單。
 - `AssetFormDialog.vue`：新增選填 props `prefillDescription`／`prefillInterface`（僅新增模式套用；未提供行為不變），介面草稿沿用現行結構（`id = null`）。

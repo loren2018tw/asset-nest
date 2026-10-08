@@ -19,7 +19,7 @@
 
 ## Comments
 
-實作完成（未 commit）：
+實作完成（主實作 commit `c80950f`）：
 
 - `KeaLeasesPage.vue`：`expires_at` 欄 `sortable: true`；`pagination` 預設 `sortBy: "expires_at"`、`descending: true`（越晚到期越上面；每頁 50 不變）。
 - 新增 `:sort-method="sortLeases"`：到期時間以時間戳比較（顯示維持本地時區）；`null`／無法解析固定排最後（升／降冪皆同）；同值以 IP 數值升冪決勝。`ip_address` 改由同一函式以數值比較（欄位自身 `sort` 移除；`null`／無效值固定最後）。

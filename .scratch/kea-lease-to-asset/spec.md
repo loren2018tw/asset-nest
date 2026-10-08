@@ -76,7 +76,7 @@ cargo test --manifest-path backend/Cargo.toml   # 回歸（後端未變更）
 
 ## 實作記錄
 
-- 票 01（租約列入口與保留篩選）：實作完成（未 commit）。`KeaLeasesPage.vue` 篩選「保留」（保留位址／非保留位址）、操作欄「新增資產及指派 IP」按鈕（停用四條件＋tooltip）、`AssetFormDialog` 預填（描述＝hostname、eth0＋租約 MAC）、`@saved` 重載清單；`AssetFormDialog.vue` 新增選填 props `prefillDescription`／`prefillInterface`（僅新增模式）；`README.md` 租約清單描述微調。
-- 票 02（到期時間排序）：實作完成（未 commit）。`expires_at` 可排序；`pagination` 預設 `sortBy: "expires_at"`、`descending: true`；新增 `:sort-method="sortLeases"` 統一排序（null／無效值固定最後、同值以 IP 數值升冪決勝；`ip_address` 集中同函式）。
+- 票 01（租約列入口與保留篩選）：實作完成（主實作 commit `c80950f`）。`KeaLeasesPage.vue` 篩選「保留」（保留位址／非保留位址）、操作欄「新增資產及指派 IP」按鈕（停用四條件＋tooltip）、`AssetFormDialog` 預填（描述＝hostname、eth0＋租約 MAC）、`@saved` 重載清單；`AssetFormDialog.vue` 新增選填 props `prefillDescription`／`prefillInterface`（僅新增模式）；`README.md` 租約清單描述微調。
+- 票 02（到期時間排序）：實作完成（主實作 commit `c80950f`）。`expires_at` 可排序；`pagination` 預設 `sortBy: "expires_at"`、`descending: true`；新增 `:sort-method="sortLeases"` 統一排序（null／無效值固定最後、同值以 IP 數值升冪決勝；`ip_address` 集中同函式）。
 - 驗收：`pnpm --filter frontend typecheck`（vue-tsc）、`pnpm lint:check`（oxfmt＋oxlint、65 檔）、`pnpm build:frontend` 全綠；`cargo test --manifest-path backend/Cargo.toml` 406 passed／0 failed／6 ignored（後端未變更）。
 - 未驗證：瀏覽器人工檢核（篩選疊加、預填內容、儲存後重載、預設排序與欄頭切換）——待有環境時執行。
