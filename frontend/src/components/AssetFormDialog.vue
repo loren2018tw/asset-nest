@@ -385,6 +385,10 @@ const props = defineProps<{
   modelValue: boolean;
   /** `null`＝新增；否則為編輯中的資產。 */
   asset: Asset | null;
+  /** 新增模式的預填描述（如由 Kea 租約進入）；未提供為空字串。 */
+  prefillDescription?: string;
+  /** 新增模式的預填介面（如由 Kea 租約進入）；未提供不建立介面草稿。 */
+  prefillInterface?: { name: string; mac: string } | null;
 }>();
 
 const emit = defineEmits<{
@@ -526,7 +530,7 @@ function prepare() {
   const asset = props.asset;
   form.value =
     asset === null
-      ? emptyForm()
+      ? { ...emptyForm(), description: props.prefillDescription ?? "" }
       : {
           property_no: asset.property_no ?? "",
           description: asset.description,
@@ -602,6 +606,17 @@ async function loadInterfaces() {
   loadingInterfaces.value = false;
 
   if (asset === null) {
+    const prefill = props.prefillInterface;
+    if (prefill !== undefined && prefill !== null) {
+      interfaceDrafts.value.push({
+        key: ++draftKey,
+        id: null,
+        name: prefill.name,
+        mac: prefill.mac,
+        note: "",
+        original: null
+      });
+    }
     return;
   }
 
