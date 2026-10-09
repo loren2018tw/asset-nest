@@ -9,6 +9,7 @@ anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
+calamine = "0.36.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 csv = "1"
 dotenvy = "0.15"

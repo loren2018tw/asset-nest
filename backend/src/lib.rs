@@ -11,6 +11,7 @@ pub mod conflicts;
 pub mod db;
 pub mod import;
 pub mod interfaces;
+pub mod inventory_audit;
 pub mod ip_candidates;
 pub mod ips;
 pub mod kea;

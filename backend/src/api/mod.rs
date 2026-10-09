@@ -14,6 +14,7 @@ mod auth;
 mod error;
 mod import;
 mod interfaces;
+mod inventory_audit;
 mod ip_candidates;
 mod ips;
 mod kea;
@@ -61,6 +62,7 @@ mod v1 {
             .merge(super::auth::router())
             .merge(super::import::router())
             .merge(super::interfaces::router())
+            .merge(super::inventory_audit::router())
             .merge(super::ip_candidates::router())
             .merge(super::kea::router())
             .merge(super::lendings::router())
