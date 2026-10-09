@@ -188,7 +188,20 @@ export function saveBlob(blob: Blob, filename: string): void {
  * 錯誤解析沿用 `{error,message,details}` 與 `ApiError`。
  */
 export function apiUpload<T>(path: string, file: File): Promise<T> {
+  return apiUploadMany(path, [file]);
+}
+
+/**
+ * multipart/form-data 多檔上傳；同名欄位 `file` 依序附加（清冊稽核 1～10 檔；
+ * 見清冊稽核 spec §5.1）。其餘行為與 [`apiUpload`] 相同。
+ */
+export function apiUploadMany<T>(
+  path: string,
+  files: readonly File[]
+): Promise<T> {
   const form = new FormData();
-  form.append("file", file);
+  for (const file of files) {
+    form.append("file", file);
+  }
   return send<T>("POST", path, form);
 }

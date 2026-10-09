@@ -68,6 +68,12 @@
           </q-item-section>
           <q-item-section> 資產借還 </q-item-section>
         </q-item>
+        <q-item clickable to="/inventory-audit" :active="inventoryAuditActive">
+          <q-item-section avatar>
+            <q-icon name="fact_check" />
+          </q-item-section>
+          <q-item-section> 清冊稽核 </q-item-section>
+        </q-item>
         <q-item clickable to="/ips" exact :active="ipSection">
           <q-item-section avatar>
             <q-icon name="lan" />
@@ -211,6 +217,11 @@ const outOfSubnetActive = computed(() =>
 
 /** 資產借還（/lendings）：資產管理區段、資產清單之下（見 asset-lending 票 04）。 */
 const lendingsActive = computed(() => route.path.startsWith("/lendings"));
+
+/** 清冊稽核（/inventory-audit）：資產管理區段（見清冊稽核 spec §6）。 */
+const inventoryAuditActive = computed(() =>
+  route.path.startsWith("/inventory-audit")
+);
 
 /** Kea 區段（/kea 前綴）：租約清單與系統狀態兩頁各自保持高亮。 */
 const keaLeasesActive = computed(() => route.path.startsWith("/kea/leases"));

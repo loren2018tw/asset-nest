@@ -214,6 +214,7 @@
 import type { QInput, QTableProps } from "quasar";
 import { useQuasar } from "quasar";
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import { useRoute } from "vue-router";
 
 import {
   deleteAsset,
@@ -238,6 +239,7 @@ import { debounce } from "@/utils/debounce";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
+const route = useRoute();
 
 const assets = ref<AssetListRow[]>([]);
 const loading = ref(false);
@@ -610,6 +612,11 @@ async function remove(asset: Asset) {
 }
 
 onMounted(() => {
+  // 「清冊稽核」的「在資產清單檢視」以 `?q=` 帶入初始搜尋字串（見清冊稽核 spec §6）
+  const initialQuery = route.query.q;
+  if (typeof initialQuery === "string" && initialQuery !== "") {
+    filters.value.q = initialQuery;
+  }
   void fetchAssets();
   void loadFilterOptions();
 });
