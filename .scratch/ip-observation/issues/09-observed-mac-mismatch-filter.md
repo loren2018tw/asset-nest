@@ -14,7 +14,7 @@
 
 ## Comments
 
-實作摘要：
+實作摘要（commit `b573984`）：
 
 - 後端：
   - `ips.rs`：`IpObservedFilter::UnknownMac` 換為 `ObservedMacMismatch`（查詢值 `observed_mac_mismatch`）；`matches_v4_filters` 以 `merged_conflicts` 合併碼（`conflicts::OBSERVED_MAC_MISMATCH`）比對，篩選結果與畫面徽章保證一致；`V4Context` 移除 `known_macs`；單元測試更新（parse 白名單、合併排序路徑、舊值回 `None`）。
