@@ -4,7 +4,7 @@
 
 **Blocked by:** 01、02、03、04、05
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 - [ ] `pnpm typecheck`、`pnpm lint:check`、`pnpm build` 通過；`cargo test` 不受影響（後端未動）。
 - [ ] 新增模式：清單為空按「新增介面」→ 名稱 `eth0`；非空不預填。
@@ -16,3 +16,7 @@
 - [ ] 人工以真實後端走一遍（可搭配暫存 SQLite）；發現偏離記於 Comments。
 
 ## Comments
+
+- 自動檢查通過（主實作 commit `1e5fca0`）：`pnpm typecheck`、`pnpm lint:check`、`pnpm build`；後端未動、`cargo test` 不受影響。
+- 未執行：以真實後端的瀏覽器人工走查（實作環境無瀏覽器自動化）；上述清單待人工驗收。
+- 已知邊界：非正規 v4 寫法（如 `10.0.0.05`）後端不回 `query_status`，草稿預檢會擋下並提示確認格式；正規寫法不受影響。

@@ -4,11 +4,16 @@
 
 **Blocked by:** 無
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `addInterface()`：`interfaceDrafts.value.length === 0` 時 `name: "eth0"`，否則 `name: ""`（檢查須在 push 前）。
-- [ ] 不自動建立：`prepare()`／`loadInterfaces()` 不新增任何預填列；Kea 租約的 `prefillInterface` 行為不變。
-- [ ] 清單非空（含刪除後仍有列）時按鈕不預填。
-- [ ] `pnpm typecheck`、`pnpm lint:check`、`pnpm build` 通過。
+- [x] `addInterface()`：`interfaceDrafts.value.length === 0` 時 `name: "eth0"`，否則 `name: ""`（檢查須在 push 前）。
+- [x] 不自動建立：`prepare()`／`loadInterfaces()` 不新增任何預填列；Kea 租約的 `prefillInterface` 行為不變。
+- [x] 清單非空（含刪除後仍有列）時按鈕不預填。
+- [x] `pnpm typecheck`、`pnpm lint:check`、`pnpm build` 通過。
 
 ## Comments
+
+實作完成（主實作 commit `1e5fca0`，`資產指派草稿：介面預填 eth0、草稿式指派與取消處置（前端）`）。
+
+- `AssetFormDialog.addInterface()`：清單為空時名稱預填 `eth0`，否則空字串；開啟對話框不自動建立；Kea 預填不受影響。
+- 驗收：`pnpm typecheck`、`pnpm lint:check`、`pnpm build` 全綠。
