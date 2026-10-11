@@ -239,9 +239,8 @@
                   >
                     <q-tooltip>觀測歷史</q-tooltip>
                   </q-btn>
-                  <!-- 指派一律以已儲存的介面為對象（未儲存介面不顯示） -->
+                  <!-- 指派：已儲存介面＝立即指派；草稿介面＝指派草稿（見 spec §4.1） -->
                   <q-btn
-                    v-if="row.id !== null"
                     flat
                     dense
                     round
@@ -265,7 +264,14 @@
           </template>
         </q-card-section>
 
-        <q-card-section v-if="asset !== null" class="q-pt-none">
+        <q-card-section
+          v-if="
+            asset !== null ||
+            assignments.length > 0 ||
+            assignmentDrafts.length > 0
+          "
+          class="q-pt-none"
+        >
           <q-separator class="q-mb-md" />
 
           <div class="text-subtitle2 q-mb-sm">已指派 IP</div>
@@ -274,7 +280,12 @@
             <q-spinner color="primary" />
           </div>
 
-          <div v-else-if="assignments.length === 0" class="text-grey-6">
+          <div
+            v-else-if="
+              assignments.length === 0 && assignmentDrafts.length === 0
+            "
+            class="text-grey-6"
+          >
             尚無指派。
           </div>
 
@@ -320,6 +331,33 @@
                 </div>
               </q-item-section>
             </q-item>
+
+            <!-- 指派草稿：尚未落地，無「IP 管理」連結、取消不跳確認（見 spec §4.4） -->
+            <q-item v-for="draft in assignmentDrafts" :key="draft.key">
+              <q-item-section>
+                <q-item-label class="text-mono">{{
+                  draft.address
+                }}</q-item-label>
+                <q-item-label caption>
+                  {{ draft.subnetLabel ? `${draft.subnetLabel} ｜ ` : ""
+                  }}{{ assignmentPurposeLabel(draft.purpose) }}
+                  <template v-if="draft.hostname">
+                    ｜ {{ draft.hostname }}
+                  </template>
+                  ｜（未儲存）
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-btn
+                  flat
+                  dense
+                  size="sm"
+                  color="negative"
+                  label="取消指派"
+                  @click="removeAssignmentDraft(draft)"
+                />
+              </q-item-section>
+            </q-item>
           </q-list>
 
           <div class="text-caption text-grey-7 q-mt-sm">
@@ -328,21 +366,57 @@
         </q-card-section>
 
         <q-card-actions align="right">
-          <q-btn v-close-popup flat label="取消" />
+          <q-btn flat label="取消" :disable="saving" @click="requestCancel" />
           <q-btn color="primary" type="submit" label="儲存" :loading="saving" />
         </q-card-actions>
       </q-form>
     </q-card>
   </q-dialog>
 
-  <!-- 介面列「指派 IP」：以該介面為固定目標（見票 10） -->
+  <!-- 介面列「指派 IP」：以該介面為固定目標（見票 10）；草稿列＝草稿模式（見 spec §4.2） -->
   <assign-ip-dialog
-    v-if="asset !== null && assignInterface !== null"
+    v-if="assignInterface !== null || draftAssignContext !== null"
     v-model="assignOpen"
     :asset="asset"
     :fixed-interface="assignInterface"
+    :draft="draftAssignContext"
     @saved="onAssignSaved"
+    @draft="onDraftAssigned"
   />
+
+  <!-- 取消新增時已建立資產的處置（見 spec §5.3） -->
+  <q-dialog v-model="cancelConfirmOpen" persistent>
+    <q-card style="width: 480px; max-width: 95vw">
+      <q-card-section>
+        <div class="text-h6">取消新增資產</div>
+        <div class="text-body2 q-mt-sm">
+          此新資產已建立，但尚未完成儲存（仍有未儲存的介面或指派）。要保留還是刪除已建立的內容？
+        </div>
+      </q-card-section>
+      <q-card-actions align="right">
+        <q-btn
+          flat
+          label="繼續編輯"
+          :disable="deletingAsset"
+          @click="cancelConfirmOpen = false"
+        />
+        <q-btn
+          flat
+          color="primary"
+          label="保留已建立內容"
+          :disable="deletingAsset"
+          @click="keepCreatedAsset"
+        />
+        <q-btn
+          flat
+          color="negative"
+          label="刪除已建立內容"
+          :loading="deletingAsset"
+          @click="deleteCreatedAsset"
+        />
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
 
   <!-- 介面 MAC 觀測歷史：以 MAC 進入（見票 06、票 08） -->
   <observation-history-dialog
@@ -357,6 +431,7 @@ import { computed, nextTick, ref, watch } from "vue";
 
 import {
   createAsset,
+  deleteAsset,
   fetchAsset,
   fetchLocations,
   fetchTags,
@@ -366,6 +441,7 @@ import {
   type AssetAssignment,
   type AssetInput
 } from "@/api/assets";
+import type { AssetAssignmentSaved } from "@/api/assignments";
 import {
   createInterface,
   deleteInterface,
@@ -374,9 +450,16 @@ import {
   type InterfaceInput
 } from "@/api/interfaces";
 import { cancelAssignment, type IpPurpose } from "@/api/ips";
+import { listSubnets, type SubnetSummary } from "@/api/subnets";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import PeerMacHint from "@/components/PeerMacHint.vue";
+import {
+  sameAddress,
+  type AssignmentDraftInput
+} from "@/utils/assignmentDraft";
+import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
+import { assetLabel } from "@/utils/assetLabel";
 import { parseAddress } from "@/utils/cidr";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { relativeTime } from "@/utils/relativeTime";
@@ -424,6 +507,12 @@ interface InterfaceDraft {
     mac: string | null;
     note: string | null;
   } | null;
+}
+
+/** 指派草稿：綁定介面草稿列（`rowKey`），儲存時才落地（見 spec §4、ADR-0025）。 */
+interface AssignmentDraft extends AssignmentDraftInput {
+  key: number;
+  rowKey: number;
 }
 
 function emptyForm(): FormState {
@@ -474,6 +563,17 @@ const savedAssetId = ref<number | null>(null);
 /** 介面列「指派 IP」對話框：固定目標介面（見票 10）。 */
 const assignOpen = ref(false);
 const assignInterface = ref<Interface | null>(null);
+/** 指派草稿清單（新增模式與編輯模式的新介面列；見 spec §4）。 */
+const assignmentDrafts = ref<AssignmentDraft[]>([]);
+/** 全部網段（指派草稿的 v6 預檢與顯示）；null＝未載入，略過預檢。 */
+const subnetSummaries = ref<SubnetSummary[] | null>(null);
+/** 草稿模式指派對話框的目標介面草稿列。 */
+const assignDraftTarget = ref<InterfaceDraft | null>(null);
+/** 指派草稿的穩定 key。 */
+let assignmentDraftKey = 0;
+/** 取消新增時「已建立資產」的處置對話框（見 spec §5.3）。 */
+const cancelConfirmOpen = ref(false);
+const deletingAsset = ref(false);
 
 /** QMenu 的定位目標；template ref 於掛載後才有值。 */
 const locationTarget = computed(() => locationField.value ?? undefined);
@@ -549,8 +649,15 @@ function prepare() {
   duplicateSerial.value = false;
   serialCheckToken += 1;
   savedAssetId.value = null;
+  assignmentDrafts.value = [];
+  subnetSummaries.value = null;
+  assignDraftTarget.value = null;
+  assignInterface.value = null;
+  cancelConfirmOpen.value = false;
+  deletingAsset.value = false;
   void loadLocations();
   void loadTags();
+  void loadSubnets();
   void loadInterfaces();
 }
 
@@ -568,6 +675,15 @@ async function loadTags() {
     tagOptions.value = allTags.value;
   } catch {
     // 建議值載入失敗不影響輸入與儲存
+  }
+}
+
+/** 全部網段：供指派草稿的 v6 預檢與顯示；失敗為 `null`（略過預檢、後端把關）。 */
+async function loadSubnets() {
+  try {
+    subnetSummaries.value = await listSubnets();
+  } catch {
+    subnetSummaries.value = null;
   }
 }
 
@@ -656,7 +772,8 @@ function addInterface() {
   interfaceDrafts.value.push({
     key: ++draftKey,
     id: null,
-    name: "",
+    // 清單為空時預填 eth0（見 spec §3）
+    name: interfaceDrafts.value.length === 0 ? "eth0" : "",
     mac: "",
     note: "",
     original: null
@@ -698,12 +815,18 @@ function confirmRemoveInterface(row: InterfaceDraft) {
         ? row.mac.trim()
         : "未命名介面";
 
-  // 連動影響：已儲存介面可能已有指派（含保留；見 spec §2.2、票 08）。
+  // 連動影響：已儲存介面可能已有指派（含保留；見 spec §2.2、票 08）；
+  // 草稿列可能已有指派草稿（見 spec §4.5）。
   const affected =
     row.id === null
       ? 0
       : assignments.value.filter(item => item.interface_id === row.id).length;
-  const impact = affected > 0 ? `將連動刪除 ${affected} 筆指派。` : "";
+  const draftCount = assignmentDrafts.value.filter(
+    item => item.rowKey === row.key
+  ).length;
+  const impact =
+    (affected > 0 ? `將連動刪除 ${affected} 筆指派。` : "") +
+    (draftCount > 0 ? `將一併取消 ${draftCount} 筆尚未儲存的指派。` : "");
 
   $q.dialog({
     title: "刪除介面",
@@ -716,37 +839,125 @@ function confirmRemoveInterface(row: InterfaceDraft) {
     interfaceDrafts.value = interfaceDrafts.value.filter(
       item => item.key !== row.key
     );
+    assignmentDrafts.value = assignmentDrafts.value.filter(
+      item => item.rowKey !== row.key
+    );
   });
 }
 
-/** 由已儲存的介面列開啟指派對話框（目標介面固定；未儲存介面不顯示按鈕）。 */
+/** 由介面列開啟指派對話框：已儲存列＝立即指派；草稿列＝指派草稿（見 spec §4.1）。 */
 function openAssign(row: InterfaceDraft) {
-  if (row.id === null) {
-    return;
+  if (row.id !== null) {
+    const target = originalInterfaces.value.find(item => item.id === row.id);
+    if (target === undefined) {
+      return;
+    }
+    assignInterface.value = target;
+    assignDraftTarget.value = null;
+  } else {
+    assignInterface.value = null;
+    assignDraftTarget.value = row;
   }
-  const target = originalInterfaces.value.find(item => item.id === row.id);
-  if (target === undefined) {
-    return;
-  }
-  assignInterface.value = target;
   assignOpen.value = true;
+}
+
+/** 草稿模式指派對話框的內容（見 spec §4.2）；非草稿列為 null。 */
+const draftAssignContext = computed(() => {
+  const row = assignDraftTarget.value;
+  if (row === null || row.id !== null) {
+    return null;
+  }
+
+  const description = form.value.description.trim();
+  const label =
+    description === ""
+      ? "新資產"
+      : assetLabel(textOrNull(form.value.property_no), description);
+  const location = form.value.location.trim();
+
+  return {
+    subtitle: `${label}（${location === "" ? "未填位置" : location}）（未儲存）`,
+    interfaceName: row.name,
+    interfaceMac: row.mac,
+    existing: existingAssignmentsFor(row),
+    subnets: subnetSummaries.value
+  };
+});
+
+/** 該介面列既有的位址（已落地＋指派草稿）；供同網段重複比對。 */
+function existingAssignmentsFor(
+  row: InterfaceDraft
+): { address: string; subnetId: number | null }[] {
+  const items: { address: string; subnetId: number | null }[] = [];
+  if (row.id !== null) {
+    for (const item of assignments.value) {
+      if (item.interface_id === row.id) {
+        items.push({ address: item.address, subnetId: item.subnet_id });
+      }
+    }
+  }
+  for (const draft of assignmentDrafts.value) {
+    if (draft.rowKey === row.key) {
+      items.push({ address: draft.address, subnetId: draft.subnetId });
+    }
+  }
+  return items;
+}
+
+/** 草稿模式指派送出：同位址＝更新該草稿，否則新增（見 spec §4.3）。 */
+function onDraftAssigned(input: AssignmentDraftInput) {
+  const row = assignDraftTarget.value;
+  if (row === null) {
+    return;
+  }
+
+  const existing = assignmentDrafts.value.find(
+    draft =>
+      draft.rowKey === row.key && sameAddress(draft.address, input.address)
+  );
+  if (existing !== undefined) {
+    existing.address = input.address;
+    existing.purpose = input.purpose;
+    existing.hostname = input.hostname;
+    existing.subnetId = input.subnetId;
+    existing.subnetLabel = input.subnetLabel;
+    return;
+  }
+
+  assignmentDrafts.value.push({
+    key: ++assignmentDraftKey,
+    rowKey: row.key,
+    ...input
+  });
+}
+
+/** 移除指派草稿（尚未落地、不跳確認、不呼叫 API）。 */
+function removeAssignmentDraft(draft: AssignmentDraft) {
+  assignmentDrafts.value = assignmentDrafts.value.filter(
+    item => item.key !== draft.key
+  );
 }
 
 /** 指派對話框儲存後：更新「已指派 IP」並通知外層刷新清單；
  *  不重載介面草稿，保留未儲存編輯。 */
 async function onAssignSaved() {
   emit("saved");
-  await refreshAssignments();
-}
-
-/** 重載該資產的已指派 IP（取消後即時反映）。 */
-async function refreshAssignments() {
   const asset = props.asset;
   if (asset === null) {
     return;
   }
+  await refreshAssignments(asset.id);
+}
+
+/** 目前對話框對應的資產 id：編輯模式為載入的資產；新增模式為已建立者。 */
+function currentAssetId(): number | null {
+  return props.asset?.id ?? savedAssetId.value;
+}
+
+/** 重載該資產的已指派 IP（取消或落地後即時反映）。 */
+async function refreshAssignments(assetId: number) {
   try {
-    const detail = await fetchAsset(asset.id);
+    const detail = await fetchAsset(assetId);
     assignments.value = detail.assignments;
   } catch (cause) {
     $q.notify({
@@ -773,13 +984,17 @@ function confirmCancelAssignment(item: AssetAssignment) {
 }
 
 async function cancelAssignmentItem(item: AssetAssignment) {
+  const assetId = currentAssetId();
+  if (assetId === null) {
+    return;
+  }
   cancellingAssignmentId.value = item.id;
   try {
     const result = await cancelAssignment(item.subnet_id, item.address);
     notifyKeaSync($q, result.kea_sync);
     $q.notify({ type: "positive", message: "已取消指派" });
     emit("saved");
-    await refreshAssignments();
+    await refreshAssignments(assetId);
   } catch (cause) {
     $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
@@ -919,6 +1134,9 @@ async function syncInterfaces(assetId: number): Promise<string[]> {
       row.mac = saved.mac ?? "";
       row.note = saved.note ?? "";
       row.original = { name: saved.name, mac: saved.mac, note: saved.note };
+      // 新介面已落地：納入既有介面並保留（供後續指派／重試；避免下次儲存誤刪）
+      keptIds.add(saved.id);
+      originalInterfaces.value.push(saved);
       warnings.push(...saved.warnings.map(warning => warning.message));
       continue;
     }
@@ -952,11 +1170,86 @@ async function syncInterfaces(assetId: number): Promise<string[]> {
   return warnings;
 }
 
+/** 儲存前預檢指派草稿：保留需介面 MAC（見 spec §5.1）；無誤回 `null`。 */
+function preflightAssignmentDrafts(): string | null {
+  for (const draft of assignmentDrafts.value) {
+    if (draft.purpose !== "reservation") {
+      continue;
+    }
+    const row = interfaceDrafts.value.find(item => item.key === draft.rowKey);
+    if (row === undefined || normalizeMac(row.mac) === null) {
+      return `保留指派 ${draft.address} 需要介面 MAC；請補上 MAC 或改為手動設定。`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 逐筆落地指派草稿（見 spec §5.2）：遇錯即停；已成功者自草稿移除，
+ * 失敗者保留供重試。移轉確認被取消視同失敗（回傳後由呼叫端提示）。
+ */
+async function landAssignmentDrafts(assetId: number) {
+  if (assignmentDrafts.value.length === 0) {
+    return;
+  }
+
+  for (const draft of assignmentDrafts.value) {
+    const row = interfaceDrafts.value.find(item => item.key === draft.rowKey);
+    if (row === undefined || row.id === null) {
+      // 介面已不存在（理論上草稿已連動移除）；僅清理殘留
+      assignmentDrafts.value = assignmentDrafts.value.filter(
+        item => item.key !== draft.key
+      );
+      continue;
+    }
+
+    let saved: AssetAssignmentSaved | null = null;
+    try {
+      saved = await assignFromAssetWithTransfer($q, assetId, {
+        address: draft.address,
+        interface_id: row.id,
+        purpose: draft.purpose,
+        hostname: draft.hostname
+      });
+    } catch (cause) {
+      errorMessage.value = messageOf(cause);
+      emit("saved");
+      await refreshAssignments(assetId);
+      return;
+    }
+
+    if (saved === null) {
+      errorMessage.value = `位址 ${draft.address} 未移轉，指派尚未建立。`;
+      emit("saved");
+      await refreshAssignments(assetId);
+      return;
+    }
+
+    for (const warning of saved.warnings) {
+      $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
+    }
+    notifyKeaSync($q, saved.kea_sync);
+    assignmentDrafts.value = assignmentDrafts.value.filter(
+      item => item.key !== draft.key
+    );
+  }
+
+  // 指派已落地：通知外層刷新（清單「已指派 IP」欄）
+  emit("saved");
+  await refreshAssignments(assetId);
+}
+
 async function submit() {
   saving.value = true;
   errorMessage.value = "";
 
   try {
+    const preflight = preflightAssignmentDrafts();
+    if (preflight !== null) {
+      errorMessage.value = preflight;
+      return;
+    }
+
     const input = toInput();
     let assetId = savedAssetId.value ?? props.asset?.id ?? null;
 
@@ -976,11 +1269,55 @@ async function submit() {
       $q.notify({ type: "warning", message, timeout: 6000 });
     }
 
-    open.value = false;
+    // 指派草稿於介面落地後逐筆落地（見 spec §5.1）
+    await landAssignmentDrafts(assetId);
+
+    if (assignmentDrafts.value.length === 0) {
+      open.value = false;
+    }
   } catch (cause) {
     errorMessage.value = messageOf(cause);
   } finally {
     saving.value = false;
+  }
+}
+
+/** 取消：未曾建立資產直接關閉；已建立且尚未完成儲存時跳處置對話框（見 spec §5.3）。 */
+function requestCancel() {
+  if (savedAssetId.value === null) {
+    open.value = false;
+    return;
+  }
+  cancelConfirmOpen.value = true;
+}
+
+/** 保留已建立內容並關閉。 */
+function keepCreatedAsset() {
+  cancelConfirmOpen.value = false;
+  emit("saved");
+  open.value = false;
+}
+
+/** 刪除已建立內容（連動刪除介面與已落地指派）並關閉；失敗留在表單顯示錯誤。 */
+async function deleteCreatedAsset() {
+  const assetId = savedAssetId.value;
+  if (assetId === null) {
+    keepCreatedAsset();
+    return;
+  }
+
+  deletingAsset.value = true;
+  try {
+    await deleteAsset(assetId);
+    emit("saved");
+    $q.notify({ type: "positive", message: "已刪除未完成的新資產" });
+    cancelConfirmOpen.value = false;
+    open.value = false;
+  } catch (cause) {
+    errorMessage.value = messageOf(cause);
+    cancelConfirmOpen.value = false;
+  } finally {
+    deletingAsset.value = false;
   }
 }
 </script>

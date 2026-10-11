@@ -6,11 +6,7 @@
       <q-form @submit="submit">
         <q-card-section>
           <div class="text-h6">指派 IP</div>
-          <div class="text-subtitle2 text-grey-7">
-            {{ assetLabel(asset.property_no, asset.description) }}（{{
-              asset.location
-            }}）
-          </div>
+          <div class="text-subtitle2 text-grey-7">{{ subtitle }}</div>
         </q-card-section>
 
         <q-card-section class="q-gutter-y-sm">
@@ -240,8 +236,7 @@ import { useQuasar, type QSelect } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import { fetchAsset, type Asset, type AssetAssignment } from "@/api/assets";
-import { assignFromAsset, type AssetAssignmentSaved } from "@/api/assignments";
-import { ApiError } from "@/api/client";
+import type { AssetAssignmentSaved } from "@/api/assignments";
 import { createInterface, type Interface } from "@/api/interfaces";
 import {
   findIpCandidates,
@@ -249,26 +244,49 @@ import {
   type IpQueryStatus
 } from "@/api/ipCandidates";
 import { cancelAssignment, type IpPurpose } from "@/api/ips";
+import type { SubnetSummary } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
+import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import {
+  resolveSubnetByAddress,
+  sameAddress,
+  subnetDisplayLabel,
+  type AssignmentDraftInput
+} from "@/utils/assignmentDraft";
+import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
+import { assetLabel } from "@/utils/assetLabel";
 import {
   parseAddress,
   parseIpv4Prefix,
   type ParsedIpv4Prefix
 } from "@/utils/cidr";
-import { useCompositionGuard } from "@/composables/useCompositionGuard";
-import { assetLabel } from "@/utils/assetLabel";
 import { notifyKeaSync } from "@/utils/keaSync";
 
 const props = defineProps<{
   modelValue: boolean;
-  asset: Asset;
+  /** live 模式的目標資產；草稿模式為 null（見 ADR-0025）。 */
+  asset?: Asset | null;
   /** 由介面列進入時固定的目標介面；存在時隱藏介面選擇。 */
   fixedInterface?: Interface | null;
+  /** 草稿模式：未儲存資產／介面的指派草稿（見 spec §4.2）；null＝live 模式。 */
+  draft?: {
+    /** 副標：目前表單的「財產編號(描述)（位置）（未儲存）」。 */
+    subtitle: string;
+    /** 草稿列目前的名稱／MAC（原文）。 */
+    interfaceName: string;
+    interfaceMac: string;
+    /** 該介面既有（已落地＋草稿）位址；供同網段重複比對。 */
+    existing: { address: string; subnetId: number | null }[];
+    /** 全部網段（v6 預檢）；null＝未載入，略過預檢由後端把關。 */
+    subnets: SubnetSummary[] | null;
+  } | null;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [value: boolean];
   saved: [];
+  /** 草稿模式送出：回傳指派草稿（不落地）。 */
+  draft: [input: AssignmentDraftInput];
 }>();
 
 const $q = useQuasar();
@@ -315,13 +333,32 @@ const errorMessage = ref("");
 /** 供介面清單載入丟棄過期回應。 */
 let loadToken = 0;
 
+/** 草稿模式：不做 API 指派，只回傳指派草稿（見 ADR-0025）。 */
+const isDraft = computed(
+  () => props.draft !== null && props.draft !== undefined
+);
+
+/** 對話框副標：live＝資產顯示；草稿＝目前表單值（含「未儲存」）。 */
+const subtitle = computed(() => {
+  if (isDraft.value) {
+    return props.draft?.subtitle ?? "";
+  }
+  const asset = props.asset;
+  if (asset === null || asset === undefined) {
+    return "";
+  }
+  return `${assetLabel(asset.property_no, asset.description)}（${asset.location}）`;
+});
+
 const isFixed = computed(
-  () => props.fixedInterface !== null && props.fixedInterface !== undefined
+  () =>
+    isDraft.value ||
+    (props.fixedInterface !== null && props.fixedInterface !== undefined)
 );
 
 /** 固定介面：優先取載入後的最新資料，載入完成前先用傳入值。 */
 const fixedInterfaceTarget = computed<Interface | null>(() => {
-  if (!isFixed.value) {
+  if (isDraft.value || !isFixed.value) {
     return null;
   }
   return (
@@ -343,10 +380,26 @@ const selectedInterface = computed<Interface | null>(() => {
   );
 });
 
-/** 目前所選介面的 MAC；null＝無 MAC，保留停用。 */
-const selectedMac = computed(() => selectedInterface.value?.mac ?? null);
+/** 目前所選介面的 MAC（草稿模式取草稿列輸入值）；null＝無 MAC，保留停用。 */
+const selectedMac = computed(() => {
+  if (isDraft.value) {
+    return normalizeMac(props.draft?.interfaceMac ?? "");
+  }
+  return selectedInterface.value?.mac ?? null;
+});
 
 const fixedInterfaceLabel = computed(() => {
+  if (isDraft.value) {
+    const draft = props.draft;
+    if (draft === null || draft === undefined) {
+      return "";
+    }
+    const name = draft.interfaceName.trim();
+    return interfaceLabel(
+      name === "" ? null : name,
+      normalizeMac(draft.interfaceMac)
+    );
+  }
   const target = fixedInterfaceTarget.value;
   return target === null ? "" : interfaceLabel(target.name, target.mac);
 });
@@ -457,9 +510,15 @@ async function prepare() {
   assignments.value = [];
   cancellingId.value = null;
 
+  const asset = props.asset;
+  if (isDraft.value || asset === null || asset === undefined) {
+    loadingInterfaces.value = false;
+    return;
+  }
+
   loadingInterfaces.value = true;
   try {
-    const detail = await fetchAsset(props.asset.id);
+    const detail = await fetchAsset(asset.id);
     if (token !== loadToken) {
       return;
     }
@@ -508,7 +567,11 @@ async function createNewInterface() {
   savingInterface.value = true;
   newInterfaceError.value = "";
   try {
-    const saved = await createInterface(props.asset.id, {
+    const asset = props.asset;
+    if (asset === null || asset === undefined) {
+      return;
+    }
+    const saved = await createInterface(asset.id, {
       name: textOrNull(name),
       mac: textOrNull(mac),
       note: null
@@ -611,6 +674,11 @@ async function submit() {
     return;
   }
 
+  if (isDraft.value) {
+    await submitDraft(text);
+    return;
+  }
+
   const target = selectedInterface.value;
   if (target === null) {
     errorMessage.value = "請選擇介面";
@@ -619,6 +687,11 @@ async function submit() {
 
   if (purpose.value === "reservation" && selectedMac.value === null) {
     errorMessage.value = "所選介面無 MAC，不可設為保留";
+    return;
+  }
+
+  const asset = props.asset;
+  if (asset === null || asset === undefined) {
     return;
   }
 
@@ -634,35 +707,126 @@ async function submit() {
 
   saving.value = true;
   try {
-    try {
-      const saved = await assignFromAsset(props.asset.id, {
-        ...input,
-        transfer: false
-      });
-      onSaved(saved);
-    } catch (cause) {
-      // 已指派給其他介面：提示目前對象，確認後以 transfer=true 重試
-      const elsewhere = parseAssignedElsewhere(cause);
-      if (elsewhere === null) {
-        throw cause;
-      }
-
-      const confirmed = await confirmTransfer(text, elsewhere);
-      if (!confirmed) {
-        return;
-      }
-
-      const saved = await assignFromAsset(props.asset.id, {
-        ...input,
-        transfer: true
-      });
-      onSaved(saved);
+    const saved = await assignFromAssetWithTransfer($q, asset.id, input);
+    if (saved === null) {
+      // 使用者在移轉確認中取消：不指派、不提示錯誤
+      return;
     }
+    onSaved(saved);
   } catch (cause) {
     errorMessage.value = messageOf(cause);
   } finally {
     saving.value = false;
   }
+}
+
+/**
+ * 草稿模式送出（見 spec §4.3）：預檢後回傳指派草稿（不落地）。
+ * v4 以 `query_status` 擋池內／排除／不在網段；v6 以網段清單比對；
+ * 同介面同網段同位址＝更新、不同位址＝擋下。
+ */
+async function submitDraft(text: string) {
+  const draft = props.draft;
+  const parsed = parseAddress(text);
+  if (draft === null || draft === undefined || parsed === null) {
+    return;
+  }
+
+  if (purpose.value === "reservation" && selectedMac.value === null) {
+    errorMessage.value = "所選介面無 MAC，不可設為保留";
+    return;
+  }
+
+  const purposeValue: IpPurpose = isV6.value ? "static" : purpose.value;
+  const hostnameValue =
+    !isV6.value && purposeValue === "reservation"
+      ? textOrNull(hostname.value)
+      : null;
+
+  saving.value = true;
+  try {
+    let subnetId: number | null = null;
+    let subnetLabel: string | null = null;
+
+    if (parsed.family === "ipv4") {
+      const status = await statusForAddress(text);
+      if (status === null) {
+        errorMessage.value = `無法查詢位址 ${text} 的狀態；請確認格式正確，或稍後再試`;
+        return;
+      }
+      switch (status.status) {
+        case "in_pool":
+          errorMessage.value = "此位址在 DHCP 位址池內，不可指派";
+          return;
+        case "excluded":
+          errorMessage.value = "此位址在排除範圍內，不可指派";
+          return;
+        case "out_of_subnet":
+          errorMessage.value = "此位址不在任何網段可指派的範圍內";
+          return;
+        default:
+          break;
+      }
+      subnetId = status.subnet_id;
+      subnetLabel = subnetDisplayLabel(status.subnet_name, status.subnet_cidr);
+    } else if (draft.subnets !== null) {
+      const resolved = resolveSubnetByAddress(draft.subnets, parsed);
+      if (resolved === null) {
+        errorMessage.value = `位址 ${text} 不在任何網段內`;
+        return;
+      }
+      subnetId = resolved.subnetId;
+      subnetLabel = resolved.subnetLabel;
+    }
+
+    const conflict = sameSubnetConflict(draft.existing, text, subnetId);
+    if (conflict !== null) {
+      errorMessage.value = `此介面在此網段已有位址 ${conflict}（同一介面同一網段至多一個位址）`;
+      return;
+    }
+
+    emit("draft", {
+      address: text,
+      purpose: purposeValue,
+      hostname: hostnameValue,
+      subnetId,
+      subnetLabel
+    });
+    open.value = false;
+  } finally {
+    saving.value = false;
+  }
+}
+
+/** 位址查詢狀態：已有同字串結果直接用，否則即時補查；失敗回 `null`。 */
+async function statusForAddress(text: string): Promise<IpQueryStatus | null> {
+  if (queryStatus.value !== null && queryStatusFor.value === text) {
+    return queryStatus.value;
+  }
+  try {
+    const result = await findIpCandidates(text);
+    return result.query_status;
+  } catch {
+    return null;
+  }
+}
+
+/** 同介面同網段的其他位址（同位址＝更新不算衝突）；無衝突回 `null`。 */
+function sameSubnetConflict(
+  existing: { address: string; subnetId: number | null }[],
+  addressText: string,
+  subnetId: number | null
+): string | null {
+  if (subnetId === null) {
+    return null;
+  }
+  for (const item of existing) {
+    if (item.subnetId !== subnetId || sameAddress(item.address, addressText)) {
+      continue;
+    }
+    return item.address;
+  }
+  return null;
 }
 
 function onSaved(saved: AssetAssignmentSaved) {
@@ -685,7 +849,11 @@ function assignmentPurposeLabel(purpose: IpPurpose): string {
 
 /** 重載該資產的已指派 IP，供取消後即時更新清單。 */
 async function refreshAssignments() {
-  const detail = await fetchAsset(props.asset.id);
+  const asset = props.asset;
+  if (asset === null || asset === undefined) {
+    return;
+  }
+  const detail = await fetchAsset(asset.id);
   assignments.value = detail.assignments;
 }
 
@@ -718,61 +886,6 @@ async function cancelAssignmentItem(item: AssetAssignment) {
   } finally {
     cancellingId.value = null;
   }
-}
-
-/** 後端「位址已指派給其他介面」提示所需欄位（見票 10、票 15）。 */
-interface AssignedElsewhere {
-  asset_property_no: string | null;
-  asset_description: string;
-  asset_location: string;
-  interface_name: string | null;
-  mac: string | null;
-}
-
-/** 解析 `address_assigned_elsewhere` 錯誤；非此原因回傳 `null`。 */
-function parseAssignedElsewhere(cause: unknown): AssignedElsewhere | null {
-  if (
-    !(cause instanceof ApiError) ||
-    cause.details?.reason !== "address_assigned_elsewhere"
-  ) {
-    return null;
-  }
-
-  const details = cause.details;
-  return {
-    asset_property_no: nullableTextOf(details.asset_property_no),
-    asset_description: textOf(details.asset_description, "未知資產"),
-    asset_location: textOf(details.asset_location, "未知位置"),
-    interface_name: nullableTextOf(details.interface_name),
-    mac: nullableTextOf(details.mac)
-  };
-}
-
-/** 移轉確認：顯示目前指派對象，確定後回傳 true。 */
-function confirmTransfer(
-  addressText: string,
-  target: AssignedElsewhere
-): Promise<boolean> {
-  const interfaceName = target.interface_name ?? "未命名";
-  const mac = target.mac ?? "無 MAC";
-  const assetText = assetLabel(
-    target.asset_property_no,
-    target.asset_description
-  );
-
-  return new Promise(resolve => {
-    $q.dialog({
-      title: "位址已指派",
-      message:
-        `位址 ${addressText} 目前已指派給「${assetText}（${target.asset_location}）」` +
-        `的介面「${interfaceName}（${mac}）」。確定要將此指派移轉到目前介面？`,
-      cancel: true,
-      persistent: true
-    })
-      .onOk(() => resolve(true))
-      .onCancel(() => resolve(false))
-      .onDismiss(() => resolve(false));
-  });
 }
 
 function addressRule(value: string | null) {
@@ -813,15 +926,6 @@ function normalizeMac(text: string): string | null {
 function textOrNull(value: string): string | null {
   const text = value.trim();
   return text === "" ? null : text;
-}
-
-/** 讀取 details 中的字串欄位；缺漏或空白改用 fallback。 */
-function textOf(value: unknown, fallback: string): string {
-  return typeof value === "string" && value !== "" ? value : fallback;
-}
-
-function nullableTextOf(value: unknown): string | null {
-  return typeof value === "string" && value !== "" ? value : null;
 }
 
 function messageOf(cause: unknown): string {
