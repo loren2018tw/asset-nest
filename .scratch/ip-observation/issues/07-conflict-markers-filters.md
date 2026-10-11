@@ -27,3 +27,7 @@
 - 兩個觀測碼定義在 `backend/src/conflicts.rs`（`OBSERVED_MAC_MISMATCH`／`OBSERVED_ON_UNASSIGNED`），`observed_codes` 僅供 IP 清單列合併；資產端如需比照勿重用 `detect`（語意不同）。
 - 資產 `last_seen` 聚合可重用 `observation::presence_map`（單網段）與 `interfaces::macs`（MAC→已知集合）；「介面 MAC 命中未指派位址」目前沒有現成跨網段查詢，需新查詢：`ip_presence` 以 `LOWER(last_seen_mac) IN (介面 MAC)` 或先取資產所有 MAC 再彙總 `MAX(last_seen_at)`；「已知 MAC 連資產」可重用 `observation::assets_for_macs`（現為私有，需提升可見度或走 `/api/v1/observations/mac/{mac}`）。
 - `IpEntry.conflicts` 順序保證為既有指派碼在前、觀測碼在後；`sort=last_seen` NULL-last 語意不變。
+
+後續票 09 備註：
+
+- 篩選「有未登錄 MAC」（`unknown_mac`）已移除，改為「觀測 MAC 不符」（`observed_mac_mismatch`）＝ `ObservedMacMismatch` 徽章集合；`ObservationView.known_macs` 與 `interfaces::macs` 一併移除（見 09 與 spec §讀取端），上述票 08 備註中對 `interfaces::macs` 的引用已失效。

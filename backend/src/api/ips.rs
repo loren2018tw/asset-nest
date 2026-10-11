@@ -5,7 +5,6 @@
 //! 衝突標記（票 07）由 `GET` 列徽章與儲存回應的 `warnings` 呈現（見 ADR-0006）。
 //! 受管網段的保留指派／取消會即時推送 Kea，回應附 `kea_sync`（見 ADR-0011）。
 
-use std::collections::HashSet;
 use std::net::IpAddr;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -20,7 +19,7 @@ use crate::AppState;
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment, AssignmentInput, RegisterInput};
 use crate::conflicts;
-use crate::interfaces::{self, Warning};
+use crate::interfaces::Warning;
 use crate::ips::{
     self, IpEntry, IpFilter, IpObservedFilter, IpSortDir, IpSortField, IpStatusFilter,
 };
@@ -49,7 +48,8 @@ pub fn router() -> Router<AppState> {
 struct ListQuery {
     q: Option<String>,
     status: Option<String>,
-    /// 觀測篩選白名單（`unassigned_seen`／`unknown_mac`）；無效值回 400（見票 07）。
+    /// 觀測篩選白名單（`unassigned_seen`／`observed_mac_mismatch`）；
+    /// 無效值回 400（見票 07、票 09）。
     observed: Option<String>,
     /// 排序欄位白名單（`address`／`status`／`location`／`assignment`／`last_seen`）；
     /// 無效值回 400（見票 14、票 02）。
@@ -152,7 +152,8 @@ async fn list_subnet_ips(
         .filter(|s| !s.is_empty())
     {
         Some(value) => Some(IpObservedFilter::parse(value).ok_or_else(|| {
-            ApiError::validation("觀測篩選須為 unassigned_seen 或 unknown_mac").field("observed")
+            ApiError::validation("觀測篩選須為 unassigned_seen 或 observed_mac_mismatch")
+                .field("observed")
         })?),
         None => None,
     };
@@ -205,21 +206,12 @@ async fn list_subnet_ips(
     // 觀測現況批次讀取（單一查詢、無 N+1）；有效涵蓋＝v4 且該網段有
     // 在線代理（見票 08、spec §讀取端）。
     let presence = observation::presence_map(&state.db, id).await?;
-    // `unknown_mac` 需要全系統已登錄 MAC 集合；其他查詢不需多讀（見票 07）。
-    let known_macs = if observed_filter == Some(IpObservedFilter::UnknownMac) {
-        interfaces::macs(&state.db)
-            .await
-            .map_err(|error| ApiError::internal("讀取介面 MAC 失敗", error))?
-    } else {
-        HashSet::new()
-    };
     let observed_coverage =
         observation::effective_coverage(&state.db, &subnet, Utc::now(), state.agent_stale_secs)
             .await?;
     let view = ObservationView {
         observed: observed_coverage,
         presence,
-        known_macs,
     };
 
     // v4 枚舉全部 host；v6 僅列出已登錄（有指派）位址（見票 06）。

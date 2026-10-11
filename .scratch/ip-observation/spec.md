@@ -21,7 +21,7 @@
 
 - IP 清單與資產清單多一欄「最後可見」（N 天前／從未上線／未觀測，可排序），用來判斷哪些位址疑似可回收。
 - IP 詳情的觀測歷史時間軸，以及可切換的 MAC 視角（這個 MAC 用過哪些位址）；未知 MAC 標示「未登錄」。
-- 篩選「非法佔用 IP」「有未登錄 MAC」，與兩個新衝突標記（`ObservedMacMismatch`、`ObservedOnUnassigned`）。
+- 篩選「非法佔用 IP」「觀測 MAC 不符」，與兩個新衝突標記（`ObservedMacMismatch`、`ObservedOnUnassigned`）。
 - 每個網段可開關觀測、開關探索掃描並設定間隔；可手動「立即掃描」。
 - 刪除資產／取消指派的確認框顯示最後可見資訊，避免誤刪。
 
@@ -60,7 +60,7 @@
 **衝突與篩選**
 
 22. 作為管理者，我想在 IP 清單篩選「非法佔用 IP」，以便找出被佔用的非指派位址。
-23. 作為管理者，我想在 IP 清單篩選「有未登錄 MAC」，以便找出不在資產庫的設備。
+23. 作為管理者，我想在 IP 清單篩選「觀測 MAC 不符」，以便找出被非宣告 MAC 使用的指派位址。
 24. 作為管理者，我想在已指派位址看到 `ObservedMacMismatch` 標記（宣告 MAC 與觀測不符），以便發現換了網卡或佔用情形。
 25. 作為管理者，我想在未指派且非池內位址看到 `ObservedOnUnassigned` 標記（UI 顯示「非法佔用 IP」），以便察覺異常。
 26. 作為管理者，我不希望池內位址被 DHCP 正常使用時被標成衝突。
@@ -128,9 +128,9 @@
 - 「未觀測」＝該網段 `observed=0` 或本機非同 L2（`is_local=false`）；v6 恆為未觀測。
 - IP 詳情／清單新增：`last_seen_at`、`last_seen_mac`、`last_seen_source`、`last_checked_at`（清單僅需要者）、`observed`（有效涵蓋）。
 - IP 清單排序白名單新增 `last_seen`（NULL――含未指派與從未上線――固定排最後，不分升降冪）。
-- IP 清單篩選新增 `observed=unassigned_seen|unknown_mac`：
+- IP 清單篩選新增 `observed=unassigned_seen|observed_mac_mismatch`（見票 09）：
   - `unassigned_seen`：無指派且非池內、但 `last_seen_mac` 非空。
-  - `unknown_mac`：`last_seen_mac` 不在任何 Interface 的 MAC 集合（不分大小寫）。
+  - `observed_mac_mismatch`：等於 `ObservedMacMismatch` 標記的列集合（已指派位址、宣告介面有 MAC、且 `last_seen_mac` 與其不同，不分大小寫）。
 - 衝突即時計算（沿用 `conflicts` 慣例），`conflicts` 陣列新增：
   - `ObservedMacMismatch`：已指派位址、宣告介面有 MAC、且 `last_seen_mac` 與其不同。
   - `ObservedOnUnassigned`：同 `unassigned_seen` 條件。

@@ -5,7 +5,7 @@
 //! （見 ADR-0018）；後端只保留 Kea 租約觀測（[`record_lease_observations`]）、
 //! 代理入庫共用的寫入原語與事件保留清理。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use chrono::{DateTime, Utc};
@@ -155,16 +155,13 @@ struct PresenceRow {
     last_checked_at: Option<String>,
 }
 
-/// IP 清單的觀測視圖：有效涵蓋＋各列現況（以位址文字索引）＋已登錄 MAC 集合。
+/// IP 清單的觀測視圖：有效涵蓋＋各列現況（以位址文字索引）。
 ///
 /// 有效涵蓋＝v4 且該網段有在線代理（見 [`effective_coverage`]）；v6 恆 false。
-/// `known_macs` 為全系統 Interface MAC（小寫；見 [`crate::interfaces::macs`]），
-/// 供 `unknown_mac` 篩選；不以該篩選查詢時可留空集合。
 #[derive(Debug, Default)]
 pub struct ObservationView {
     pub observed: bool,
     pub presence: HashMap<String, Presence>,
-    pub known_macs: HashSet<String>,
 }
 
 /// 資料庫時間格式：`YYYY-MM-DDTHH:MM:SSZ`（UTC；見 spec §資料庫）。

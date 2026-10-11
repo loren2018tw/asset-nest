@@ -124,7 +124,8 @@ pub fn by_address(
 
 /// 偵測某網段位址的觀測衍生衝突，以位址文字索引（即時計算、不落地；見票 07）。
 ///
-/// 僅供 [`crate::ips::list`] 的列標記合併使用；[`detect`]（網段衝突數）與
+/// 供 [`crate::ips::list`] 的列標記合併與「觀測 MAC 不符」篩選
+/// （`observed_mac_mismatch`；見票 09）比對使用；[`detect`]（網段衝突數）與
 /// [`warnings_for`]（指派儲存警示）不含觀測碼，語意分別維持不變。
 ///
 /// 規則（`presence` 以位址文字索引）：

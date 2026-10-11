@@ -4,10 +4,10 @@
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.4、§4.3、§7。
 //! v4 位址由 Subnet 範圍伺服器端推導；v6 採登錄制，僅列出已指派（登錄）位址，
 //! 不枚舉空閒位址。指派為票 05、v6 登錄制為票 06、衝突標記為票 07
-//! （偵測集中於 [`crate::conflicts`]）；標頭排序為票 14。
+//! （偵測集中於 [`crate::conflicts`]）；觀測篩選語意修訂為票 09；標頭排序為票 14。
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net};
@@ -193,13 +193,15 @@ impl IpStatusFilter {
     }
 }
 
-/// 觀測篩選值（見 spec §讀取端、票 07）；未知值由 API 層回 400。
+/// 觀測篩選值（見 spec §讀取端、票 07；`observed_mac_mismatch` 修訂見票 09）；
+/// 未知值由 API 層回 400。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpObservedFilter {
     /// 無指派、非池內，但有 `last_seen_mac`（UI 顯示「非法佔用 IP」）。
     UnassignedSeen,
-    /// `last_seen_mac` 非空且不在任何 Interface 的 MAC 集合（不分大小寫）。
-    UnknownMac,
+    /// 指派位址被觀測到由非宣告 MAC 使用，即「觀測 MAC 不符」徽章
+    /// （`ObservedMacMismatch`）的列集合（不分大小寫）。
+    ObservedMacMismatch,
 }
 
 impl IpObservedFilter {
@@ -207,7 +209,7 @@ impl IpObservedFilter {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "unassigned_seen" => Some(Self::UnassignedSeen),
-            "unknown_mac" => Some(Self::UnknownMac),
+            "observed_mac_mismatch" => Some(Self::ObservedMacMismatch),
             _ => None,
         }
     }
@@ -311,7 +313,6 @@ fn list_v4(
         assignments: &by_address,
         conflicts: &conflicts,
         presence: &observation.presence,
-        known_macs: &observation.known_macs,
         observed: observation.observed,
         observed_filter: filter.observed,
     };
@@ -446,9 +447,11 @@ fn push_sort_key_v4(
 
 /// v4 位址是否符合狀態／關鍵字／觀測篩選；供串流掃描與排序路徑共用。
 ///
-/// 觀測篩選規則（見票 07、ADR-0014）：
+/// 觀測篩選規則（見票 07、票 09、ADR-0014）：
 /// - `unassigned_seen`：無指派、非池內、非排除範圍，且現況 `last_seen_mac` 非空。
-/// - `unknown_mac`：現況 `last_seen_mac` 非空且不在已登錄 MAC 集合（不分大小寫）。
+/// - `observed_mac_mismatch`：命中「觀測 MAC 不符」徽章（`ObservedMacMismatch`）
+///   的列，以 [`merged_conflicts`] 的合併衝突碼比對——篩選結果與畫面徽章
+///   保證一致（已指派、宣告介面 MAC 非空、且觀測 MAC 與宣告不同、不分大小寫）。
 fn matches_v4_filters(
     context: &V4Context,
     address: Ipv4Addr,
@@ -468,12 +471,12 @@ fn matches_v4_filters(
         }
     }
     if let Some(observed) = context.observed_filter {
-        let seen_mac = context
-            .presence
-            .get(address_text)
-            .and_then(|presence| presence.last_seen_mac.as_deref());
         let matched = match observed {
             IpObservedFilter::UnassignedSeen => {
+                let seen_mac = context
+                    .presence
+                    .get(address_text)
+                    .and_then(|presence| presence.last_seen_mac.as_deref());
                 assignment.is_none()
                     && !context.pools.iter().any(|pool| pool.contains(address))
                     && !context
@@ -482,10 +485,10 @@ fn matches_v4_filters(
                         .any(|exclusion| exclusion.contains(address))
                     && seen_mac.is_some()
             }
-            IpObservedFilter::UnknownMac => seen_mac.is_some_and(|mac| {
-                let normalized = mac.to_ascii_lowercase();
-                !context.known_macs.contains(normalized.as_str())
-            }),
+            IpObservedFilter::ObservedMacMismatch => context
+                .conflicts
+                .get(address_text)
+                .is_some_and(|codes| codes.contains(&conflicts::OBSERVED_MAC_MISMATCH)),
         };
         if !matched {
             return false;
@@ -494,8 +497,7 @@ fn matches_v4_filters(
     true
 }
 
-/// v4 清單的共用輸入：指派索引、衝突、觀測現況、已登錄 MAC 與觀測篩選
-/// （見票 02、票 07）。
+/// v4 清單的共用輸入：指派索引、衝突、觀測現況與觀測篩選（見票 02、票 07）。
 struct V4Context<'a> {
     pools: &'a [PoolRange],
     /// 排除範圍（見 ADR-0020）；v4 來源為 Subnet 載入值。
@@ -503,8 +505,6 @@ struct V4Context<'a> {
     assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
     conflicts: &'a HashMap<String, Vec<&'static str>>,
     presence: &'a HashMap<String, Presence>,
-    /// 全系統 Interface MAC（小寫）；`unknown_mac` 篩選用。
-    known_macs: &'a HashSet<String>,
     observed: bool,
     observed_filter: Option<IpObservedFilter>,
 }
@@ -2178,11 +2178,8 @@ mod tests {
         assert_eq!(addresses(&items), ["fd00::10", "fd00::1", "fd00::2"]);
     }
 
-    /// 建立測試用觀測視圖：現況（位址、MAC、最後可見時間）＋已登錄 MAC。
-    fn observation(
-        presence: &[(&str, Option<&str>, Option<&str>)],
-        known_macs: &[&str],
-    ) -> ObservationView {
+    /// 建立測試用觀測視圖：現況（位址、MAC、最後可見時間）。
+    fn observation(presence: &[(&str, Option<&str>, Option<&str>)]) -> ObservationView {
         ObservationView {
             observed: true,
             presence: presence
@@ -2199,7 +2196,6 @@ mod tests {
                     )
                 })
                 .collect(),
-            known_macs: known_macs.iter().map(|mac| mac.to_string()).collect(),
         }
     }
 
@@ -2210,9 +2206,10 @@ mod tests {
             Some(IpObservedFilter::UnassignedSeen)
         );
         assert_eq!(
-            IpObservedFilter::parse("unknown_mac"),
-            Some(IpObservedFilter::UnknownMac)
+            IpObservedFilter::parse("observed_mac_mismatch"),
+            Some(IpObservedFilter::ObservedMacMismatch)
         );
+        assert_eq!(IpObservedFilter::parse("unknown_mac"), None);
         assert_eq!(IpObservedFilter::parse("seen"), None);
     }
 
@@ -2227,22 +2224,19 @@ mod tests {
             Some("eth0"),
             Some("aa:bb:cc:dd:ee:01"),
         )];
-        let view = observation(
-            &[
-                (
-                    "10.0.0.5",
-                    Some("aa:bb:cc:dd:ee:99"),
-                    Some("2026-10-06T10:00:00Z"),
-                ),
-                (
-                    "10.0.0.3",
-                    Some("AA:BB:CC:DD:EE:03"),
-                    Some("2026-10-06T10:00:00Z"),
-                ),
-                ("10.0.0.4", None, None),
-            ],
-            &["aa:bb:cc:dd:ee:03"],
-        );
+        let view = observation(&[
+            (
+                "10.0.0.5",
+                Some("aa:bb:cc:dd:ee:99"),
+                Some("2026-10-06T10:00:00Z"),
+            ),
+            (
+                "10.0.0.3",
+                Some("AA:BB:CC:DD:EE:03"),
+                Some("2026-10-06T10:00:00Z"),
+            ),
+            ("10.0.0.4", None, None),
+        ]);
 
         let (items, total) =
             list(&subnet, &filter(None, 1, 50), &assignments, &view).expect("推導成功");
@@ -2273,10 +2267,10 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.3"]);
 
-        // unknown_mac：.5 的 MAC 未登錄；.3 的 MAC 已登錄（大小寫不同仍視為已知）→ 僅 .5。
-        let mut unknown = sort_filter(IpSortField::Address, IpSortDir::Desc);
-        unknown.observed = Some(IpObservedFilter::UnknownMac);
-        let (items, total) = list(&subnet, &unknown, &assignments, &view).expect("推導成功");
+        // observed_mac_mismatch：.5 宣告與觀測不符 → 命中；.3 未指派 → 排除。
+        let mut mismatch = sort_filter(IpSortField::Address, IpSortDir::Desc);
+        mismatch.observed = Some(IpObservedFilter::ObservedMacMismatch);
+        let (items, total) = list(&subnet, &mismatch, &assignments, &view).expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.5"]);
     }
@@ -2285,26 +2279,23 @@ mod tests {
     fn unassigned_seen_ignores_exclusion_addresses() {
         // /29、排除範圍 .4–.5；.3 可用有現況、.4／.5 排除有現況（見 ADR-0020）
         let subnet = subnet_with_exclusions("10.0.0.0/29", None, &[], &[("10.0.0.4", "10.0.0.5")]);
-        let view = observation(
-            &[
-                (
-                    "10.0.0.3",
-                    Some("aa:bb:cc:dd:ee:03"),
-                    Some("2026-10-06T10:00:00Z"),
-                ),
-                (
-                    "10.0.0.4",
-                    Some("aa:bb:cc:dd:ee:04"),
-                    Some("2026-10-06T10:00:00Z"),
-                ),
-                (
-                    "10.0.0.5",
-                    Some("aa:bb:cc:dd:ee:05"),
-                    Some("2026-10-06T10:00:00Z"),
-                ),
-            ],
-            &[],
-        );
+        let view = observation(&[
+            (
+                "10.0.0.3",
+                Some("aa:bb:cc:dd:ee:03"),
+                Some("2026-10-06T10:00:00Z"),
+            ),
+            (
+                "10.0.0.4",
+                Some("aa:bb:cc:dd:ee:04"),
+                Some("2026-10-06T10:00:00Z"),
+            ),
+            (
+                "10.0.0.5",
+                Some("aa:bb:cc:dd:ee:05"),
+                Some("2026-10-06T10:00:00Z"),
+            ),
+        ]);
 
         // 列標記：排除範圍內不標 ObservedOnUnassigned。
         let (items, _) = list(&subnet, &filter(None, 1, 50), &[], &view).expect("推導成功");
