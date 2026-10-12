@@ -365,7 +365,19 @@
           </div>
         </q-card-section>
 
-        <q-card-actions align="right">
+        <q-card-actions class="q-pa-md">
+          <!-- 報廢（僅編輯模式；出借中停用＋tooltip；見 spec §5） -->
+          <span v-if="asset !== null">
+            <q-btn
+              flat
+              color="negative"
+              label="報廢"
+              :disable="isLentAsset"
+              @click="openDisposal"
+            />
+            <q-tooltip v-if="isLentAsset">出借中，請先歸還</q-tooltip>
+          </span>
+          <q-space />
           <q-btn flat label="取消" :disable="saving" @click="requestCancel" />
           <q-btn color="primary" type="submit" label="儲存" :loading="saving" />
         </q-card-actions>
@@ -418,6 +430,59 @@
     </q-card>
   </q-dialog>
 
+  <!-- 報廢：影響摘要、報廢日期與後果提示（見 spec §5） -->
+  <q-dialog v-model="disposalOpen" persistent>
+    <q-card style="width: 480px; max-width: 95vw">
+      <q-card-section>
+        <div class="text-h6">報廢資產</div>
+        <div class="text-body2 q-mt-sm">
+          將刪除 {{ disposalImpact.interfaceCount }} 個介面、{{
+            disposalImpact.assignmentCount
+          }}
+          筆指派（含 {{ disposalImpact.reservationCount }} 筆保留）。
+        </div>
+        <div class="text-body2 q-mt-xs">
+          最後可見：{{ disposalImpact.lastSeen }}；介面 MAC：{{
+            disposalImpact.macLabel
+          }}。
+        </div>
+        <div class="text-body2 q-mt-sm">
+          報廢後可於「報廢資產」頁復原；介面與 IP
+          指派不會回復。對話框中未儲存的變更將被捨棄。
+        </div>
+      </q-card-section>
+
+      <q-card-section class="q-pt-none">
+        <q-input
+          v-model="disposalDate"
+          type="date"
+          outlined
+          dense
+          label="報廢日期"
+          :max="today"
+          :rules="[requiredRule('報廢日期')]"
+          lazy-rules
+        />
+      </q-card-section>
+
+      <q-card-actions align="right">
+        <q-btn
+          flat
+          label="取消"
+          :disable="disposing"
+          @click="disposalOpen = false"
+        />
+        <q-btn
+          flat
+          color="negative"
+          label="確認報廢"
+          :loading="disposing"
+          @click="confirmDispose"
+        />
+      </q-card-actions>
+    </q-card>
+  </q-dialog>
+
   <!-- 介面 MAC 觀測歷史：以 MAC 進入（見票 06、票 08） -->
   <observation-history-dialog
     v-model="macHistoryOpen"
@@ -442,6 +507,7 @@ import {
   type AssetInput
 } from "@/api/assets";
 import type { AssetAssignmentSaved } from "@/api/assignments";
+import { disposeAsset } from "@/api/disposedAssets";
 import {
   createInterface,
   deleteInterface,
@@ -450,6 +516,7 @@ import {
   type InterfaceInput
 } from "@/api/interfaces";
 import { cancelAssignment, type IpPurpose } from "@/api/ips";
+import type { LendingBrief } from "@/api/lendings";
 import { listSubnets, type SubnetSummary } from "@/api/subnets";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
@@ -462,12 +529,13 @@ import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
 import { assetLabel } from "@/utils/assetLabel";
 import { parseAddress } from "@/utils/cidr";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { localDateString } from "@/utils/localDate";
 import { relativeTime } from "@/utils/relativeTime";
 
 const props = defineProps<{
   modelValue: boolean;
-  /** `null`＝新增；否則為編輯中的資產。 */
-  asset: Asset | null;
+  /** `null`＝新增；否則為編輯中的資產（資產清單列可能帶出借摘要，供停用報廢；見 spec §5）。 */
+  asset: (Asset & { lending?: LendingBrief | null }) | null;
   /** 新增模式的預填描述（如由 Kea 租約進入）；未提供為空字串。 */
   prefillDescription?: string;
   /** 新增模式的預填介面（如由 Kea 租約進入）；未提供不建立介面草稿。 */
@@ -574,6 +642,12 @@ let assignmentDraftKey = 0;
 /** 取消新增時「已建立資產」的處置對話框（見 spec §5.3）。 */
 const cancelConfirmOpen = ref(false);
 const deletingAsset = ref(false);
+/** 報廢子對話框（見 spec §5）：開關、報廢日期與送出狀態。 */
+const disposalOpen = ref(false);
+const disposalDate = ref(localDateString());
+const disposing = ref(false);
+/** 報廢日期上限：本地時區今天（開啟子對話框時更新）。 */
+const today = ref(localDateString());
 
 /** QMenu 的定位目標；template ref 於掛載後才有值。 */
 const locationTarget = computed(() => locationField.value ?? undefined);
@@ -598,6 +672,29 @@ const locationSuggestions = computed(() => {
       candidate !== needle && (needle === "" || candidate.includes(needle))
     );
   });
+});
+
+/** 編輯中的資產是否出借中（`lending` 有值）；出借中不可報廢（見 spec §2 不變量、§5）。 */
+const isLentAsset = computed(() => {
+  const lending = props.asset?.lending;
+  return lending !== null && lending !== undefined;
+});
+
+/** 報廢子對話框的影響摘要（比照 `AssetsPage.confirmDeleteWithImpact`；見 spec §5）。 */
+const disposalImpact = computed(() => {
+  const reservationCount = assignments.value.filter(
+    item => item.purpose === "reservation"
+  ).length;
+  const macs = originalInterfaces.value
+    .map(item => item.mac)
+    .filter((mac): mac is string => mac !== null && mac !== "");
+  return {
+    interfaceCount: originalInterfaces.value.length,
+    assignmentCount: assignments.value.length,
+    reservationCount,
+    lastSeen: lastSeenAt.value === null ? "—" : relativeTime(lastSeenAt.value),
+    macLabel: macs.length > 0 ? macs.join("、") : "—"
+  };
 });
 
 watch(
@@ -655,6 +752,9 @@ function prepare() {
   assignInterface.value = null;
   cancelConfirmOpen.value = false;
   deletingAsset.value = false;
+  disposalOpen.value = false;
+  disposalDate.value = localDateString();
+  disposing.value = false;
   void loadLocations();
   void loadTags();
   void loadSubnets();
@@ -1318,6 +1418,42 @@ async function deleteCreatedAsset() {
     cancelConfirmOpen.value = false;
   } finally {
     deletingAsset.value = false;
+  }
+}
+
+/** 開啟報廢子對話框：報廢日期預設今天（本地時區；見 spec §5）。 */
+function openDisposal() {
+  today.value = localDateString();
+  disposalDate.value = today.value;
+  disposalOpen.value = true;
+}
+
+/** 確認報廢：成功關閉子對話框與主對話框、通知外層；失敗留在對話框。
+ *  Kea 推送失敗（`kea_sync` 任一 `failed`）另以 warning 提示一次（見 spec §5）。 */
+async function confirmDispose() {
+  const asset = props.asset;
+  if (asset === null) {
+    return;
+  }
+
+  disposing.value = true;
+  try {
+    const result = await disposeAsset(asset.id, {
+      disposal_date: disposalDate.value
+    });
+    // 多筆失敗僅提示一次（訊息比照 utils/keaSync.ts）
+    notifyKeaSync(
+      $q,
+      result.kea_sync.find(sync => sync.status === "failed")
+    );
+    $q.notify({ type: "positive", message: "已報廢資產" });
+    disposalOpen.value = false;
+    open.value = false;
+    emit("saved");
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+  } finally {
+    disposing.value = false;
   }
 }
 </script>

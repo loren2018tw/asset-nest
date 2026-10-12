@@ -9,6 +9,7 @@ pub mod auth;
 pub mod config;
 pub mod conflicts;
 pub mod db;
+pub mod disposed_assets;
 pub mod import;
 pub mod interfaces;
 pub mod inventory_audit;

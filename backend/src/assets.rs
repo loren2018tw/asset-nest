@@ -769,8 +769,9 @@ const EXPIRED_EXPR: &str = "CASE \
      END) < date('now', 'localtime') THEN 1 ELSE 0 END \
  END";
 
-/// 轉義 `LIKE` 的萬用字元，讓使用者輸入的 `%`、`_` 被視為字面字元。
-fn escape_like(input: &str) -> String {
+/// 轉義 `LIKE` 的萬用字元，讓使用者輸入的 `%`、`_` 被視為字面字元
+/// （供資產與報廢清單搜尋共用）。
+pub(crate) fn escape_like(input: &str) -> String {
     input
         .replace('\\', "\\\\")
         .replace('%', "\\%")

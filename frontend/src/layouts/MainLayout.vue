@@ -68,6 +68,12 @@
           </q-item-section>
           <q-item-section> 資產借還 </q-item-section>
         </q-item>
+        <q-item clickable to="/disposed-assets" :active="disposedAssetsActive">
+          <q-item-section avatar>
+            <q-icon name="archive" />
+          </q-item-section>
+          <q-item-section> 報廢資產 </q-item-section>
+        </q-item>
         <q-item clickable to="/inventory-audit" :active="inventoryAuditActive">
           <q-item-section avatar>
             <q-icon name="fact_check" />
@@ -217,6 +223,11 @@ const outOfSubnetActive = computed(() =>
 
 /** 資產借還（/lendings）：資產管理區段、資產清單之下（見 asset-lending 票 04）。 */
 const lendingsActive = computed(() => route.path.startsWith("/lendings"));
+
+/** 報廢資產（/disposed-assets）：資產管理區段、資產借還之下（見 asset-disposal 票 04）。 */
+const disposedAssetsActive = computed(() =>
+  route.path.startsWith("/disposed-assets")
+);
 
 /** 清冊稽核（/inventory-audit）：資產管理區段（見清冊稽核 spec §6）。 */
 const inventoryAuditActive = computed(() =>

@@ -9,6 +9,10 @@ const routes: RouteRecordRaw[] = [
       { path: "assets", component: () => import("@/pages/AssetsPage.vue") },
       { path: "lendings", component: () => import("@/pages/LendingsPage.vue") },
       {
+        path: "disposed-assets",
+        component: () => import("@/pages/DisposedAssetsPage.vue")
+      },
+      {
         path: "inventory-audit",
         component: () => import("@/pages/InventoryAuditPage.vue")
       },

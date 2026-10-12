@@ -230,6 +230,7 @@ import {
   type AssetSortField
 } from "@/api/assets";
 import { saveBlob } from "@/api/client";
+import type { LendingBrief } from "@/api/lendings";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssetImportDialog from "@/components/AssetImportDialog.vue";
@@ -351,7 +352,9 @@ const columns: QTableProps["columns"] = [
 ];
 
 const dialogOpen = ref(false);
-const editing = ref<Asset | null>(null);
+/** 編輯中的資產：資產清單列帶出借摘要，供對話框停用報廢（見 asset-disposal spec §5）。 */
+type EditingAsset = Asset & { lending?: LendingBrief | null };
+const editing = ref<EditingAsset | null>(null);
 
 const importOpen = ref(false);
 const exporting = ref(false);
@@ -509,7 +512,7 @@ function openCreate() {
   dialogOpen.value = true;
 }
 
-function openEdit(asset: Asset) {
+function openEdit(asset: EditingAsset) {
   editing.value = asset;
   dialogOpen.value = true;
 }

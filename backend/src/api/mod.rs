@@ -11,6 +11,7 @@ mod agents;
 mod asset_assignments;
 mod assets;
 mod auth;
+mod disposed_assets;
 mod error;
 mod import;
 mod interfaces;
@@ -60,6 +61,7 @@ mod v1 {
             .merge(super::asset_assignments::router())
             .merge(super::assets::router())
             .merge(super::auth::router())
+            .merge(super::disposed_assets::router())
             .merge(super::import::router())
             .merge(super::interfaces::router())
             .merge(super::inventory_audit::router())
