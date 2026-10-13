@@ -1,6 +1,8 @@
-//! `/api/v1` 觀測歷史路由（見票 06、spec §HTTP API）。
+//! `/api/v1` 觀測路由（見票 06、spec §HTTP API；清除端點見
+//! `.scratch/clear-observations`）。
 //!
-//! 唯讀端點：IP 歷史、MAC 歷史、單一 IP 歷史 CSV 匯出與網段外觀測清單；
+//! 讀取端點：IP 歷史、MAC 歷史、單一 IP 歷史 CSV 匯出與網段外觀測清單；
+//! 另提供 `DELETE /observations` 清除全部觀測紀錄（現況＋事件）。
 //! 宣告資料完全不變（見 ADR-0014）。彙總規則見 [`crate::observation`]。
 
 use std::net::IpAddr;
@@ -10,13 +12,15 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use chrono::{Local, Utc};
 
 use crate::AppState;
 use crate::api::{ApiError, encode_filename};
-use crate::observation::{self, IpHistory, MacHistory, OutOfSubnetList, normalize_mac};
+use crate::observation::{
+    self, ClearCounts, IpHistory, MacHistory, OutOfSubnetList, normalize_mac,
+};
 use crate::subnets::{self, Subnet};
 
 pub fn router() -> Router<AppState> {
@@ -34,6 +38,7 @@ pub fn router() -> Router<AppState> {
             "/observations/out-of-subnet",
             get(get_out_of_subnet_observations),
         )
+        .route("/observations", delete(clear_observations))
 }
 
 /// 讀取網段內某位址的觀測歷史：現況＋事件（新到舊）＋用過的 MAC。
@@ -118,6 +123,21 @@ async fn get_out_of_subnet_observations(
 ) -> Result<Json<OutOfSubnetList>, ApiError> {
     let list = observation::out_of_subnet_observations(&state.db).await?;
     Ok(Json(list))
+}
+
+/// 清除全部觀測紀錄（`DELETE /api/v1/observations`；見 `.scratch/clear-observations`）。
+///
+/// 單一交易刪除 `ip_presence`（含網段外觀測列）與 `observation_event`，回
+/// 刪除筆數；宣告、代理登錄與被拒回報不受影響；重複呼叫冪等（回零筆）。
+/// 非白名單端點，需登入 session（由認證中介層把關）。
+async fn clear_observations(State(state): State<AppState>) -> Result<Json<ClearCounts>, ApiError> {
+    let counts = observation::clear_observations(&state.db).await?;
+    tracing::info!(
+        presence_deleted = counts.presence_deleted,
+        events_deleted = counts.events_deleted,
+        "清除觀測紀錄完成"
+    );
+    Ok(Json(counts))
 }
 
 /// 讀取網段；不存在回 404（歷史端點的共同前提）。

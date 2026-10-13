@@ -671,6 +671,50 @@ pub async fn cleanup_events(
     Ok(result.rows_affected())
 }
 
+/// 清除觀測紀錄的刪除筆數（`DELETE /api/v1/observations`；見
+/// `.scratch/clear-observations` spec）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ClearCounts {
+    /// 刪除的 `ip_presence` 列數（含網段外觀測列）。
+    pub presence_deleted: u64,
+    /// 刪除的 `observation_event` 列數。
+    pub events_deleted: u64,
+}
+
+/// 清除觀測紀錄：單一交易刪除全部觀測現況（含網段外列）與變化事件，
+/// 回傳刪除筆數。
+///
+/// - 全站一次清除、冪等（重複呼叫回零筆）。
+/// - 只動觀測層：宣告（指派／保留）、`agent` 與 `agent_auth_failure`
+///   完全不變（見 ADR-0014）。
+/// - 不做 `VACUUM`：SQLite 頁面重用，資料庫檔案不隨之縮小。
+pub async fn clear_observations(pool: &SqlitePool) -> Result<ClearCounts, ApiError> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::internal("建立清除觀測紀錄交易失敗", error))?;
+
+    let events = sqlx::query("DELETE FROM observation_event")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ApiError::internal("清除觀測事件失敗", error))?;
+
+    let presence = sqlx::query("DELETE FROM ip_presence")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ApiError::internal("清除觀測現況失敗", error))?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ApiError::internal("提交清除觀測紀錄交易失敗", error))?;
+
+    Ok(ClearCounts {
+        presence_deleted: presence.rows_affected(),
+        events_deleted: events.rows_affected(),
+    })
+}
+
 /// 一筆目前有效租約的觀測訊號（見 [`lease_signals`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LeaseSignal {

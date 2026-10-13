@@ -236,14 +236,24 @@
       <div class="col-12">
         <q-card flat bordered>
           <q-card-section>
-            <div class="row items-baseline">
-              <div class="text-subtitle1 q-mb-sm">觀測代理</div>
-              <div
-                v-if="agents"
-                class="text-caption text-grey-7 q-ml-sm q-mb-sm"
-              >
+            <div class="row items-center q-mb-sm">
+              <div class="text-subtitle1">觀測代理</div>
+              <div v-if="agents" class="text-caption text-grey-7 q-ml-sm">
                 在線門檻：{{ humanizeDuration(staleSecs) }}內有回報
               </div>
+              <q-space />
+              <q-btn
+                color="negative"
+                outline
+                icon="delete_sweep"
+                label="清除觀測紀錄"
+                :loading="clearing"
+                @click="confirmClearObservations"
+              >
+                <q-tooltip>
+                  刪除全部觀測現況與事件；宣告（指派／保留）不受影響
+                </q-tooltip>
+              </q-btn>
             </div>
             <q-table
               v-if="agents"
@@ -402,6 +412,7 @@
 
 <script setup lang="ts">
 import type { QTableProps } from "quasar";
+import { useQuasar } from "quasar";
 import { computed, onMounted, ref } from "vue";
 
 import {
@@ -412,7 +423,10 @@ import {
 } from "@/api/agents";
 import { fetchHealth, type HealthResponse } from "@/api/health";
 import { getKeaStatus, type KeaStatus } from "@/api/kea";
+import { clearObservations } from "@/api/observations";
 import { relativeTime } from "@/utils/relativeTime";
+
+const $q = useQuasar();
 
 const status = ref<KeaStatus | null>(null);
 const health = ref<HealthResponse | null>(null);
@@ -426,6 +440,8 @@ const agents = ref<Agent[] | null>(null);
 const agentsError = ref("");
 /** 後端在線門檻秒數（`AGENT_STALE_SECS`）。 */
 const staleSecs = ref(0);
+/** 清除觀測紀錄進行中（按鈕 loading）。 */
+const clearing = ref(false);
 /** 被拒回報（null＝尚未成功載入）。 */
 const authFailures = ref<AgentAuthFailure[] | null>(null);
 const authFailuresError = ref("");
@@ -606,6 +622,38 @@ async function load() {
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** 清除觀測紀錄：負向操作，先二次確認再送出（見 `.scratch/clear-observations`）。 */
+function confirmClearObservations() {
+  $q.dialog({
+    title: "清除觀測紀錄",
+    message:
+      "將刪除全部觀測現況與事件（含網段外觀測），此動作無法復原。" +
+      "指派與保留等宣告資料不受影響；在線代理會在下一輪回報後重新累積資料。確定要清除？",
+    ok: { label: "清除", color: "negative" },
+    cancel: true,
+    persistent: true
+  }).onOk(() => {
+    void clearObservationsNow();
+  });
+}
+
+/** 呼叫清除端點；成功顯示刪除筆數並重載，失敗負向通知。 */
+async function clearObservationsNow() {
+  clearing.value = true;
+  try {
+    const result = await clearObservations();
+    $q.notify({
+      type: "positive",
+      message: `已清除觀測紀錄（現況 ${result.presence_deleted} 筆、事件 ${result.events_deleted} 筆）`
+    });
+    await load();
+  } catch (cause) {
+    $q.notify({ type: "negative", message: errorMessage(cause) });
+  } finally {
+    clearing.value = false;
+  }
 }
 
 onMounted(() => {

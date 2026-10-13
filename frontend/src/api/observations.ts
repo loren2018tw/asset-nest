@@ -1,4 +1,9 @@
-import { apiDownload, apiGet, type DownloadedFile } from "@/api/client";
+import {
+  apiDelete,
+  apiDownload,
+  apiGet,
+  type DownloadedFile
+} from "@/api/client";
 import type { IpSeenSource } from "@/api/ips";
 
 /** 觀測事件種類：首見、MAC 變更（見 GLOSSARY.md「觀測詞彙」、ADR-0016）。 */
@@ -114,6 +119,19 @@ export function listOutOfSubnetObservations(): Promise<OutOfSubnetObservationPag
   return apiGet<OutOfSubnetObservationPage>(
     "/api/v1/observations/out-of-subnet"
   );
+}
+
+/** 清除觀測紀錄的刪除筆數（`DELETE /api/v1/observations`；見 spec）。 */
+export interface ClearObservationsResult {
+  /** 刪除的觀測現況列數（含網段外觀測列）。 */
+  presence_deleted: number;
+  /** 刪除的觀測事件列數。 */
+  events_deleted: number;
+}
+
+/** 清除全部觀測紀錄（現況＋事件；宣告與代理登錄不受影響；冪等）。 */
+export function clearObservations(): Promise<ClearObservationsResult> {
+  return apiDelete<ClearObservationsResult>("/api/v1/observations");
 }
 
 /** 下載單一 IP 的觀測歷史 CSV（UTF-8 BOM；檔名由後端 Content-Disposition 提供）。 */
