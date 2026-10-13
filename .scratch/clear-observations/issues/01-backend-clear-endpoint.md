@@ -13,9 +13,10 @@
 
 ## Comments
 
-實作完成（未 commit；無 migration）。
+實作完成（無 migration）。
 
 - `backend/src/observation.rs`：新增 `ClearCounts`（`presence_deleted`／`events_deleted`）與 `clear_observations`（單一交易依序刪除 `observation_event`、`ip_presence`；`rows_affected` 計數；冪等；不 `VACUUM`）；置於 `cleanup_events` 之後。
 - `backend/src/api/observations.rs`：`DELETE /observations`（掛 `/api/v1`）→ 200 JSON；完成記 `tracing::info`；非白名單端點，需登入（認證中介層把關）。模組註解改為讀取端點＋清除端點。
 - `backend/tests/observations_clear.rs` 3 個整合測試：①種子（網段、資產／介面／指派、代理、被拒回報、現況 3 列含網段外、事件 2 筆）→ 200 筆數正確、兩表清空、其餘 6 表不變；②空庫回零＋重複清除回零（冪等）；③啟用認證：未帶 cookie 401 且不動資料、帶 `sign_token` token 200 並清除。
 - 驗收：`cargo fmt --check` 綠；`cargo test` 全綠（0 failed）；`cargo clippy --all-targets` 新檔案無警告。另以真機短命服務＋curl smoke（獨立暫存 SQLite）：未登入 DELETE→401；`POST /agents/observations` 產生 3 現況＋2 事件後 DELETE→200 `{3,2}`、再刪→`{0,0}`；IP 歷史現況 null／事件空、網段外清單空、代理列與網段保留。
+- 實作 commit：`a2b28df`（主實作）。

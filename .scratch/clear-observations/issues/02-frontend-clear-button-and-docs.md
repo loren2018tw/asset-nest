@@ -14,9 +14,10 @@
 
 ## Comments
 
-實作完成（未 commit）。
+實作完成。
 
 - `frontend/src/api/observations.ts`：新增 `ClearObservationsResult` 與 `clearObservations()`（`apiDelete<…>("/api/v1/observations")`）。
 - `frontend/src/pages/KeaStatusPage.vue`：「觀測代理」卡片標題列右側新增「清除觀測紀錄」按鈕（negative outline、`delete_sweep`、tooltip、`:loading="clearing"`）；`$q.dialog` 二次確認（標題／內文照 spec、確定鈕「清除」negative、persistent、可取消）；成功 `$q.notify`「已清除觀測紀錄（現況 N 筆、事件 M 筆）」並 `load()` 重載；失敗 negative 通知。
 - `GLOSSARY.md`：「觀測詞彙」新增「清除觀測紀錄」；`README.md`：「新鮮度與保留」補手動清除說明。
 - 驗收：`pnpm lint:check`（oxfmt＋oxlint）、`pnpm typecheck` 全綠；後端資料效果以真機 smoke 驗證（見票 01）；瀏覽器互動（確認框、通知、重載）待使用者確認。
+- 實作 commit：`a2b28df`（主實作）。
