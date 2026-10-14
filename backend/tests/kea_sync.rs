@@ -733,6 +733,199 @@ async fn kea_failure_keeps_assignment_and_reports_warning() {
     assert_eq!(page["total"], 1, "指派已保存，待完整同步修復");
 }
 
+// ---------- 刪除與 MAC 編輯推送（見 ADR-0027）----------
+
+async fn patch_interface(state: &AppState, id: i64, body: Value) -> (StatusCode, Value) {
+    send(
+        state,
+        Method::PATCH,
+        &format!("/api/v1/interfaces/{id}"),
+        Some(body),
+    )
+    .await
+}
+
+/// 建立受管網段＋資產＋介面＋保留（已推送 Kea）。
+async fn reservation_fixture(
+    state: &AppState,
+    stub: &StubKea,
+    mac: &str,
+    address: &str,
+) -> (i64, i64, i64) {
+    let subnet = create_subnet(state, "10.0.0.0/24", Some(1)).await;
+    let asset = create_asset(state, "推送主機").await;
+    let interface = create_interface(state, asset, mac).await;
+    let (status, body) =
+        put_assignment(state, subnet, address, interface, "reservation", Some("pc")).await;
+    assert_eq!(status, StatusCode::OK, "指派應成功：{body}");
+    assert_eq!(stub.hosts(1).len(), 1);
+
+    (subnet, asset, interface)
+}
+
+#[tokio::test]
+async fn asset_delete_pushes_reservation_deletes() {
+    let (state, stub) = test_state().await;
+    let (_, asset, _) = reservation_fixture(&state, &stub, "aa:aa:aa:aa:aa:0c", "10.0.0.12").await;
+    let writes_before = stub.config_writes();
+
+    let (status, body) = send(
+        &state,
+        Method::DELETE,
+        &format!("/api/v1/assets/{asset}"),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "刪除資產應成功：{body}");
+    assert_eq!(body["kea_sync"][0]["status"], "ok");
+    assert!(stub.hosts(1).is_empty(), "保留應自 Kea 刪除");
+    assert_eq!(stub.config_writes(), writes_before + 1, "刪除後寫入設定檔");
+
+    let (status, _) = send(
+        &state,
+        Method::GET,
+        &format!("/api/v1/assets/{asset}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "本地已刪除");
+}
+
+#[tokio::test]
+async fn interface_delete_pushes_reservation_deletes() {
+    let (state, stub) = test_state().await;
+    let (_, _, interface) =
+        reservation_fixture(&state, &stub, "aa:aa:aa:aa:aa:0d", "10.0.0.13").await;
+
+    let (status, body) = send(
+        &state,
+        Method::DELETE,
+        &format!("/api/v1/interfaces/{interface}"),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "刪除介面應成功：{body}");
+    assert_eq!(body["kea_sync"][0]["status"], "ok");
+    assert!(stub.hosts(1).is_empty(), "保留應自 Kea 刪除");
+}
+
+#[tokio::test]
+async fn delete_asset_kea_failure_still_deletes_locally() {
+    let (state, stub) = test_state().await;
+    let (_, asset, _) = reservation_fixture(&state, &stub, "aa:aa:aa:aa:aa:0e", "10.0.0.14").await;
+    stub.fail_commands(&["reservation-del"]);
+
+    let (status, body) = send(
+        &state,
+        Method::DELETE,
+        &format!("/api/v1/assets/{asset}"),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "Kea 失敗不阻擋本地：{body}");
+    assert_eq!(body["kea_sync"][0]["status"], "failed");
+    assert_eq!(stub.hosts(1).len(), 1, "Kea 保留未刪（待完整同步修復）");
+
+    let (status, _) = send(
+        &state,
+        Method::GET,
+        &format!("/api/v1/assets/{asset}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn interface_mac_edit_refreshes_kea_reservation() {
+    let (state, stub) = test_state().await;
+    let (_, _, interface) =
+        reservation_fixture(&state, &stub, "aa:aa:aa:aa:aa:0f", "10.0.0.15").await;
+    assert_eq!(stub.hosts(1)[0].hw_address, "aa:aa:aa:aa:aa:0f");
+
+    let (status, body) =
+        patch_interface(&state, interface, json!({ "mac": "aa:aa:aa:aa:aa:1f" })).await;
+
+    assert_eq!(status, StatusCode::OK, "MAC 編輯應成功：{body}");
+    assert_eq!(body["kea_sync"][0]["status"], "ok");
+    assert_eq!(body["mac"], "aa:aa:aa:aa:aa:1f");
+    assert_eq!(
+        stub.hosts(1)[0].hw_address,
+        "aa:aa:aa:aa:aa:1f",
+        "以新 MAC 重推保留"
+    );
+}
+
+#[tokio::test]
+async fn interface_mac_edit_without_reservations_skips_kea() {
+    let (state, stub) = test_state().await;
+    let asset = create_asset(&state, "手動主機").await;
+    let interface = create_interface(&state, asset, "aa:aa:aa:aa:aa:20").await;
+
+    let (status, body) =
+        patch_interface(&state, interface, json!({ "mac": "aa:aa:aa:aa:aa:21" })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("kea_sync").is_none(), "未涉同步不附結果");
+    assert!(stub.log().is_empty(), "不應送出任何 Kea 命令");
+}
+
+#[tokio::test]
+async fn interface_mac_clear_with_reservation_is_blocked() {
+    let (state, stub) = test_state().await;
+    let (_, asset, interface) =
+        reservation_fixture(&state, &stub, "aa:aa:aa:aa:aa:22", "10.0.0.16").await;
+
+    let (status, body) =
+        patch_interface(&state, interface, json!({ "mac": null, "name": "eth0" })).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "有保留指派時不可清空 MAC：{body}"
+    );
+    assert_eq!(body["error"], "validation_error");
+    assert_eq!(body["details"]["field"], "mac");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("保留")),
+        "訊息說明保留指派：{body}"
+    );
+    assert_eq!(stub.hosts(1).len(), 1, "Kea 保留不動");
+
+    let (status, detail) = send(
+        &state,
+        Method::GET,
+        &format!("/api/v1/assets/{asset}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        detail["interfaces"][0]["mac"], "aa:aa:aa:aa:aa:22",
+        "本地 MAC 未變更"
+    );
+}
+
+#[tokio::test]
+async fn interface_mac_clear_without_reservation_succeeds() {
+    let (state, stub) = test_state().await;
+    let asset = create_asset(&state, "手動主機").await;
+    let interface = create_interface(&state, asset, "aa:aa:aa:aa:aa:23").await;
+
+    let (status, body) =
+        patch_interface(&state, interface, json!({ "mac": null, "name": "eth0" })).await;
+
+    assert_eq!(status, StatusCode::OK, "無保留指派可清空：{body}");
+    assert!(body["mac"].is_null());
+    assert!(body.get("kea_sync").is_none());
+    assert!(stub.log().is_empty(), "不應送出任何 Kea 命令");
+}
+
 // ---------- 完整同步 ----------
 
 #[tokio::test]

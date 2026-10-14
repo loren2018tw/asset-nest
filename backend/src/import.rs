@@ -196,6 +196,9 @@ pub struct Created {
     pub assets: usize,
     pub interfaces: usize,
     pub assignments: usize,
+    /// 其中建立在受管網段（`kea_subnet_id` 有值）的保留數；>0 時前端提示
+    /// 執行完整同步（見 `docs/adr/0027`）。
+    pub managed_reservations: usize,
 }
 
 /// 匯入回應（見 spec §5.2）。
@@ -347,6 +350,9 @@ async fn write_plans(
     plans: Vec<Option<RowPlan>>,
     created: &mut Created,
 ) -> Result<(), ApiError> {
+    // 網段的 Kea subnet-id（受管與否）以 `subnet_id` 快取；供保留計數。
+    let mut kea_subnet_ids: HashMap<i64, Option<i64>> = HashMap::new();
+
     for plan in plans.into_iter().flatten() {
         let asset_id = crate::assets::insert_asset(connection, plan.asset)
             .await
@@ -375,6 +381,20 @@ async fn write_plans(
             let interface_id =
                 interface_id.ok_or_else(|| ApiError::internal("匯入指派失敗", "缺少介面"))?;
 
+            let kea_subnet_id = match kea_subnet_ids.get(&assignment.subnet_id) {
+                Some(kea_subnet_id) => *kea_subnet_id,
+                None => {
+                    let kea_subnet_id: Option<i64> =
+                        sqlx::query_scalar("SELECT kea_subnet_id FROM subnets WHERE id = ?")
+                            .bind(assignment.subnet_id)
+                            .fetch_one(&mut *connection)
+                            .await
+                            .map_err(map_write_error)?;
+                    kea_subnet_ids.insert(assignment.subnet_id, kea_subnet_id);
+                    kea_subnet_id
+                }
+            };
+
             sqlx::query(
                 "INSERT INTO ip_assignments (subnet_id, address, interface_id, purpose, hostname)
                  VALUES (?, ?, ?, ?, ?)",
@@ -388,6 +408,9 @@ async fn write_plans(
             .await
             .map_err(map_write_error)?;
             created.assignments += 1;
+            if assignment.purpose == "reservation" && kea_subnet_id.is_some() {
+                created.managed_reservations += 1;
+            }
         }
     }
 

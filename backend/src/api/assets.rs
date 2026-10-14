@@ -18,6 +18,8 @@ use crate::assets::{
 };
 use crate::assignments::{self, AssetAssignment};
 use crate::interfaces::{self, Interface};
+use crate::kea::sync as kea_sync;
+use crate::kea::sync::KeaSync;
 use crate::lendings::{self, LendingBrief};
 
 /// 清單預設每頁筆數（見 spec §6）。
@@ -261,10 +263,16 @@ async fn update_asset(
         .ok_or_else(|| ApiError::not_found("找不到資產"))
 }
 
+/// 刪除資產回應：受管網段保留的 Kea 刪除推送結果（見 ADR-0027）。
+#[derive(Debug, Serialize)]
+struct AssetDeleted {
+    kea_sync: Vec<KeaSync>,
+}
+
 async fn delete_asset(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<AssetDeleted>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("資產 id 格式錯誤"))?;
 
     // 出借中的資產不可刪除（見 asset-lending spec §2 不變量）；
@@ -276,15 +284,27 @@ async fn delete_asset(
         return Err(ApiError::conflict("此資產出借中，請先歸還"));
     }
 
+    // 先擷取保留（刪除後指派連動消失），本地刪除後逐筆推送 Kea（見 ADR-0027）。
+    let interfaces = interfaces::list_for_asset(&state.db, id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面失敗", error))?;
+    let interface_ids: Vec<i64> = interfaces.iter().map(|interface| interface.id).collect();
+    let reservations = assignments::list_reservations_for_interfaces(&state.db, &interface_ids)
+        .await
+        .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
+
     let deleted = assets::delete(&state.db, id)
         .await
         .map_err(|error| ApiError::internal("刪除資產失敗", error))?;
 
-    if deleted {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("找不到資產"))
+    if !deleted {
+        return Err(ApiError::not_found("找不到資產"));
     }
+
+    let kea_sync =
+        kea_sync::push_reservation_deletes(&state.db, state.kea.as_ref(), &reservations).await?;
+
+    Ok(Json(AssetDeleted { kea_sync }))
 }
 
 async fn list_locations(State(state): State<AppState>) -> Result<Json<StringItems>, ApiError> {

@@ -65,7 +65,7 @@ async fn put_asset_assignment(
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
         .ok_or_else(|| ApiError::internal("讀取網段失敗", "網段不存在"))?;
 
-    let warnings = warnings_for_address(&state, &subnet, &assignment.address).await?;
+    // 推送先於警示：警示偵測失敗時不影響 Kea 同步（見 ADR-0027）。
     let kea_sync = kea_sync::after_assignment_change(
         &state.db,
         state.kea.as_ref(),
@@ -74,6 +74,7 @@ async fn put_asset_assignment(
         Some(&assignment),
     )
     .await?;
+    let warnings = warnings_for_address(&state, &subnet, &assignment.address).await?;
 
     Ok(Json(AssetAssignmentResponse {
         assignment,

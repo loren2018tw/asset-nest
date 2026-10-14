@@ -54,9 +54,9 @@ pub struct InterfaceInput {
 /// 已驗證的新增內容。
 #[derive(Debug)]
 pub struct ValidInterface {
-    name: Option<String>,
-    mac: Option<String>,
-    note: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) mac: Option<String>,
+    pub(crate) note: Option<String>,
 }
 
 /// 編輯介面的輸入。

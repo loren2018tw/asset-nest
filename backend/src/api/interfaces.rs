@@ -12,7 +12,10 @@ use serde::Serialize;
 use crate::AppState;
 use crate::api::ApiError;
 use crate::assets;
+use crate::assignments;
 use crate::interfaces::{self, Interface, InterfaceInput, InterfacePatch, Warning};
+use crate::kea::sync as kea_sync;
+use crate::kea::sync::KeaSync;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -29,6 +32,15 @@ struct InterfaceResponse {
     #[serde(flatten)]
     interface: Interface,
     warnings: Vec<Warning>,
+    /// MAC 變更時的 Kea 推送結果；未涉同步時不顯示（見 ADR-0027）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kea_sync: Option<Vec<KeaSync>>,
+}
+
+/// 刪除介面回應：受管網段保留的 Kea 刪除推送結果（見 ADR-0027）。
+#[derive(Debug, Serialize)]
+struct InterfaceDeleted {
+    kea_sync: Vec<KeaSync>,
 }
 
 async fn create_interface(
@@ -61,6 +73,7 @@ async fn create_interface(
         Json(InterfaceResponse {
             interface,
             warnings,
+            kea_sync: None,
         }),
     ))
 }
@@ -80,10 +93,39 @@ async fn update_interface(
 
     let valid = patch.apply_to(&existing)?;
 
+    // 結構規則：有保留指派的介面不可清空 MAC（見 ADR-0027；與「保留需介面
+    // 有 MAC」一致，ADR-0006）。
+    if existing.mac.is_some() && valid.mac.is_none() {
+        let count = assignments::list_reservations_for_interfaces(&state.db, &[id])
+            .await
+            .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?
+            .len();
+        if count > 0 {
+            return Err(ApiError::validation(format!(
+                "此介面有 {count} 筆保留指派，清空 MAC 前請先取消或改用途"
+            ))
+            .field("mac"));
+        }
+    }
+
     let interface = interfaces::update(&state.db, id, valid)
         .await
         .map_err(|error| ApiError::internal("更新介面失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到介面"))?;
+
+    // MAC 變更：以新 MAC 重新推送該介面在受管網段的保留（見 ADR-0027）；
+    // 僅在確有推送時附上結果。
+    let kea_sync = if existing.mac != interface.mac {
+        let reservations = assignments::list_reservations_for_interfaces(&state.db, &[id])
+            .await
+            .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
+        let syncs =
+            kea_sync::push_reservation_updates(&state.db, state.kea.as_ref(), &reservations)
+                .await?;
+        if syncs.is_empty() { None } else { Some(syncs) }
+    } else {
+        None
+    };
 
     let warnings = interfaces::mac_warnings(&state.db, interface.mac.as_deref(), id)
         .await
@@ -92,22 +134,31 @@ async fn update_interface(
     Ok(Json(InterfaceResponse {
         interface,
         warnings,
+        kea_sync,
     }))
 }
 
 async fn delete_interface(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<InterfaceDeleted>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("介面 id 格式錯誤"))?;
+
+    // 先擷取保留（刪除後指派連動消失），本地刪除後逐筆推送 Kea（見 ADR-0027）。
+    let reservations = assignments::list_reservations_for_interfaces(&state.db, &[id])
+        .await
+        .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
 
     let deleted = interfaces::delete(&state.db, id)
         .await
         .map_err(|error| ApiError::internal("刪除介面失敗", error))?;
 
-    if deleted {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("找不到介面"))
+    if !deleted {
+        return Err(ApiError::not_found("找不到介面"));
     }
+
+    let kea_sync =
+        kea_sync::push_reservation_deletes(&state.db, state.kea.as_ref(), &reservations).await?;
+
+    Ok(Json(InterfaceDeleted { kea_sync }))
 }

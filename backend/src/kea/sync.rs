@@ -1,7 +1,9 @@
 //! Kea 保留推送與完整同步（見 `docs/adr/0011`）。
 //!
 //! 單筆：指派／改用途／改 hostname／取消指派時即時推送該筆保留（僅受管網段＋
-//! 保留用途）；Kea 失敗僅警示、不阻擋本地儲存，由完整同步修復。
+//! 保留用途）；資產／介面刪除與介面 MAC 編輯另走 [`push_reservation_deletes`]／
+//! [`push_reservation_updates`]（見 `docs/adr/0027`）。Kea 失敗僅警示、不阻擋
+//! 本地儲存，由完整同步修復。
 //! 完整同步：以 asset-nest 為準對齊受管網段的 Kea 保留（新增／更新／刪除）
 //! 與網段層設定（pool、gateway；見 `docs/adr/0013`），並建立 Kea 端缺少的
 //! 受管網段（`subnet4-add`；見 `docs/adr/0023`）；先產生計畫（dry-run）
@@ -123,6 +125,58 @@ pub async fn after_assignment_change(
         Ok(()) => KeaSync::ok(),
         Err(error) => KeaSync::failed(&error),
     }))
+}
+
+/// 刪除資產／介面前：對這些保留指派逐筆刪除 Kea 保留（見 ADR-0027）。
+///
+/// 呼叫端僅傳入「保留」用途指派；未受管網段或未設 client 者不產生推送結果。
+pub async fn push_reservation_deletes(
+    pool: &SqlitePool,
+    client: Option<&Client>,
+    reservations: &[Assignment],
+) -> Result<Vec<KeaSync>, ApiError> {
+    push_each(pool, client, reservations, false).await
+}
+
+/// 介面 MAC 變更後：對這些保留指派逐筆依現況重新推送（以最新 MAC upsert；
+/// 見 ADR-0027）。
+pub async fn push_reservation_updates(
+    pool: &SqlitePool,
+    client: Option<&Client>,
+    reservations: &[Assignment],
+) -> Result<Vec<KeaSync>, ApiError> {
+    push_each(pool, client, reservations, true).await
+}
+
+/// 逐筆批次推送；`refresh = false`＝刪除（`after = None`）、`true`＝更新
+/// （`after = Some`，由 [`after_assignment_change`] 以資料庫現值組保留）。
+/// 網段以 `subnet_id` 快取；未涉同步者不列入回傳。
+async fn push_each(
+    pool: &SqlitePool,
+    client: Option<&Client>,
+    reservations: &[Assignment],
+    refresh: bool,
+) -> Result<Vec<KeaSync>, ApiError> {
+    let mut subnet_cache: HashMap<i64, Subnet> = HashMap::new();
+    let mut syncs = Vec::new();
+    for assignment in reservations {
+        if !subnet_cache.contains_key(&assignment.subnet_id) {
+            let subnet = crate::subnets::get(pool, assignment.subnet_id)
+                .await
+                .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+                .ok_or_else(|| ApiError::internal("讀取網段失敗", "網段不存在"))?;
+            subnet_cache.insert(subnet.id, subnet);
+        }
+        let subnet = &subnet_cache[&assignment.subnet_id];
+        let after = if refresh { Some(assignment) } else { None };
+        if let Some(sync) =
+            after_assignment_change(pool, client, subnet, Some(assignment), after).await?
+        {
+            syncs.push(sync);
+        }
+    }
+
+    Ok(syncs)
 }
 
 /// 幂等 upsert：先刪除（不存在視同已刪）再新增，最後 `config-write` 持久化。

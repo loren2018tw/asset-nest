@@ -414,8 +414,11 @@ async fn create_read_update_delete_asset() {
     assert_eq!(cleared["description"], "測試伺服器（改名）");
 
     let (status, body) = send(&pool, Method::DELETE, &format!("/api/v1/assets/{id}"), None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["kea_sync"].as_array().is_some_and(Vec::is_empty),
+        "未設 Kea：空推送結果"
+    );
 
     let (status, body) = send(&pool, Method::GET, &format!("/api/v1/assets/{id}"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -784,7 +787,7 @@ async fn expired_flag_is_computed_by_server() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "屆齡仍可刪除");
+    assert_eq!(status, StatusCode::OK, "屆齡仍可刪除");
 }
 
 #[tokio::test]

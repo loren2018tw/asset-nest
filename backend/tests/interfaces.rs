@@ -169,7 +169,7 @@ async fn interface_crud_lifecycle() {
     assert_eq!(kept["name"], "eth2");
     assert_eq!(kept["mac"], "00:11:22:33:44:55", "未提供 MAC 維持原值");
 
-    // 刪除介面
+    // 刪除介面（回應 200＋`kea_sync`；未設 Kea 為空陣列）
     let (status, body) = send(
         &pool,
         Method::DELETE,
@@ -177,8 +177,8 @@ async fn interface_crud_lifecycle() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["kea_sync"].as_array().is_some_and(Vec::is_empty));
     assert_eq!(get_detail(&pool, asset_id).await["interfaces"], json!([]));
 
     // 刪除不存在的介面
@@ -475,7 +475,7 @@ async fn deleting_asset_cascades_interfaces() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
 
     let remaining: Vec<i64> = sqlx::query_scalar("SELECT id FROM interfaces ORDER BY id")
         .fetch_all(&pool)

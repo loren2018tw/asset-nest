@@ -671,6 +671,36 @@ pub async fn list_for_asset(
     .await
 }
 
+/// 讀取多個介面上的「保留」指派；供資產／介面刪除與介面 MAC 變更時
+/// 推送 Kea（見 `docs/adr/0027`）。
+pub async fn list_reservations_for_interfaces(
+    pool: &SqlitePool,
+    interface_ids: &[i64],
+) -> sqlx::Result<Vec<Assignment>> {
+    if interface_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut query = QueryBuilder::new(format!(
+        "SELECT {COLUMNS} FROM ip_assignments
+          WHERE purpose = 'reservation' AND interface_id IN ("
+    ));
+    let mut separated = query.separated(", ");
+    for interface_id in interface_ids {
+        separated.push_bind(*interface_id);
+    }
+    separated.push_unseparated(") ORDER BY id ASC");
+
+    let rows = query
+        .build_query_as::<AssignmentRow>()
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(AssignmentRow::into_assignment)
+        .collect())
+}
+
 /// 讀取多個資產（經由介面）的全部已指派位址，供資產清單「已指派 IP」欄
 /// （見票 12）。
 ///

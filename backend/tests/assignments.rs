@@ -841,7 +841,7 @@ async fn deleting_interface_cascades_assignments() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(assignment_count(&pool).await, 1);
 
     let page = list_ips(&pool, subnet_id, "").await;
@@ -856,14 +856,15 @@ async fn deleting_interface_cascades_assignments() {
     assert_eq!(assignments[0]["interface_id"], second_interface);
 
     // 刪除資產 → 剩餘介面與指派一併連動刪除（數量顯示見票 08）
-    let (status, _) = send(
+    let (status, body) = send(
         &pool,
         Method::DELETE,
         &format!("/api/v1/assets/{asset_id}"),
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kea_sync"], json!([]));
     assert_eq!(assignment_count(&pool).await, 0);
 }
 

@@ -298,8 +298,12 @@ async fn deleting_asset_cascades_interfaces_assignments_and_reservations() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "刪除資產回應 200＋kea_sync（見 ADR-0027）"
+    );
+    assert_eq!(body["kea_sync"], json!([]));
 
     assert_eq!(
         interface_ids(&pool, asset_id).await,
@@ -385,8 +389,8 @@ async fn deleting_interface_cascades_its_assignments() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kea_sync"], json!([]));
 
     let remaining: Vec<(i64, String)> =
         sqlx::query_as("SELECT interface_id, address FROM ip_assignments ORDER BY id")
@@ -629,7 +633,7 @@ async fn deleting_asset_cascades_lendings_and_blocks_open_lending() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(lending_count(&pool, asset_id).await, 2);
 
-    // 歸還後可刪除 → 204
+    // 歸還後可刪除 → 200＋`kea_sync`
     let (status, _) = return_lending(&pool, open_id).await;
     assert_eq!(status, StatusCode::OK);
     let (status, body) = send(
@@ -639,8 +643,8 @@ async fn deleting_asset_cascades_lendings_and_blocks_open_lending() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kea_sync"], json!([]));
 
     // 借還紀錄（含已歸還歷史）連動刪除
     assert_eq!(

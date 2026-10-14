@@ -1,12 +1,10 @@
 //! `/api/v1` 資產報廢路由（見 `.scratch/asset-disposal/spec.md` §4、`docs/adr/0026`）。
 //!
 //! - `POST /assets/{id}/disposal`：驗證（400）→ 資產不存在（404）→ 出借中
-//!   （409）→ Kea 推送（保留逐筆刪除；失敗不阻擋）→ 搬移；201＋攤平報廢欄位
-//!   ＋`kea_sync`。
+//!   （409）→ 先擷取保留、本地搬移、後 Kea 推送（保留逐筆刪除；失敗不阻擋；
+//!   見 ADR-0027）；201＋攤平報廢欄位＋`kea_sync`。
 //! - `GET /disposed-assets?q=&page=&per_page=`：報廢清單，伺服器分頁。
 //! - `POST /disposed-assets/{id}/restore`：復原；不存在（404）→ 200＋`Asset`。
-
-use std::collections::HashMap;
 
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
@@ -21,10 +19,10 @@ use crate::api::ApiError;
 use crate::assets::{self, Asset};
 use crate::assignments;
 use crate::disposed_assets::{self, DisposeInput, DisposedAsset};
+use crate::interfaces;
 use crate::kea::sync as kea_sync;
 use crate::kea::sync::KeaSync;
 use crate::lendings;
-use crate::subnets::{self, Subnet};
 
 /// 報廢清單預設每頁筆數（見 spec §4）。
 const DEFAULT_PER_PAGE: i64 = 10;
@@ -66,8 +64,8 @@ struct DisposeResponse {
     kea_sync: Vec<KeaSync>,
 }
 
-/// 報廢：驗證（400）→ 資產存在（404）→ 出借中（409）→ Kea 推送 → 搬移
-/// （見 spec §4）。
+/// 報廢：驗證（400）→ 資產存在（404）→ 出借中（409）→ 搬移 → Kea 推送
+/// （見 spec §4、ADR-0027 的順序修訂）。
 async fn dispose_asset(
     State(state): State<AppState>,
     id: Result<Path<i64>, PathRejection>,
@@ -89,67 +87,27 @@ async fn dispose_asset(
         return Err(ApiError::conflict("此資產出借中，請先歸還"));
     }
 
-    // Kea 推送在搬移之前：搬移後指派已不存在（見票 02 注意）。
-    let kea_sync = push_reservation_deletes(&state, asset_id).await?;
+    // 先擷取保留（搬移後指派連動消失），再搬移、後推送 Kea（見 ADR-0027）。
+    let interfaces = interfaces::list_for_asset(&state.db, asset_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面失敗", error))?;
+    let interface_ids: Vec<i64> = interfaces.iter().map(|interface| interface.id).collect();
+    let reservations = assignments::list_reservations_for_interfaces(&state.db, &interface_ids)
+        .await
+        .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
 
     let disposed = disposed_assets::dispose(&state.db, asset_id, valid)
         .await
         .map_err(|error| ApiError::internal("報廢資產失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到資產"))?;
 
+    let kea_sync =
+        kea_sync::push_reservation_deletes(&state.db, state.kea.as_ref(), &reservations).await?;
+
     Ok((
         StatusCode::CREATED,
         Json(DisposeResponse { disposed, kea_sync }),
     ))
-}
-
-/// 報廢前的 Kea 推送：對資產的保留用途指派逐筆刪除 Kea 保留（見 spec §4 步驟 4）。
-///
-/// 網段以 `subnet_id` 快取；未受管網段或未設 client 回 `None`、不列入 `kea_sync`；
-/// 推送失敗為 [`KeaSync::failed`]、不阻擋本地儲存（見 `docs/adr/0011`）。
-async fn push_reservation_deletes(
-    state: &AppState,
-    asset_id: i64,
-) -> Result<Vec<KeaSync>, ApiError> {
-    let listed = assignments::list_for_asset(&state.db, asset_id)
-        .await
-        .map_err(|error| ApiError::internal("讀取已指派 IP 失敗", error))?;
-
-    let mut subnet_cache: HashMap<i64, Subnet> = HashMap::new();
-    let mut syncs = Vec::new();
-    for entry in listed.iter().filter(|entry| entry.purpose == "reservation") {
-        if !subnet_cache.contains_key(&entry.subnet_id) {
-            let subnet = subnets::get(&state.db, entry.subnet_id)
-                .await
-                .map_err(|error| ApiError::internal("讀取網段失敗", error))?
-                .ok_or_else(|| ApiError::internal("讀取網段失敗", "網段不存在"))?;
-            subnet_cache.insert(entry.subnet_id, subnet);
-        }
-        let subnet = &subnet_cache[&entry.subnet_id];
-
-        // 同步判斷需要 `Assignment`（`list_for_asset` 的列為資產詳情讀模型）；
-        // 指派必然存在，僅並行異動時跳過。
-        let assignment = assignments::find(&state.db, entry.subnet_id, &entry.address)
-            .await
-            .map_err(|error| ApiError::internal("讀取指派失敗", error))?;
-        let Some(assignment) = assignment else {
-            continue;
-        };
-
-        if let Some(sync) = kea_sync::after_assignment_change(
-            &state.db,
-            state.kea.as_ref(),
-            subnet,
-            Some(&assignment),
-            None,
-        )
-        .await?
-        {
-            syncs.push(sync);
-        }
-    }
-
-    Ok(syncs)
 }
 
 /// 報廢清單：`q` 關鍵字搜尋、伺服器分頁（`page` 由 1、`per_page` 預設 10 夾

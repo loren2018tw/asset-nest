@@ -209,11 +209,24 @@ async fn create_interface(pool: &SqlitePool, asset_id: i64, body: Value) -> i64 
     json["id"].as_i64().expect("回應含 id")
 }
 
-/// 新增網段並斷言成功，回傳 id；可帶一段 v4 pool。
+/// 新增網段並斷言成功，回傳 id；可帶一段 v4 pool 與受管 Kea subnet-id。
 async fn create_subnet(pool: &SqlitePool, cidr: &str, pool_range: Option<(&str, &str)>) -> i64 {
+    create_subnet_with_kea(pool, cidr, pool_range, None).await
+}
+
+/// 新增網段（可指定 `kea_subnet_id`）；回傳 id。
+async fn create_subnet_with_kea(
+    pool: &SqlitePool,
+    cidr: &str,
+    pool_range: Option<(&str, &str)>,
+    kea_subnet_id: Option<i64>,
+) -> i64 {
     let mut body = json!({ "cidr": cidr });
     if let Some((start, end)) = pool_range {
         body["pools"] = json!([{ "start_ip": start, "end_ip": end }]);
+    }
+    if let Some(kea_subnet_id) = kea_subnet_id {
+        body["kea_subnet_id"] = json!(kea_subnet_id);
     }
     let (status, json) = send(pool, Method::POST, "/api/v1/subnets", Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "新增網段應成功：{json}");
@@ -954,7 +967,12 @@ async fn imports_assets_interfaces_and_assignments_in_one_transaction() {
     assert_eq!(report["committed"], true, "{report}");
     assert_eq!(
         report["created"],
-        json!({ "assets": 5, "interfaces": 4, "assignments": 3 })
+        json!({
+            "assets": 5,
+            "interfaces": 4,
+            "assignments": 3,
+            "managed_reservations": 0,
+        })
     );
 
     // 以既有 GET 端點驗證落地內容。
@@ -1073,5 +1091,32 @@ async fn external_change_after_preview_blocks_commit() {
         )
         .await,
         1
+    );
+}
+
+#[tokio::test]
+async fn import_counts_reservations_on_managed_subnets() {
+    let pool = test_pool().await;
+    // 受管網段（Kea subnet-id 有值）：有 MAC 的 IPv4 匯入建立保留 → 計數。
+    create_subnet_with_kea(&pool, "10.0.0.0/24", None, Some(7)).await;
+    // 未受管網段：即使有 MAC＋IPv4 也不列入計數。
+    create_subnet(&pool, "10.1.0.0/24", None).await;
+
+    let mut managed_row = CsvRow::new("受管主機", "機房A");
+    managed_row.mac = "aa:bb:cc:dd:ee:31".to_string();
+    managed_row.ipv4 = "10.0.0.31".to_string();
+
+    let mut unmanaged_row = CsvRow::new("未受管主機", "機房B");
+    unmanaged_row.mac = "aa:bb:cc:dd:ee:32".to_string();
+    unmanaged_row.ipv4 = "10.1.0.32".to_string();
+
+    let csv = build_csv(&[managed_row, unmanaged_row]);
+    let (status, report) = post_csv(&pool, Some(false), csv.as_bytes()).await;
+
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["committed"], true, "{report}");
+    assert_eq!(
+        report["created"]["managed_reservations"], 1,
+        "僅受管網段的保留列入計數：{report}"
     );
 }
