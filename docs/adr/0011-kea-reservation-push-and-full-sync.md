@@ -11,6 +11,8 @@ ADR-0002 定調「Reservation 以 asset-nest 為真實來源、單向推送 Kea�
 
 - **受管定義**：只有設定 `kea_subnet_id` 的 IPv4 網段參與同步；未受管網段完全不與 Kea 互動。
 - **單筆推送**：指派／改用途／改 hostname（PUT）、取消指派（DELETE）、資產端移轉（PUT）時，即時推送該筆保留；僅「保留（reservation）」用途會產生 Kea 保留，「保留→static」與取消指派會刪除 Kea 保留。介面 MAC 編輯與資產／介面刪除不即時同步，交由完整同步收拾。
+
+  > **後續修訂（2026-10-14）**：介面 MAC 編輯與資產／介面刪除已由 ADR-0027 改為即時推送（資產端刪除含草稿取消的「刪除已建立內容」）；本點其餘不變。
 - **upsert 語意**：先 `reservation-del`（不存在視同已刪）再 `reservation-add`；變更期間僅毫秒級空窗。所有命令顯式帶 `operation-target: "memory"`，操作 Kea 執行中設定（host_cmds 的修改命令預設只寫主機資料庫，本系統未使用）；每次成功變更後呼叫 `config-write` 持久化到 Kea 設定檔。
 - **失敗策略**：Kea 失敗不阻擋本地儲存（asset-nest 是真實來源）；指派回應附 `kea_sync: {status, message}`（僅在應同步時出現），前端以 warning 提示；由完整同步修復。取消指派回應由 204 改為 200＋同欄位。
 - **完整同步**：`GET /kea/sync/plan`（唯讀計畫）＋`POST /kea/sync`（套用）。以 asset-nest 為準對齊受管網段的 Kea 保留：新增缺少、更新不同（hostname 或 MAC）、刪除多餘。刪除只限「hw-address＋ip-address」形式且不屬於任何期望保留者；非此形式的 Kea 保留、以及有衝突標記（IpInPool／IpOutOfSubnet／DuplicateHwAddress）的指派，一律跳過並列入報告。Kea 端沒有對應 subnet-id 或 CIDR 不符的受管網段，整段跳過並回報。套用分相執行（刪除→更新→新增）、併發上限 6、單項失敗續行；整批有成功變更才 `config-write` 一次。
