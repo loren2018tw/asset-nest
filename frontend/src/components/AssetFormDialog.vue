@@ -516,6 +516,7 @@ import {
   type InterfaceInput
 } from "@/api/interfaces";
 import { cancelAssignment, type IpPurpose } from "@/api/ips";
+import type { KeaSyncState } from "@/api/kea";
 import type { LendingBrief } from "@/api/lendings";
 import { listSubnets, type SubnetSummary } from "@/api/subnets";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
@@ -1218,10 +1219,12 @@ function interfaceChanged(row: InterfaceDraft): boolean {
 
 /**
  * 儲存介面：新增／編輯後再刪除已移除者。
- * 回傳不阻擋的警示訊息（例如全系統重複 MAC），供儲存後提示。
+ * 回傳不阻擋的警示訊息（例如全系統重複 MAC），供儲存後提示；
+ * Kea 推送失敗（MAC 變更、刪除）即時以 warning 提示（見 ADR-0027）。
  */
 async function syncInterfaces(assetId: number): Promise<string[]> {
   const warnings: string[] = [];
+  const keaSyncs: KeaSyncState[] = [];
   const keptIds = new Set<number>();
 
   for (const row of interfaceDrafts.value) {
@@ -1252,6 +1255,7 @@ async function syncInterfaces(assetId: number): Promise<string[]> {
     row.note = saved.note ?? "";
     row.original = { name: saved.name, mac: saved.mac, note: saved.note };
     warnings.push(...saved.warnings.map(warning => warning.message));
+    keaSyncs.push(...(saved.kea_sync ?? []));
   }
 
   // 已移除的既有介面：在新增／編輯成功後才刪除
@@ -1260,11 +1264,18 @@ async function syncInterfaces(assetId: number): Promise<string[]> {
     if (keptIds.has(item.id)) {
       continue;
     }
-    await deleteInterface(item.id);
+    const deleted = await deleteInterface(item.id);
+    keaSyncs.push(...deleted.kea_sync);
     removed.push(item.id);
   }
   originalInterfaces.value = originalInterfaces.value.filter(
     item => !removed.includes(item.id)
+  );
+
+  // 多筆失敗僅提示一次（訊息比照 utils/keaSync.ts）
+  notifyKeaSync(
+    $q,
+    keaSyncs.find(sync => sync.status === "failed")
   );
 
   return warnings;
@@ -1408,7 +1419,11 @@ async function deleteCreatedAsset() {
 
   deletingAsset.value = true;
   try {
-    await deleteAsset(assetId);
+    const result = await deleteAsset(assetId);
+    notifyKeaSync(
+      $q,
+      result.kea_sync.find(sync => sync.status === "failed")
+    );
     emit("saved");
     $q.notify({ type: "positive", message: "已刪除未完成的新資產" });
     cancelConfirmOpen.value = false;

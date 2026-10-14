@@ -132,6 +132,7 @@ import { onMounted, ref } from "vue";
 import {
   deleteSubnet,
   downloadSubnetsCsv,
+  fetchSubnet,
   listSubnets,
   type SubnetSummary
 } from "@/api/subnets";
@@ -209,15 +210,44 @@ async function exportCsv() {
   }
 }
 
-function confirmDelete(subnet: SubnetSummary) {
+/**
+ * 刪除確認：受管網段（Kea subnet-id 有值）加註 Kea 端不會自動清理
+ * （見 ADR-0027）；詳情讀取失敗則不進入刪除流程。
+ */
+async function confirmDelete(subnet: SubnetSummary) {
+  let keaNote = "";
+  try {
+    const detail = await fetchSubnet(subnet.id);
+    if (detail.kea_subnet_id !== null) {
+      keaNote =
+        `<br><br><span class="text-warning">此網段受 Kea 管理（subnet-id ${detail.kea_subnet_id}）：` +
+        `Kea 端網段與位址池不會被移除，需自行於 Kea 清理。</span>`;
+    }
+  } catch (cause) {
+    $q.notify({ type: "negative", message: messageOf(cause) });
+    return;
+  }
+
   $q.dialog({
     title: "刪除網段",
-    message: `確定要刪除「${subnet.name ?? subnet.cidr}」？`,
+    message:
+      `確定要刪除「${escapeHtml(subnet.name ?? subnet.cidr)}」？` + keaNote,
+    html: true,
     cancel: true,
     persistent: true
   }).onOk(() => {
     void remove(subnet);
   });
+}
+
+/** 對話框以 HTML 呈現提示資訊；網段名稱為使用者輸入，需轉義。 */
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 async function remove(subnet: SubnetSummary) {

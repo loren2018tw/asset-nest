@@ -9,6 +9,7 @@ import {
 } from "@/api/client";
 import type { Interface } from "@/api/interfaces";
 import type { IpPurpose } from "@/api/ips";
+import type { KeaSyncState } from "@/api/kea";
 import type { LendingBrief } from "@/api/lendings";
 
 /** 資產（見 spec §2.1；`expired` 由後端計算）。 */
@@ -170,6 +171,8 @@ export interface ImportCreated {
   assets: number;
   interfaces: number;
   assignments: number;
+  /** 其中建立在受管網段（`kea_subnet_id` 有值）的保留數；>0 時提示完整同步（見 ADR-0027）。 */
+  managed_reservations: number;
 }
 
 /** 匯入回應（見 spec §5.2）。 */
@@ -244,8 +247,13 @@ export function updateAsset(id: number, input: AssetInput): Promise<Asset> {
   return apiPatch<Asset>(`/api/v1/assets/${id}`, input);
 }
 
-export function deleteAsset(id: number): Promise<void> {
-  return apiDelete(`/api/v1/assets/${id}`);
+/** 刪除資產回應：受管網段保留的 Kea 刪除推送結果（見 ADR-0027）。 */
+export interface AssetDeleted {
+  kea_sync: KeaSyncState[];
+}
+
+export function deleteAsset(id: number): Promise<AssetDeleted> {
+  return apiDelete<AssetDeleted>(`/api/v1/assets/${id}`);
 }
 
 /** 位置建議值：既有值去重、不分大小寫。 */

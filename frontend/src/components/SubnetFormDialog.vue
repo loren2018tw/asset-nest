@@ -241,6 +241,7 @@
 </template>
 
 <script setup lang="ts">
+import { useQuasar } from "quasar";
 import { computed, ref, watch } from "vue";
 
 import {
@@ -258,6 +259,8 @@ import {
   parseCidr,
   type ParsedCidr
 } from "@/utils/cidr";
+
+const $q = useQuasar();
 
 const props = defineProps<{
   modelValue: boolean;
@@ -311,6 +314,12 @@ const exclusions = ref<ExclusionDraft[]>([]);
 const saving = ref(false);
 const loading = ref(false);
 const errorMessage = ref("");
+
+/** 載入時的原值（僅編輯）；供受管網段變更的存檔前確認（見 ADR-0027）。 */
+const loadedOriginal = ref<{
+  cidr: string;
+  kea_subnet_id: number | null;
+} | null>(null);
 
 /** 供載入詳情丟棄過期回應。 */
 let loadToken = 0;
@@ -561,6 +570,7 @@ async function prepare() {
   pools.value = [];
   exclusions.value = [];
   loading.value = false;
+  loadedOriginal.value = null;
 
   if (props.subnet === null) {
     return;
@@ -587,6 +597,10 @@ async function prepare() {
       kea_subnet_id:
         detail.kea_subnet_id === null ? "" : String(detail.kea_subnet_id),
       note: detail.note ?? ""
+    };
+    loadedOriginal.value = {
+      cidr: detail.cidr,
+      kea_subnet_id: detail.kea_subnet_id
     };
     pools.value = detail.pools.map(pool => ({
       key: ++poolKey,
@@ -693,6 +707,33 @@ function toInput(): SubnetInput {
   };
 }
 
+/** 存檔前檢查：編輯受管網段且 CIDR 變更或 `kea_subnet_id` 清空／改號時確認
+ *  （見 ADR-0027）；無需確認回 `null`。 */
+function managedChangeWarning(input: SubnetInput): string | null {
+  const original = loadedOriginal.value;
+  if (original === null || original.kea_subnet_id === null) {
+    return null;
+  }
+
+  const notes: string[] = [];
+  if (input.cidr !== original.cidr) {
+    notes.push(
+      `CIDR 由 ${original.cidr} 變更為 ${input.cidr}：Kea 端網段不會自動更新，完整同步將回報不符，需自行於 Kea 調整。`
+    );
+  }
+  if (input.kea_subnet_id === null) {
+    notes.push(
+      `已清空 Kea subnet-id（原 ${original.kea_subnet_id}）：此網段將不再受同步管理，Kea 端既有網段與保留不會被移除。`
+    );
+  } else if (input.kea_subnet_id !== original.kea_subnet_id) {
+    notes.push(
+      `Kea subnet-id 由 ${original.kea_subnet_id} 變更為 ${input.kea_subnet_id}：舊 id 的 Kea 網段與保留不會被移除，完整同步將以新 id 對齊。`
+    );
+  }
+
+  return notes.length > 0 ? notes.join("<br><br>") : null;
+}
+
 async function submit() {
   const issue = liveIssues.value[0];
   if (issue !== undefined) {
@@ -700,11 +741,39 @@ async function submit() {
     return;
   }
 
+  const input = toInput();
+  const warning = managedChangeWarning(input);
+  if (warning !== null) {
+    $q.dialog({
+      title: "變更受管網段",
+      message: `${warning}<br><br>確定要儲存「${escapeHtml(form.value.name.trim() || input.cidr)}」？`,
+      html: true,
+      cancel: true,
+      persistent: true
+    }).onOk(() => {
+      void save(input);
+    });
+    return;
+  }
+
+  await save(input);
+}
+
+/** 對話框以 HTML 呈現提示資訊；網段名稱為使用者輸入，需轉義。 */
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+async function save(input: SubnetInput) {
   saving.value = true;
   errorMessage.value = "";
 
   try {
-    const input = toInput();
     if (props.subnet === null) {
       await createSubnet(input);
     } else {

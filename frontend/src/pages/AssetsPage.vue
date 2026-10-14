@@ -237,6 +237,7 @@ import AssetImportDialog from "@/components/AssetImportDialog.vue";
 import LendingDialog from "@/components/LendingDialog.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { debounce } from "@/utils/debounce";
+import { notifyKeaSync } from "@/utils/keaSync";
 import { relativeTime } from "@/utils/relativeTime";
 
 const $q = useQuasar();
@@ -605,7 +606,11 @@ async function confirmDeleteWithImpact(asset: Asset) {
 
 async function remove(asset: Asset) {
   try {
-    await deleteAsset(asset.id);
+    const result = await deleteAsset(asset.id);
+    notifyKeaSync(
+      $q,
+      result.kea_sync.find(sync => sync.status === "failed")
+    );
     $q.notify({ type: "positive", message: "已刪除資產" });
     await fetchAssets();
     await loadFilterOptions();

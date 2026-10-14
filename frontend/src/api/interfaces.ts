@@ -1,4 +1,5 @@
 import { apiDelete, apiPatch, apiPost } from "@/api/client";
+import type { KeaSyncState } from "@/api/kea";
 
 /** 語意警示：僅提示、不阻擋儲存（見 ADR-0006；後續票沿用）。 */
 export interface Warning {
@@ -28,6 +29,13 @@ export interface InterfaceInput {
 /** 介面儲存結果：介面欄位＋不阻擋的警示。 */
 export interface InterfaceSaved extends Interface {
   warnings: Warning[];
+  /** MAC 變更時的 Kea 推送結果；未涉同步時不出現（見 ADR-0027）。 */
+  kea_sync?: KeaSyncState[] | null;
+}
+
+/** 刪除介面回應：受管網段保留的 Kea 刪除推送結果（見 ADR-0027）。 */
+export interface InterfaceDeleted {
+  kea_sync: KeaSyncState[];
 }
 
 /** 於資產底下新增介面。 */
@@ -46,7 +54,7 @@ export function updateInterface(
   return apiPatch<InterfaceSaved>(`/api/v1/interfaces/${id}`, input);
 }
 
-/** 刪除介面（連動刪除指派，見 spec §2.2）。 */
-export function deleteInterface(id: number): Promise<void> {
-  return apiDelete(`/api/v1/interfaces/${id}`);
+/** 刪除介面（連動刪除指派；回應帶 Kea 推送結果，見 spec §2.2、ADR-0027）。 */
+export function deleteInterface(id: number): Promise<InterfaceDeleted> {
+  return apiDelete<InterfaceDeleted>(`/api/v1/interfaces/${id}`);
 }

@@ -279,6 +279,20 @@
             {{ resultWarningCount }}
             列警示（重複項目等，不阻擋匯入，已照常建立）；可下載問題列報告核對。
           </q-banner>
+
+          <q-banner
+            v-if="(created?.managed_reservations ?? 0) > 0"
+            dense
+            rounded
+            class="bg-info text-white q-mb-md"
+          >
+            <template #avatar>
+              <q-icon name="sync" />
+            </template>
+            本次匯入在受管網段建立了
+            {{ created?.managed_reservations }}
+            筆保留，尚未推送 Kea；請至「Kea 同步」執行完整同步（見 ADR-0027）。
+          </q-banner>
         </template>
       </q-card-section>
 
