@@ -74,3 +74,10 @@ pnpm lint:check
 pnpm --filter frontend typecheck
 pnpm build:frontend
 ```
+
+## 實作記錄
+
+- 票 01、02（後端）：主實作 commit `393bcda`（`assignments::list_reservations_for_interfaces`；`kea::sync::push_reservation_deletes`／`push_reservation_updates`；資產／介面刪除與 MAC 編輯推送、MAC 清空阻擋、報廢與資產端指派順序修正；`import::Created.managed_reservations`；stub 整合測試與既有 204→200 更新）。
+- 票 03、04、05（前端與文件）：主實作 commit `f541296`（`AssetDeleted`／`InterfaceDeleted`／`InterfaceSaved.kea_sync`；刪除與 MAC 推送失敗警示；匯入完成頁提示；受管網段刪除與編輯警示；README／getting-started）。
+- 決策文件：`9c57558`（ADR-0027、ADR-0011／0026 後續修訂註記、GLOSSARY「推送」）。
+- 驗收：`cargo test`（31 組、195 單元、0 failed、6 ignored）、`cargo fmt --check`、`pnpm lint:check`、`pnpm --filter frontend typecheck`、`pnpm build:frontend` 全綠。
