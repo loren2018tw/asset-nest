@@ -1,6 +1,6 @@
 # 規格：掃描可靠性（逐筆節流、同輪重試、佇列容量推導）
 
-- 狀態：ready-for-agent（2026-10-17）
+- 狀態：已定案（2026-10-17）；已實作（2026-10-17，見票 01–03）。
 - 詞彙依 `GLOSSARY.md`；決策見 `docs/adr/0028`；場域診斷為本規格 Problem Statement。
 - 前置：`.scratch/observation-agent/spec.md`（代理模型與語意不變；本規格修訂掃描送收與佇列容量）。
 

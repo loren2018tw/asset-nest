@@ -1,6 +1,6 @@
 [package]
 name = "asset-nest-agent"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "asset-nest 觀測代理：主動掃描 ARP 並推送觀測"
 
