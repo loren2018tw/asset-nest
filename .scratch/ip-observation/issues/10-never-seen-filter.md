@@ -21,7 +21,7 @@
 - **未涵蓋回空集合**（後端判斷、前端不特判）：未涵蓋網段「從未上線」依定義不成立；與其他篩選篩不到東西的體驗一致。
 - 值名 `never_seen`；選項插在既有兩項之後。
 
-實作摘要：
+實作摘要（commit `5ddf1ae`）：
 
 - 後端：
   - `ips.rs`：`IpObservedFilter` 新增 `NeverSeen`（查詢值 `never_seen`）；`matches_v4_filters` 新分支＝`context.observed && assignment.is_some() && last_seen_at.is_none()`（有效涵蓋 × 已指派 × 未見，含「僅檢查未見」）；單元測試新增 `never_seen_filter_requires_assignment_and_coverage`（預設路徑、排序路徑、未涵蓋回空）與 parse 白名單。
