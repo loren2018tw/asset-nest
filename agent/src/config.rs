@@ -7,7 +7,7 @@
 //!   IPv4 網段才採用，多候選或找不到一律拒絕啟動並提示）。
 //! - `AGENT_NAME`：選填；預設 hostname。
 //! - `AGENT_SWEEP_INTERVAL_SECS`：選填；預設 900（首次掃描在間隔後）。
-//! - `AGENT_SWEEP_RATE_PPS`：選填；預設 1000。
+//! - `AGENT_SWEEP_RATE_PPS`：選填；預設 200（每秒送出上限；逐筆節流）。
 //!
 //! 啟動驗證：解析後的網段必須有本機介面位址落在其中，否則無法探測，
 //! 拒絕啟動並說明原因。
@@ -21,8 +21,8 @@ use crate::probe;
 
 /// `AGENT_SWEEP_INTERVAL_SECS` 的預設值（15 分鐘；見 spec §觀測代理）。
 pub const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 900;
-/// `AGENT_SWEEP_RATE_PPS` 的預設值（見 spec §觀測代理）。
-pub const DEFAULT_SWEEP_RATE_PPS: u32 = 1_000;
+/// `AGENT_SWEEP_RATE_PPS` 的預設值（每秒送出上限；見 spec §掃描可靠性）。
+pub const DEFAULT_SWEEP_RATE_PPS: u32 = 200;
 
 /// 代理啟動設定。
 #[derive(Debug, Clone)]
@@ -335,9 +335,9 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_fifteen_minutes_and_1000_pps() {
+    fn defaults_are_fifteen_minutes_and_200_pps() {
         assert_eq!(DEFAULT_SWEEP_INTERVAL_SECS, 900);
-        assert_eq!(DEFAULT_SWEEP_RATE_PPS, 1_000);
+        assert_eq!(DEFAULT_SWEEP_RATE_PPS, 200);
     }
 
     #[cfg(target_os = "linux")]
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(config.server_url, "http://127.0.0.1:8080");
         assert_eq!(config.subnet, network("127.0.0.0/8"));
         assert_eq!(config.sweep_interval, Duration::from_secs(900));
-        assert_eq!(config.sweep_rate_pps, 1_000);
+        assert_eq!(config.sweep_rate_pps, 200);
         assert!(!config.name.is_empty(), "名稱預設 hostname");
     }
 

@@ -124,7 +124,7 @@ curl -fsSL https://raw.githubusercontent.com/loren2018tw/asset-nest/main/deploy/
 | `--subnet <CIDR>`         | 要觀測的 IPv4 網段；預設由本機介面自動偵測，多候選或找不到時必須明確指定 |
 | `--name <name>`           | 代理名稱（預設 hostname）                                                |
 | `--sweep-interval <secs>` | 主動掃描間隔秒數（預設 900）                                             |
-| `--rate <pps>`            | 掃描每秒探測數上限（預設 1000）                                          |
+| `--rate <pps>`            | 掃描每秒探測數上限（預設 200）                                           |
 | `--version <tag>`         | 自 GitHub Release 下載指定版本（預設 `latest`；例：`agent-v0.1.0`）      |
 | `--source-dir <path>`     | 改以既有 checkout 自原始碼建置（不自動下載；開發機／CI）                 |
 
@@ -135,7 +135,7 @@ curl -fsSL https://raw.githubusercontent.com/loren2018tw/asset-nest/main/deploy/
 ### 行為與覆蓋語意
 
 - **持續被動監聽**：只收不送地監聽 ARP；來源位址落在涵蓋網段**外**者記為「網段外觀測」（來源 `arp_passive`、旗標 `out_of_subnet`），網段內者由主動掃描負責。可發現同 L2 但不在受管網段內的設備（錯設定、私接、其他網段延伸）；命中率取決於設備活動。
-- **週期掃描**：每 `AGENT_SWEEP_INTERVAL_SECS`（預設 900 秒）對網段全部 host 位址限速探測；回報 `checked`（全數送出）與 `seen`（有回應），因此「檢查過、沒回應」與「沒有資料」可以區分；安靜但活著的設備仍會被驗證存活。
+- **週期掃描**：每 `AGENT_SWEEP_INTERVAL_SECS`（預設 900 秒）對網段全部 host 位址**逐筆節流**探測（`AGENT_SWEEP_RATE_PPS` 為每秒送訊上限，預設 200），未回覆目標同輪重試一次；回報 `checked`（全數送出）與 `seen`（有回應），因此「檢查過、沒回應」與「沒有資料」可以區分；安靜但活著的設備仍會被驗證存活。
 - **心跳**：每 60 秒回報名稱、版本與涵蓋網段；後端 `AGENT_STALE_SECS`（預設 900 秒）內有回報視為「在線」。
 - **覆蓋語意**：網段「已觀測」＝至少有一個在線代理涵蓋（同網段多代理允許，取任一）；代理失聯時該網段顯示「未觀測」、既有觀測資料保留不清除，代理恢復後自然接續。「從未上線」＝有掃描紀錄但從未看到該位址，與「未觀測」不同。
 - **Kea 租約**（來源 `kea_lease`）：後端每 15 分鐘讀取目前有效租約（`state=default`、對應 `kea_subnet_id`），以 `cltt` 記為最後可見。

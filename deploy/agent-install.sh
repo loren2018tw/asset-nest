@@ -82,7 +82,7 @@ usage() {
                              多候選或找不到時必須明確指定）
   --name <name>              代理名稱（預設 hostname）
   --sweep-interval <secs>    主動掃描間隔秒數（預設 900；首次在間隔後）
-  --rate <pps>               掃描每秒探測數上限（預設 1000）
+  --rate <pps>               掃描每秒探測數上限（預設 200）
   --source-dir <path>        改以既有 checkout 建置（不 clone、不下載）
   -h, --help                 顯示本說明
 
@@ -484,7 +484,7 @@ print_summary() {
   環境檔：${ENV_FILE}（0640 root:${SERVICE_USER}）
   後端：${SERVER_URL}
   instance id：${INSTANCE_ID}
-  掃描間隔：${SWEEP_INTERVAL:-900} 秒；速率：${SWEEP_RATE:-1000} pps${SUBNET:+；網段：$SUBNET}
+  掃描間隔：${SWEEP_INTERVAL:-900} 秒；速率：${SWEEP_RATE:-200} pps${SUBNET:+；網段：$SUBNET}
 
 後續：
   1. 系統狀態頁的「觀測代理」應出現本代理（啟動後立即送出第一次心跳）。

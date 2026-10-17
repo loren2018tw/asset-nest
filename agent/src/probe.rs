@@ -5,12 +5,15 @@
 //! 探測介面選擇）與被動監聽（持續迴圈 [`passive_listen`] 與短窗
 //! [`passive_observe`]；見票 05、spec §持續被動）。
 //!
-//! 主動探測語意沿用後端：「送一批、收約 2 秒回覆窗」，批與批的開始時間
-//! 相距約 1 秒以貼近 `rate_pps`。
+//! 主動探測逐筆節流送出（`rate_pps` 為每秒送訊上限；見票 01、02、spec
+//! §掃描可靠性）：送訊期間即時收訊，送完後進入收尾回覆窗（閒置以
+//! 「回覆」為準、2 秒硬上限）；未回覆目標同輪重試一輪。
 //!
 //! 被動監聽**只收不送**：解析 opcode 1／2 的 sender 並套用排除規則
 //! （[`valid_passive_sender`]）；持續迴圈由 caller 提供停止條件與逐筆回呼。
 
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -21,12 +24,15 @@ use crate::host_range::HostRange;
 /// 正規化後的 MAC 位址字串（小寫冒號格式，如 `aa:bb:cc:dd:ee:ff`）。
 pub type Mac = String;
 
-/// 主動探測的回覆窗硬上限；送出整批後被動收集。
+/// 收尾回覆窗硬上限（見票 01）。
 pub const RAW_REPLY_WINDOW: Duration = Duration::from_secs(2);
-/// 距最後一幀超過此時間即提早結束回覆窗（無回應時不空等硬上限）。
+/// 距最後一筆回覆超過此時間即提早結束回覆窗（無回應時不空等硬上限；
+/// 背景 ARP 訊框不延長，見票 01）。
 pub const RAW_IDLE_EXIT: Duration = Duration::from_millis(500);
-/// raw socket 單次 `recv` 的等待上限（輪詢以判斷是否提早結束）。
+/// raw socket 單次 `recv` 的等待上限（輪詢以判斷回覆窗是否結束）。
 pub const RAW_RECV_POLL: Duration = Duration::from_millis(200);
+/// 未回覆目標的同輪重試輪數（見票 02）。
+pub const RETRY_ROUNDS: usize = 1;
 
 /// 一次主動掃描的結果（見 spec §週期掃描）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -454,43 +460,90 @@ fn send_frame(socket: &RawSocket, frame: &[u8]) -> Result<(), ProbeError> {
 
 /// 回覆窗是否可結束（純函式；供單元測試）。
 ///
-/// 任一條件成立即結束：全部目標已回應、距最後一幀已達 `idle`、已達硬上限
-/// `window`。`since_last_frame` 由呼叫端維護（尚無幀時自收集開始起算）。
+/// 任一條件成立即結束：全部目標已回應、距最後一筆回覆已達 `idle`、已達
+/// 硬上限 `window`。`since_last_reply` 由呼叫端維護（尚無回覆時自窗開始起算）。
 fn reply_window_done(
     elapsed: Duration,
-    since_last_frame: Duration,
+    since_last_reply: Duration,
     answered: usize,
     target_count: usize,
     window: Duration,
     idle: Duration,
 ) -> bool {
-    answered >= target_count || since_last_frame >= idle || elapsed >= window
+    answered >= target_count || since_last_reply >= idle || elapsed >= window
 }
 
-/// 收集回覆窗內的 ARP 回覆；僅保留目標集合內、每個位址第一筆回應。
-///
-/// 全部目標回應、閒置 [`RAW_IDLE_EXIT`] 或達硬上限 [`RAW_REPLY_WINDOW`]
-/// 時結束（決策見 [`reply_window_done`]）。
+/// 逐筆送訊的最小間隔：每秒最多 `rate_pps` 筆（見票 01；速率由設定保證 ≥1）。
+fn frame_interval(rate_pps: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(rate_pps.max(1)))
+}
+
+/// 未回覆的目標（保持原順序；見票 02）。
+fn unanswered(targets: &[Ipv4Addr], seen: &[(Ipv4Addr, Mac)]) -> Vec<Ipv4Addr> {
+    targets
+        .iter()
+        .copied()
+        .filter(|address| !seen.iter().any(|(known, _)| known == address))
+        .collect()
+}
+
+/// 收集一筆回覆：opcode 2、sender 在本輪目標集合內、每址第一筆（見票 01）。
 #[cfg(target_os = "linux")]
-fn collect_replies(
+fn accept_reply(frame: &[u8], allowed: &HashSet<Ipv4Addr>, seen: &mut Vec<(Ipv4Addr, Mac)>) {
+    if let Some((address, mac)) = parse_arp_reply(frame)
+        && allowed.contains(&address)
+        && !seen.iter().any(|(known, _)| *known == address)
+    {
+        seen.push((address, mac));
+    }
+}
+
+/// 非阻塞讀取目前可收的訊框並收集回覆（送訊期間逐筆呼叫；見票 01）。
+#[cfg(target_os = "linux")]
+fn drain_available(
     socket: &RawSocket,
-    targets: &[Ipv4Addr],
-    window: Duration,
-) -> Vec<(Ipv4Addr, Mac)> {
+    allowed: &HashSet<Ipv4Addr>,
+    seen: &mut Vec<(Ipv4Addr, Mac)>,
+) {
+    let mut buffer = [0u8; 2048];
+    loop {
+        // SAFETY: buffer 為本函式持有的可寫緩衝區；fd 有效。
+        let received = unsafe {
+            libc::recv(
+                socket.fd,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if received <= 0 {
+            break; // 目前無資料（EAGAIN）或不可恢復：結束本輪 drain
+        }
+        accept_reply(&buffer[..received as usize], allowed, seen);
+    }
+}
+
+/// 收尾回覆窗：全部目標已回應、距最後一筆回覆 [`RAW_IDLE_EXIT`]、或達
+/// [`RAW_REPLY_WINDOW`] 硬上限時結束（見票 01）。
+#[cfg(target_os = "linux")]
+fn drain_window(socket: &RawSocket, allowed: &HashSet<Ipv4Addr>, seen: &mut Vec<(Ipv4Addr, Mac)>) {
     use std::time::Instant;
 
     let started = Instant::now();
-    let mut last_frame = started;
+    let mut last_reply = started;
     let mut buffer = [0u8; 2048];
-    let mut responses: Vec<(Ipv4Addr, Mac)> = Vec::new();
 
     loop {
+        let answered = seen
+            .iter()
+            .filter(|(address, _)| allowed.contains(address))
+            .count();
         if reply_window_done(
             started.elapsed(),
-            last_frame.elapsed(),
-            responses.len(),
-            targets.len(),
-            window,
+            last_reply.elapsed(),
+            answered,
+            allowed.len(),
+            RAW_REPLY_WINDOW,
             RAW_IDLE_EXIT,
         ) {
             break;
@@ -511,39 +564,58 @@ fn collect_replies(
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ) {
-                continue; // 等待窗逾時：回到迴圈開頭判斷是否提早結束
+                continue; // 等待窗逾時：回到迴圈開頭判斷是否結束
             }
-            break;
+            break; // 非逾時錯誤：結束回覆窗，保留已收集結果
         }
         if received == 0 {
             continue;
         }
-        last_frame = Instant::now();
 
-        let frame = &buffer[..received as usize];
-        if let Some((address, mac)) = parse_arp_reply(frame)
-            && targets.contains(&address)
-            && !responses.iter().any(|(known, _)| *known == address)
-        {
-            responses.push((address, mac));
+        let before = seen.len();
+        accept_reply(&buffer[..received as usize], allowed, seen);
+        if seen.len() > before {
+            last_reply = Instant::now();
         }
     }
-
-    responses.sort_by_key(|(address, _)| *address);
-    responses
 }
 
-/// 批與批的剩餘等待（純函式）：批開始時間相距約 `interval`；探測耗時
-/// `elapsed` 後只補足剩餘時間，耗時已達或超過間隔時不再等待。
-fn batch_pacing_delay(elapsed: Duration, interval: Duration) -> Duration {
-    interval.saturating_sub(elapsed)
+/// 逐筆節流送出一輪探測，並在送訊期間即時收訊（見票 01）。
+#[cfg(target_os = "linux")]
+fn send_round(
+    socket: &RawSocket,
+    sender_mac: &str,
+    sender_ip: Ipv4Addr,
+    targets: &[Ipv4Addr],
+    interval: Duration,
+    allowed: &HashSet<Ipv4Addr>,
+    seen: &mut Vec<(Ipv4Addr, Mac)>,
+) -> Result<(), ProbeError> {
+    use std::time::Instant;
+
+    let mut next_slot = Instant::now();
+    for target in targets {
+        let frame = build_arp_request(sender_mac, sender_ip, *target)
+            .ok_or_else(|| ProbeError::Unusable("本機介面 MAC 格式錯誤".to_string()))?;
+        send_frame(socket, &frame)?;
+        drain_available(socket, allowed, seen);
+
+        next_slot += interval;
+        let now = Instant::now();
+        if next_slot > now {
+            std::thread::sleep(next_slot - now);
+        } else {
+            next_slot = now;
+        }
+    }
+    Ok(())
 }
 
-/// 對 `targets` 限速主動探測（阻塞式；見 spec §週期掃描）。
+/// 對 `targets` 逐筆節流主動探測（阻塞式；見 spec §掃描可靠性）。
 ///
-/// 每批最多 `rate_pps` 個目標：送出整批後以 [`RAW_REPLY_WINDOW`] 收集
-/// 回覆，批與批間補足約 1 秒間隔；`checked` 為實際送出的位址。
-/// 呼叫端以 `tokio::task::spawn_blocking` 執行（見 [`sweep`]）。
+/// 送訊速率上限為 `rate_pps`（每秒）；送訊期間即時收訊，送完後進入收尾
+/// 回覆窗，未回覆目標同輪重試一輪（見票 01、02）。`checked` 為全部主掃
+/// 送出的位址。呼叫端以 `tokio::task::spawn_blocking` 執行（見 [`sweep`]）。
 pub fn probe_targets(
     network: &Ipv4Net,
     targets: &[Ipv4Addr],
@@ -555,51 +627,51 @@ pub fn probe_targets(
     probe_targets_platform(network, targets, rate_pps)
 }
 
-/// 平台實作（Linux）：開 raw socket、分批送收。
+/// 平台實作（Linux）：開 raw socket，逐筆節流送收；未回覆目標同輪重試一次。
 #[cfg(target_os = "linux")]
 fn probe_targets_platform(
     network: &Ipv4Net,
     targets: &[Ipv4Addr],
     rate_pps: u32,
 ) -> Result<SweepResult, ProbeError> {
-    use std::time::Instant;
-
     let (interface, sender_ip) = local_interface(network)
         .ok_or_else(|| ProbeError::Unusable(format!("找不到落在網段 {network} 內的本機介面")))?;
     let sender_mac = read_interface_mac(&interface)
         .ok_or_else(|| ProbeError::Unusable(format!("讀取介面 {interface} MAC 失敗")))?;
 
     let socket = open_arp_socket(&interface)?;
-    let batch_size = rate_pps.max(1) as usize;
-    let batch_count = targets.len().div_ceil(batch_size);
-    let mut result = SweepResult {
-        checked: Vec::with_capacity(targets.len()),
-        seen: Vec::new(),
-    };
+    let interval = frame_interval(rate_pps);
+    let mut seen: Vec<(Ipv4Addr, Mac)> = Vec::new();
 
-    for (index, batch) in targets.chunks(batch_size).enumerate() {
-        let batch_started = Instant::now();
-        for target in batch {
-            let frame = build_arp_request(&sender_mac, sender_ip, *target)
-                .ok_or_else(|| ProbeError::Unusable("本機介面 MAC 格式錯誤".to_string()))?;
-            send_frame(&socket, &frame)?;
-            result.checked.push(*target);
+    // 主掃＋未回覆重試（見票 01、02）：每輪建立本輪目標集合後送收。
+    let mut remaining: Vec<Ipv4Addr> = targets.to_vec();
+    for round in 0..=RETRY_ROUNDS {
+        if remaining.is_empty() {
+            break;
         }
 
-        result
-            .seen
-            .extend(collect_replies(&socket, batch, RAW_REPLY_WINDOW));
+        let allowed: HashSet<Ipv4Addr> = remaining.iter().copied().collect();
+        send_round(
+            &socket,
+            &sender_mac,
+            sender_ip,
+            &remaining,
+            interval,
+            &allowed,
+            &mut seen,
+        )?;
+        drain_window(&socket, &allowed, &mut seen);
 
-        if index + 1 < batch_count {
-            std::thread::sleep(batch_pacing_delay(
-                batch_started.elapsed(),
-                Duration::from_secs(1),
-            ));
+        if round == 0 {
+            remaining = unanswered(targets, &seen);
         }
     }
 
-    result.seen.sort_by_key(|(address, _)| *address);
-    Ok(result)
+    seen.sort_by_key(|(address, _)| *address);
+    Ok(SweepResult {
+        checked: targets.to_vec(),
+        seen,
+    })
 }
 
 /// 非 Linux：raw 一律不可用。
@@ -1007,39 +1079,77 @@ mod tests {
         // 全部目標已回應 → 立即結束。
         assert!(reply_window_done(ms(0), ms(0), 3, 3, window, idle));
         assert!(!reply_window_done(ms(0), ms(0), 2, 3, window, idle));
-        // 距最後一幀達 idle → 提早結束（含自始無幀）。
+        // 距最後一筆回覆達 idle → 提早結束（含自始無回覆）。
         assert!(reply_window_done(ms(500), ms(500), 1, 3, window, idle));
         assert!(!reply_window_done(ms(499), ms(499), 1, 3, window, idle));
-        // 有新幀持續進來：未達 idle、未全回應、未達硬上限 → 繼續。
+        // 有新回覆持續進來：未達 idle、未全回應、未達硬上限 → 繼續。
         assert!(!reply_window_done(ms(700), ms(200), 1, 3, window, idle));
-        // 硬上限：即使幀持續進來也結束。
+        // 硬上限：即使持續有回覆也結束。
         assert!(reply_window_done(window, ms(10), 0, 3, window, idle));
         assert!(!reply_window_done(ms(1_999), ms(10), 0, 3, window, idle));
     }
 
     #[test]
-    fn batch_pacing_delay_only_sleeps_remainder_of_interval() {
-        let interval = Duration::from_secs(1);
+    fn frame_interval_is_one_over_rate() {
+        assert_eq!(frame_interval(1_000), Duration::from_millis(1));
+        assert_eq!(frame_interval(200), Duration::from_millis(5));
+        assert_eq!(frame_interval(2), Duration::from_millis(500));
         assert_eq!(
-            batch_pacing_delay(Duration::ZERO, interval),
-            interval,
-            "未耗時：補足完整間隔"
+            frame_interval(0),
+            Duration::from_millis(1_000),
+            "速率 0 視為 1"
         );
+    }
+
+    #[test]
+    fn unanswered_keeps_order_and_excludes_seen() {
+        let targets = vec![addr("10.0.0.1"), addr("10.0.0.2"), addr("10.0.0.3")];
+        let seen = vec![(addr("10.0.0.2"), "aa:bb:cc:dd:ee:02".to_string())];
+
         assert_eq!(
-            batch_pacing_delay(Duration::from_millis(800), interval),
-            Duration::from_millis(200),
-            "耗時 800ms：只補 200ms"
+            unanswered(&targets, &seen),
+            vec![addr("10.0.0.1"), addr("10.0.0.3")]
         );
+        assert_eq!(unanswered(&targets, &[]), targets, "全未回覆：原樣保留");
+        assert!(
+            unanswered(&targets, &seen_covering(&targets)).is_empty(),
+            "全已回覆"
+        );
+        assert!(unanswered(&[], &seen).is_empty(), "空目標");
+    }
+
+    /// 產生覆蓋 `targets` 全部位址的回覆清單（測試輔助）。
+    fn seen_covering(targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, Mac)> {
+        targets
+            .iter()
+            .map(|address| (*address, "aa:bb:cc:dd:ee:ff".to_string()))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn accept_reply_filters_allowed_targets_and_keeps_first_hit() {
+        let allowed: HashSet<Ipv4Addr> = [addr("10.0.0.7")].into_iter().collect();
+        let mut seen = Vec::new();
+
+        let reply =
+            |ip: &str, mac: &str| reply_frame(mac, addr(ip), "aa:bb:cc:dd:ee:01", addr("10.0.0.2"));
+
+        accept_reply(&reply("10.0.0.9", "aa:bb:cc:dd:ee:09"), &allowed, &mut seen);
+        assert!(seen.is_empty(), "不在本輪目標集合內不得收集");
+
+        accept_reply(&reply("10.0.0.7", "aa:bb:cc:dd:ee:07"), &allowed, &mut seen);
+        accept_reply(&reply("10.0.0.7", "aa:bb:cc:dd:ee:08"), &allowed, &mut seen);
         assert_eq!(
-            batch_pacing_delay(interval, interval),
-            Duration::ZERO,
-            "耗時恰達間隔：不再等待"
+            seen,
+            vec![(addr("10.0.0.7"), "aa:bb:cc:dd:ee:07".to_string())],
+            "同一位址只留第一筆"
         );
-        assert_eq!(
-            batch_pacing_delay(Duration::from_millis(1_500), interval),
-            Duration::ZERO,
-            "耗時超過間隔：不再等待"
-        );
+
+        let request = build_arp_request("aa:bb:cc:dd:ee:07", addr("10.0.0.7"), addr("10.0.0.2"))
+            .expect("合法 MAC");
+        accept_reply(&request, &allowed, &mut seen);
+        assert_eq!(seen.len(), 1, "請求（opcode 1）不得收集");
     }
 
     #[test]
