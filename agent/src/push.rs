@@ -11,8 +11,9 @@
 //! - 401：記明確錯誤，批次保留、依退避重試（不熱迴圈）。
 //! - 連線錯誤／5xx：批次保留、依退避重試（5s→5min 指數、上限 5min）。
 //!
-//! 記憶體佇列上限 [`QUEUE_CAPACITY`] 筆（checked＋seen），滿載丟最舊並警告；
-//! 每請求合計上限 [`MAX_REQUEST_ENTRIES`] 筆，超出拆成多筆請求。
+//! 記憶體佇列容量由網段推導（[`queue_capacity`]；下限 [`QUEUE_CAPACITY`]、
+//! 上限 [`QUEUE_CAPACITY_MAX`]），滿載丟最舊並警告；每請求合計上限
+//! [`MAX_REQUEST_ENTRIES`] 筆，超出拆成多筆請求。
 
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
@@ -20,19 +21,36 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ipnet::Ipv4Net;
 use serde::Serialize;
 use tokio::sync::Notify;
 
+use crate::host_range::HostRange;
 use crate::probe::Mac;
 
 /// 每請求的觀測筆數上限（`checked`＋`seen`；見 spec §推送）。
 pub const MAX_REQUEST_ENTRIES: usize = 5_000;
-/// 記憶體佇列的筆數上限（滿載丟最舊；見 spec §推送）。
+/// 記憶體佇列容量下限（筆；見票 03）。
 pub const QUEUE_CAPACITY: usize = 10_000;
+/// 記憶體佇列容量上限（筆；保護超大網段記憶體用量，見票 03）。
+pub const QUEUE_CAPACITY_MAX: usize = 1_048_576;
 /// 失敗退避起點（5 秒）。
 pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
 /// 失敗退避上限（5 分鐘）。
 pub const BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+/// 依網段大小推導推送佇列容量（見票 03）。
+///
+/// 單輪掃描的 `checked＋seen ≤ 2 × host 數`；取兩倍 host 數＋ 1,024 筆
+/// 餘裕，讓一輪（含同輪重試）完整入列。下限 [`QUEUE_CAPACITY`]、
+/// 上限 [`QUEUE_CAPACITY_MAX`]。
+pub fn queue_capacity(network: &Ipv4Net) -> usize {
+    HostRange::of(network)
+        .count()
+        .saturating_mul(2)
+        .saturating_add(1_024)
+        .clamp(QUEUE_CAPACITY as u64, QUEUE_CAPACITY_MAX as u64) as usize
+}
 
 /// 觀測回報的認證碼標頭（與後端 `api::agents` 一致）。
 const AUTH_CODE_HEADER: &str = "X-Auth-Code";
@@ -625,11 +643,30 @@ mod tests {
     }
 
     #[test]
-    fn spec_limits_are_5000_and_10000() {
+    fn spec_limits_are_5000_capacity_bounds() {
         assert_eq!(MAX_REQUEST_ENTRIES, 5_000);
         assert_eq!(QUEUE_CAPACITY, 10_000);
+        assert_eq!(QUEUE_CAPACITY_MAX, 1_048_576);
         assert_eq!(BACKOFF_BASE, Duration::from_secs(5));
         assert_eq!(BACKOFF_MAX, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn queue_capacity_scales_with_subnet_size() {
+        let net = |cidr: &str| cidr.parse::<Ipv4Net>().expect("合法網段");
+
+        assert_eq!(queue_capacity(&net("10.0.0.0/24")), 10_000, "小網段用下限");
+        assert_eq!(queue_capacity(&net("10.0.0.7/32")), 10_000, "/32 用下限");
+        assert_eq!(
+            queue_capacity(&net("10.1.0.0/16")),
+            132_092,
+            "2 × 65,534 ＋ 1,024"
+        );
+        assert_eq!(
+            queue_capacity(&net("10.0.0.0/8")),
+            QUEUE_CAPACITY_MAX,
+            "上限"
+        );
     }
 
     #[test]

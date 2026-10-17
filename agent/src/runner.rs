@@ -22,7 +22,7 @@ use crate::heartbeat::{HEARTBEAT_INTERVAL, Heartbeat, MatchChange, MatchTracker}
 use crate::passive::{self, Aggregator};
 use crate::probe;
 use crate::push::{
-    self, AgentInfo, Backoff, FlushResult, PushQueue, Pusher, QUEUE_CAPACITY, Seen, SweepReport,
+    self, AgentInfo, Backoff, FlushResult, PushQueue, Pusher, Seen, SweepReport, queue_capacity,
 };
 
 /// 代理主流程：建立推送器與佇列、啟動背景任務，直到收到 Ctrl-C。
@@ -44,7 +44,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         agent.clone(),
     )?;
     let heartbeat = Heartbeat::new(client, &config.server_url, &config.auth_code, agent)?;
-    let queue = Arc::new(PushQueue::new(QUEUE_CAPACITY));
+    // 佇列容量依網段推導（見票 03）：大網段單輪掃描完整入列。
+    let capacity = queue_capacity(&config.subnet);
+    let queue = Arc::new(PushQueue::new(capacity));
     let shutdown = Arc::new(AtomicBool::new(false));
     let aggregator = Arc::new(Mutex::new(Aggregator::new()));
 
@@ -69,6 +71,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     tracing::info!(
         subnet = %config.subnet,
         sweep_interval_secs = config.sweep_interval.as_secs(),
+        queue_capacity = capacity,
         "代理常駐啟動（心跳 60 秒、首次掃描在間隔後、被動監聽持續並每 30 秒 flush）"
     );
 
