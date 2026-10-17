@@ -106,8 +106,12 @@ export type IpSortField =
   | "assignment"
   | "last_seen";
 
-/** 觀測篩選：非法佔用 IP／觀測 MAC 不符（伺服器端；見票 07、票 09）。 */
-export type IpObservedFilter = "unassigned_seen" | "observed_mac_mismatch";
+/** 觀測篩選：非法佔用 IP／觀測 MAC 不符／從未上線（伺服器端；見票 07、票 09；
+ *  `never_seen` 見 ip-observation 票 10）。 */
+export type IpObservedFilter =
+  | "unassigned_seen"
+  | "observed_mac_mismatch"
+  | "never_seen";
 
 /** IP 清單搜尋、排序與分頁參數（皆為伺服器端）。 */
 export interface IpListParams {
@@ -115,7 +119,7 @@ export interface IpListParams {
   q?: string | undefined;
   /** 狀態／用途篩選。 */
   status?: IpStatus | undefined;
-  /** 觀測篩選（`unassigned_seen`／`observed_mac_mismatch`）。 */
+  /** 觀測篩選（`unassigned_seen`／`observed_mac_mismatch`／`never_seen`）。 */
   observed?: IpObservedFilter | undefined;
   /** 排序欄位；預設 address。 */
   sort?: IpSortField | undefined;

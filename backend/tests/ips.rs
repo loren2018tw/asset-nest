@@ -2,6 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -1299,6 +1300,46 @@ async fn insert_presence(pool: &SqlitePool, subnet_id: i64, address: &str, mac: 
     .expect("植入觀測現況");
 }
 
+/// 植入「已檢查但從未看見」的觀測現況列（`last_seen_*` 為 NULL；見票 10）。
+async fn insert_checked_only(pool: &SqlitePool, subnet_id: i64, address: &str) {
+    sqlx::query(
+        "INSERT INTO ip_presence (subnet_id, address, last_checked_at)
+         VALUES (?, ?, '2026-10-06T10:00:00Z')",
+    )
+    .bind(subnet_id)
+    .bind(address)
+    .execute(pool)
+    .await
+    .expect("植入已檢查現況");
+}
+
+/// 植入一台在線代理，使該網段具備有效涵蓋（見票 08；比照 observation_history 測試）。
+async fn cover_with_agent(pool: &SqlitePool, subnet_id: i64) {
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    sqlx::query(
+        "INSERT INTO agent
+             (id, name, version, source_ip, subnet_cidr, subnet_id,
+              first_report_at, last_report_at)
+         VALUES ('test-agent', 'test-agent', '0.1.0', '203.0.113.9',
+                 (SELECT cidr FROM subnets WHERE id = ?), ?, ?, ?)",
+    )
+    .bind(subnet_id)
+    .bind(subnet_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .expect("植入在線代理");
+}
+
+/// 讓所有代理的最近回報時間過期（超過 `AGENT_STALE_SECS`）。
+async fn expire_agents(pool: &SqlitePool) {
+    sqlx::query("UPDATE agent SET last_report_at = '2020-01-01T00:00:00Z'")
+        .execute(pool)
+        .await
+        .expect("調整代理回報時間");
+}
+
 #[tokio::test]
 async fn observed_mac_mismatch_flags_assigned_rows_with_different_seen_mac() {
     let pool = test_pool().await;
@@ -1678,6 +1719,119 @@ async fn observed_filters_are_server_side_and_follow_badge_semantics() {
         assert_eq!(body["error"], "validation_error");
         assert_eq!(body["details"]["field"], "observed");
     }
+}
+
+#[tokio::test]
+async fn never_seen_filter_lists_assigned_unseen_only_under_coverage() {
+    let pool = test_pool().await;
+    let subnet = create_subnet(
+        &pool,
+        json!({
+            "cidr": "10.0.0.0/28",
+            "pools": [{ "start_ip": "10.0.0.13", "end_ip": "10.0.0.14" }]
+        }),
+    )
+    .await;
+    let id = subnet["id"].as_i64().expect("回應含 id");
+
+    let asset = create_asset(&pool, "新機主機", "機房 A").await;
+    let first = create_interface(
+        &pool,
+        asset,
+        json!({ "name": "eth0", "mac": "aa:bb:cc:dd:ee:01" }),
+    )
+    .await;
+    let second = create_interface(
+        &pool,
+        asset,
+        json!({ "name": "eth1", "mac": "aa:bb:cc:dd:ee:02" }),
+    )
+    .await;
+    let third = create_interface(
+        &pool,
+        asset,
+        json!({ "name": "eth2", "mac": "aa:bb:cc:dd:ee:03" }),
+    )
+    .await;
+
+    // .1 已指派、無現況（尚未檢查）→ 從未上線。
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.1",
+        json!({ "interface_id": first, "purpose": "static" }),
+    )
+    .await;
+    // .2 已指派（保留）、已檢查但未見 → 從未上線。
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.2",
+        json!({ "interface_id": second, "purpose": "reservation", "hostname": "new-host" }),
+    )
+    .await;
+    // .3 已指派且已見 → 非從未上線。
+    assign_ip(
+        &pool,
+        id,
+        "10.0.0.3",
+        json!({ "interface_id": third, "purpose": "static" }),
+    )
+    .await;
+    insert_checked_only(&pool, id, "10.0.0.2").await;
+    insert_presence(&pool, id, "10.0.0.3", "aa:bb:cc:dd:ee:03").await;
+
+    // 未涵蓋（無在線代理）：一律回空集合。
+    let page = list_ips(&pool, id, "?observed=never_seen").await;
+    assert_eq!(page["total"], 0, "未涵蓋網段不成立「從未上線」");
+
+    // 有效涵蓋：僅已指派且未見的位址（.4 可用、.13 池內未見皆不入列）。
+    cover_with_agent(&pool, id).await;
+    let page = list_ips(&pool, id, "?observed=never_seen").await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.1", "10.0.0.2"]);
+
+    // 非預設排序與分頁亦套用篩選。
+    let page = list_ips(
+        &pool,
+        id,
+        "?observed=never_seen&sort=address&dir=desc&page=1&per_page=1",
+    )
+    .await;
+    assert_eq!(page["total"], 2);
+    assert_eq!(addresses(&page), ["10.0.0.2"]);
+
+    // 與既有狀態篩選並用（AND）：僅保留用途的 .2。
+    let page = list_ips(&pool, id, "?observed=never_seen&status=reservation").await;
+    assert_eq!(addresses(&page), ["10.0.0.2"]);
+
+    // 代理離線即未觀測：回空集合（既有現況保留）。
+    expire_agents(&pool).await;
+    let page = list_ips(&pool, id, "?observed=never_seen").await;
+    assert_eq!(page["total"], 0, "代理離線後不再涵蓋");
+
+    // 白名單訊息列出新值。
+    let (status, body) = send(
+        &pool,
+        Method::GET,
+        &format!("/api/v1/subnets/{id}/ips?observed=bogus"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("never_seen"),
+        "白名單訊息應列出新值：{body}"
+    );
+
+    // v6 恆無觀測：回空集合。
+    let v6 = create_subnet(&pool, json!({ "cidr": "fd00::/64" })).await;
+    let v6_id = v6["id"].as_i64().expect("回應含 id");
+    let page = list_ips(&pool, v6_id, "?observed=never_seen").await;
+    assert_eq!(page["total"], 0);
 }
 
 #[tokio::test]

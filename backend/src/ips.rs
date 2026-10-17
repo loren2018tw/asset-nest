@@ -193,8 +193,8 @@ impl IpStatusFilter {
     }
 }
 
-/// 觀測篩選值（見 spec §讀取端、票 07；`observed_mac_mismatch` 修訂見票 09）；
-/// 未知值由 API 層回 400。
+/// 觀測篩選值（見 spec §讀取端、票 07；`observed_mac_mismatch` 修訂見票 09；
+/// `never_seen` 見 ip-observation 票 10）；未知值由 API 層回 400。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpObservedFilter {
     /// 無指派、非池內，但有 `last_seen_mac`（UI 顯示「非法佔用 IP」）。
@@ -202,6 +202,9 @@ pub enum IpObservedFilter {
     /// 指派位址被觀測到由非宣告 MAC 使用，即「觀測 MAC 不符」徽章
     /// （`ObservedMacMismatch`）的列集合（不分大小寫）。
     ObservedMacMismatch,
+    /// 有效涵蓋下、已指派（`static`／`reservation`）且 `last_seen_at` 為空
+    /// （UI 顯示「從未上線」；未指派位址與未涵蓋網段皆不符，見 ip-observation 票 10）。
+    NeverSeen,
 }
 
 impl IpObservedFilter {
@@ -210,6 +213,7 @@ impl IpObservedFilter {
         match value {
             "unassigned_seen" => Some(Self::UnassignedSeen),
             "observed_mac_mismatch" => Some(Self::ObservedMacMismatch),
+            "never_seen" => Some(Self::NeverSeen),
             _ => None,
         }
     }
@@ -452,6 +456,8 @@ fn push_sort_key_v4(
 /// - `observed_mac_mismatch`：命中「觀測 MAC 不符」徽章（`ObservedMacMismatch`）
 ///   的列，以 [`merged_conflicts`] 的合併衝突碼比對——篩選結果與畫面徽章
 ///   保證一致（已指派、宣告介面 MAC 非空、且觀測 MAC 與宣告不同、不分大小寫）。
+/// - `never_seen`：有效涵蓋下、已指派且 `last_seen_at` 為空的列（UI 顯示
+///   「從未上線」）；未指派位址與未涵蓋網段皆不符（見 ip-observation 票 10）。
 fn matches_v4_filters(
     context: &V4Context,
     address: Ipv4Addr,
@@ -489,6 +495,13 @@ fn matches_v4_filters(
                 .conflicts
                 .get(address_text)
                 .is_some_and(|codes| codes.contains(&conflicts::OBSERVED_MAC_MISMATCH)),
+            IpObservedFilter::NeverSeen => {
+                let last_seen = context
+                    .presence
+                    .get(address_text)
+                    .and_then(|presence| presence.last_seen_at.as_deref());
+                context.observed && assignment.is_some() && last_seen.is_none()
+            }
         };
         if !matched {
             return false;
@@ -2209,6 +2222,10 @@ mod tests {
             IpObservedFilter::parse("observed_mac_mismatch"),
             Some(IpObservedFilter::ObservedMacMismatch)
         );
+        assert_eq!(
+            IpObservedFilter::parse("never_seen"),
+            Some(IpObservedFilter::NeverSeen)
+        );
         assert_eq!(IpObservedFilter::parse("unknown_mac"), None);
         assert_eq!(IpObservedFilter::parse("seen"), None);
     }
@@ -2318,5 +2335,50 @@ mod tests {
         let (items, total) = list(&subnet, &observed_filter, &[], &view).expect("推導成功");
         assert_eq!(total, 1);
         assert_eq!(addresses(&items), ["10.0.0.3"]);
+    }
+
+    #[test]
+    fn never_seen_filter_requires_assignment_and_coverage() {
+        // /29；.2 已指派無現況、.3 已指派已見、.4 未指派無現況、.5 已指派僅檢查未見
+        // （見 ip-observation 票 10）。
+        let subnet = subnet("10.0.0.0/29", None, &[]);
+        let assignments = [
+            listed("10.0.0.2", "static", "新機主機", Some("eth0"), None),
+            listed("10.0.0.3", "reservation", "保留主機", Some("eth1"), None),
+            listed("10.0.0.5", "static", "檢查主機", Some("eth2"), None),
+        ];
+        let view = observation(&[
+            (
+                "10.0.0.3",
+                Some("aa:bb:cc:dd:ee:03"),
+                Some("2026-10-06T10:00:00Z"),
+            ),
+            ("10.0.0.5", None, None),
+        ]);
+
+        // 預設路徑：有效涵蓋下、已指派且未見（含僅檢查未見）才入列。
+        let mut observed_filter = filter(None, 1, 50);
+        observed_filter.observed = Some(IpObservedFilter::NeverSeen);
+        let (items, total) =
+            list(&subnet, &observed_filter, &assignments, &view).expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["10.0.0.2", "10.0.0.5"]);
+
+        // 排序路徑（非預設排序）共用同一篩選語意。
+        let mut sorted = sort_filter(IpSortField::Address, IpSortDir::Desc);
+        sorted.observed = Some(IpObservedFilter::NeverSeen);
+        let (items, total) = list(&subnet, &sorted, &assignments, &view).expect("推導成功");
+        assert_eq!(total, 2);
+        assert_eq!(addresses(&items), ["10.0.0.5", "10.0.0.2"]);
+
+        // 未涵蓋（無在線代理）：「從未上線」不成立，回空集合。
+        let uncovered = ObservationView {
+            observed: false,
+            presence: view.presence.clone(),
+        };
+        let (items, total) =
+            list(&subnet, &observed_filter, &assignments, &uncovered).expect("推導成功");
+        assert_eq!(total, 0, "未涵蓋網段不成立「從未上線」");
+        assert!(items.is_empty());
     }
 }

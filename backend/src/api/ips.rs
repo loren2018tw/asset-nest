@@ -48,8 +48,8 @@ pub fn router() -> Router<AppState> {
 struct ListQuery {
     q: Option<String>,
     status: Option<String>,
-    /// 觀測篩選白名單（`unassigned_seen`／`observed_mac_mismatch`）；
-    /// 無效值回 400（見票 07、票 09）。
+    /// 觀測篩選白名單（`unassigned_seen`／`observed_mac_mismatch`／`never_seen`）；
+    /// 無效值回 400（見票 07、票 09；`never_seen` 見 ip-observation 票 10）。
     observed: Option<String>,
     /// 排序欄位白名單（`address`／`status`／`location`／`assignment`／`last_seen`）；
     /// 無效值回 400（見票 14、票 02）。
@@ -152,8 +152,10 @@ async fn list_subnet_ips(
         .filter(|s| !s.is_empty())
     {
         Some(value) => Some(IpObservedFilter::parse(value).ok_or_else(|| {
-            ApiError::validation("觀測篩選須為 unassigned_seen 或 observed_mac_mismatch")
-                .field("observed")
+            ApiError::validation(
+                "觀測篩選須為 unassigned_seen、observed_mac_mismatch 或 never_seen",
+            )
+            .field("observed")
         })?),
         None => None,
     };

@@ -46,7 +46,7 @@
           @update:model-value="reload"
         />
       </div>
-      <!-- 觀測篩選（見票 07、票 09）：非法佔用 IP／觀測 MAC 不符；伺服器端過濾。 -->
+      <!-- 觀測篩選（見票 07、票 09；`never_seen` 見 ip-observation 票 10）：非法佔用 IP／觀測 MAC 不符／從未上線；伺服器端過濾。 -->
       <div v-if="!isV6" class="col-12 col-sm-6 col-md-3">
         <q-select
           v-model="filters.observed"
@@ -366,10 +366,12 @@ const statusOptions = computed<{ label: string; value: IpStatus }[]>(() =>
       ]
 );
 
-/** 觀測篩選選項（見票 07、票 09）：非法佔用 IP／觀測 MAC 不符。 */
+/** 觀測篩選選項（見票 07、票 09）：非法佔用 IP／觀測 MAC 不符／從未上線
+ *  （`never_seen`＝有效涵蓋下、已指派且從未看見；見 ip-observation 票 10）。 */
 const observedOptions: { label: string; value: IpObservedFilter }[] = [
   { label: "非法佔用 IP", value: "unassigned_seen" },
-  { label: "觀測 MAC 不符", value: "observed_mac_mismatch" }
+  { label: "觀測 MAC 不符", value: "observed_mac_mismatch" },
+  { label: "從未上線", value: "never_seen" }
 ];
 
 const columns: QTableProps["columns"] = [
