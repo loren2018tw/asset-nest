@@ -131,4 +131,15 @@ pub enum AddressSpaceError {
 
 ## 實作記錄
 
-（待票 01–06 完成後補記）
+已實作（2026-10-19，票 01–06 全數完成）。
+
+- 設計會談產出：`ee59907`（spec 與票單）。實作 commits：票 01 `f99b0c1`、票 02 `ebd68cd`、票 03 `7cb81e5`、票 04 `f0ee9a2`、票 05 `7b46ddb`、票 06 `aee1f6e`（各票補記見票檔 `## Comments`）。
+- 終態：落點判定來源單一（`AddressSpace`）；`HostRange` 自 `backend/src` 完全退場（`grep -rn "HostRange" backend/src` 無命中）；六個呼叫端零自有解析。
+- 驗收：`cargo test` 466 passed／0 failed／6 ignored（`kea_connectivity` 需真機 Kea，既有）；`cargo fmt --check` 綠；`cargo check --all-targets` 無警告。
+- 與規格差異（皆屬 §錯誤允許的資料損壞、寫入驗證不可達路徑，無測試斷言）：
+  1. 排除範圍起>迄亦回 `ReversedPool`（維持 `Ipv4Range` 起<=迄不變式；文案沿用「pool 範圍顛倒」）。
+  2. 出界＋排除同時命中的損壞資料：舊版標兩碼，新版依優先序只標 `IpOutOfSubnet`；對應單元測試更名為 `out_of_subnet_outranks_exclusion_on_corrupt_data`。
+  3. pool 解析錯誤文案統一為「pool 位址格式錯誤：…」（原 ips／kea 各異；kea 原為「pool 起點格式異常」）；kea 計畫遇損壞資料改進計畫錯誤欄位而非整個請求 500。
+  4. `IpEntry.in_pool` 欄維持「原始 pool 成員判定」（`space.pools()`）：pool 可涵蓋 network／broadcast，該可達邊界下不採用落點 enum。
+  5. 原 `host_range_*` 測試實為 3 個（非 4），已自 `ips.rs` 移除；module 端新增 15 個測試（票 01）。
+- 後續（未做，屬另案）：候選 5（IP 清單投影）、候選 6（agent `host_range` 共用）。
