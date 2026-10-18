@@ -22,7 +22,7 @@
 
 ## Comments
 
-實作完成：
+實作完成（主實作 commit `28b88fb`）：
 
 - `IpListPage.vue`：操作欄最前新增 `add_link` 圖示按鈕（外層 `<span>` 包裹，確保停用時 tooltip 仍顯示；僅 v4 顯示）；`createDisabledReason()` 四態（available→`null`、in_pool／excluded 沿用既有文字、static／reservation→「此位址已有綁訂資產」）；`createPrefillInterface`（有 `last_seen_mac` 時 `eth0`＋MAC）與 `createPrefillAssignment`（該列位址、`purpose: "static"`、`subnetId`＝路由參數、`subnetLabel`＝`subnetDisplayLabel(網段名稱, CIDR)`）兩個 computed；獨立掛載一個 create-only 的 `asset-form-dialog`（`:asset="null"`，比照 `KeaLeasesPage` 模式，不與「編輯綁訂資產」的編輯用實例混用）；`@saved` 走 `fetchIps()`（保留分頁，停留原頁）。
 - 描述不預填：未傳 `prefill-description`，對話框 `prepare()` 即得空字串（列上本無 hostname）。

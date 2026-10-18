@@ -18,7 +18,7 @@
 
 ## Comments
 
-實作完成：
+實作完成（主實作 commit `28b88fb`）：
 
 - prop 型別直接沿用 `AssignmentDraftInput | null`（`utils/assignmentDraft.ts`，與草稿結構完全同形，不另造型別）。
 - 草稿置入點在 `loadInterfaces()` 新增模式分支（非 `prepare()` 本體）：`rowKey` 須綁在介面草稿列的 `key` 上，置入點與 `prefillInterface` 的草稿建立同一處才不會依賴 async 時序；順序仍為 `prepare()` 先清空、`loadInterfaces()` 後填入。

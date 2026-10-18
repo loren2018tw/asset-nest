@@ -72,6 +72,8 @@ cargo test --manifest-path backend/Cargo.toml   # 回歸（後端未變更）
 
 ## 實作記錄
 
+（主實作 commit `28b88fb`）
+
 - 票 01（AssetFormDialog 預填指派草稿）：實作完成。新增選填 prop `prefillAssignment`（型別沿用 `AssignmentDraftInput | null`；僅新增模式、編輯模式忽略）；草稿置入點在 `loadInterfaces()` 新增模式分支（`rowKey` 綁預填介面草稿列，與 `prefillInterface` 同處建立、不依賴 async 時序）；無預填介面時補一筆空 MAC 的 `eth0` 宿主列。
 - 票 02（IP 清單列按鈕）：實作完成。`IpListPage.vue` 操作欄最前新增 `add_link` 圖示按鈕（外層 `<span>` 供停用時 tooltip 顯示；僅 v4 顯示）；`createDisabledReason()`：available→啟用、in_pool／excluded 沿用既有文字、static／reservation→「此位址已有綁訂資產」；`createPrefillInterface`／`createPrefillAssignment` computed（後者 `purpose: "static"`、`subnetLabel` 由 `subnetDisplayLabel` 組）；獨立掛載 create-only 的 `asset-form-dialog`；`@saved` 走 `fetchIps()`（保留分頁、停留原頁）。`README.md`「IP 管理」補「可自可用位址建立資產並指派」。
 - 驗收：`pnpm --filter frontend typecheck`（vue-tsc）、`pnpm lint:check`（oxfmt＋oxlint、73 檔）、`pnpm build:frontend` 全綠；`cargo test --manifest-path backend/Cargo.toml` 406 passed／0 failed／6 ignored（後端未變更）。
