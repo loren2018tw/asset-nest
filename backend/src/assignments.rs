@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, QueryBuilder, SqlitePool};
 
+use crate::address_space::{AddressSpace, Placement};
 use crate::api::ApiError;
 use crate::assets::{self, optional_text};
 use crate::interfaces;
-use crate::ips::HostRange;
 use crate::subnets::{self, Subnet};
 
 /// `ip_assignments` 資料表完整欄位清單。
@@ -550,6 +550,9 @@ pub async fn find(
 /// network/broadcast、pool 與排除範圍）；v6 用途固定 static
 /// （見 spec §2.4、§7、ADR-0020）。
 ///
+/// 落點判定集中於 [`AddressSpace`]（見 `.scratch/address-space/spec.md`）；
+/// 錯誤文案與結構欄位逐字不變。
+///
 /// `existing`＝同介面同位址的更新：出界／落池／落在排除範圍為語意衝突
 /// （網段編輯造成），不重驗、由標記呈現（見 ADR-0006、ADR-0020、票 07）；
 /// 地址族與 v6 用途仍為結構規則。
@@ -561,38 +564,38 @@ pub(crate) fn validate_address(
     purpose: &str,
     existing: bool,
 ) -> Result<(), ApiError> {
-    let network = parse_network(&subnet.cidr)?;
+    let space = AddressSpace::new(subnet)?;
 
-    match (network, address) {
-        (IpNet::V4(network), IpAddr::V4(address)) => {
+    match (space.network(), address) {
+        (IpNet::V4(_), IpAddr::V4(address)) => {
             if !existing {
-                let range = HostRange::of(&network);
-                if !range.contains(address) {
-                    return Err(ApiError::validation(format!(
-                        "位址 {address} 不在網段 {} 的可用範圍內（network/broadcast 不可指派）",
-                        subnet.cidr
-                    ))
-                    .field("address")
-                    .detail("cidr", json!(subnet.cidr)));
-                }
-
-                if is_in_pool(subnet, address)? {
-                    return Err(ApiError::validation(format!(
-                        "位址 {address} 落在 DHCP 位址池內，不可指派"
-                    ))
-                    .field("address"));
-                }
-
-                if is_in_exclusion(subnet, address)? {
-                    return Err(ApiError::validation(format!(
-                        "位址 {address} 落在排除範圍內，不可指派"
-                    ))
-                    .field("address"));
+                match space.placement(IpAddr::V4(address)) {
+                    Placement::Host => {}
+                    Placement::Outside | Placement::NonHost => {
+                        return Err(ApiError::validation(format!(
+                            "位址 {address} 不在網段 {} 的可用範圍內（network/broadcast 不可指派）",
+                            subnet.cidr
+                        ))
+                        .field("address")
+                        .detail("cidr", json!(subnet.cidr)));
+                    }
+                    Placement::InPool => {
+                        return Err(ApiError::validation(format!(
+                            "位址 {address} 落在 DHCP 位址池內，不可指派"
+                        ))
+                        .field("address"));
+                    }
+                    Placement::InExcluded => {
+                        return Err(ApiError::validation(format!(
+                            "位址 {address} 落在排除範圍內，不可指派"
+                        ))
+                        .field("address"));
+                    }
                 }
             }
         }
-        (IpNet::V6(network), IpAddr::V6(address)) => {
-            if !existing && !network.contains(&address) {
+        (IpNet::V6(_), IpAddr::V6(address)) => {
+            if !existing && space.placement(IpAddr::V6(address)) == Placement::Outside {
                 return Err(ApiError::validation(format!(
                     "位址 {address} 不在網段 {} 內",
                     subnet.cidr
