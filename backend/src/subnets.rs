@@ -18,7 +18,6 @@ use crate::api::ApiError;
 use crate::assets::{double_option, optional_text};
 use crate::assignments;
 use crate::conflicts;
-use crate::ips::HostRange;
 
 /// `subnets` 資料表完整欄位清單。
 const COLUMNS: &str = "id, cidr, name, note, gateway, kea_subnet_id, created_at, updated_at";
@@ -555,11 +554,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
         let conflicts = conflicts::detect(&space, &assignments)?.len() as u64;
 
         let family = family_of(&subnet.cidr);
-        let total = match subnet.cidr.parse::<IpNet>() {
-            Ok(IpNet::V4(network)) => HostRange::of(&network).count(),
-            Ok(IpNet::V6(_)) => used,
-            Err(error) => return Err(ApiError::internal("網段 CIDR 格式錯誤", error)),
-        };
+        let total = space.hosts().map_or(used, |hosts| hosts.count());
         summaries.push(SubnetSummary {
             id: subnet.id,
             cidr: subnet.cidr,

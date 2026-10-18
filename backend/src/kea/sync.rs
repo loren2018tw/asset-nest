@@ -11,7 +11,6 @@
 //! upsert 以「先刪除（不存在視同已刪）再新增」實作，變更期間僅毫秒級空窗。
 
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
@@ -529,16 +528,28 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
             }
         };
 
-        // 網段層設定差異（pool／gateway；見 ADR-0013）；將建立的網段只記
-        // 建立內容，不重複填 pool／gateway 差異。
-        plan.desired_pools = match subnet_pool_ranges(&subnet) {
-            Ok(ranges) => ranges,
-            Err(message) => {
-                plan.error = Some(format!("讀取網段 pool 失敗：{message}"));
+        // 位址空間（host 範圍、pool 與排除範圍）建構一次；失敗視為資料損壞
+        // （寫入驗證不可達；見 spec §錯誤），以 `AddressSpaceError` 的
+        // `Display` 進計畫錯誤欄位；成功者供網段層差異與衝突判定共用。
+        let space = match AddressSpace::new(&subnet) {
+            Ok(space) => space,
+            Err(error) => {
+                plan.error = Some(format!("讀取網段 pool 失敗：{error}"));
                 plans.push(plan);
                 continue;
             }
         };
+
+        // 網段層設定差異（pool／gateway；見 ADR-0013）；將建立的網段只記
+        // 建立內容，不重複填 pool／gateway 差異。
+        plan.desired_pools = space
+            .pools()
+            .iter()
+            .map(|range| Ipv4Range {
+                start: range.start(),
+                end: range.end(),
+            })
+            .collect();
         match existing {
             Some(kea_subnet) => {
                 (plan.pool_adds, plan.pool_deletes) =
@@ -564,7 +575,6 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
         let assignments = assignments::list_for_subnet(pool, subnet.id)
             .await
             .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
-        let space = AddressSpace::new(&subnet)?;
         let conflict_map = conflicts::by_address(&space, &assignments)?;
 
         let mut untouchable = HashSet::new();
@@ -722,28 +732,6 @@ struct SettingsOutcome {
     pool_deleted: usize,
     gateway_updated: bool,
     error: Option<String>,
-}
-
-/// 由 asset-nest 網段取出期望 pool 範圍（資料庫內容經結構驗證；異常視為內部錯誤）。
-fn subnet_pool_ranges(subnet: &Subnet) -> Result<Vec<Ipv4Range>, String> {
-    subnet
-        .pools
-        .iter()
-        .map(|pool| {
-            let start: Ipv4Addr = pool
-                .start_ip
-                .parse()
-                .map_err(|_| format!("pool 起點格式異常：{}", pool.start_ip))?;
-            let end: Ipv4Addr = pool
-                .end_ip
-                .parse()
-                .map_err(|_| format!("pool 終點格式異常：{}", pool.end_ip))?;
-            if start > end {
-                return Err(format!("pool 範圍顛倒：{}-{}", pool.start_ip, pool.end_ip));
-            }
-            Ok(Ipv4Range { start, end })
-        })
-        .collect()
 }
 
 /// pool 差異：期望與 Kea 現值以「正規化範圍」比較（順序無關）。

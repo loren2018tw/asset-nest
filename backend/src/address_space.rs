@@ -221,7 +221,7 @@ impl From<AddressSpaceError> for ApiError {
 /// 由 v4 CIDR 推導 host 範圍；端點皆含。
 ///
 /// `/31`（RFC 3021 點對點）與 `/32` 全數列出；其餘扣除 network 與 broadcast
-/// （沿用 `ips::HostRange::of` 語意；見 spec §介面）。
+/// （沿用原 host 範圍規則；見 spec §介面）。
 fn host_range(network: &Ipv4Net) -> Ipv4Range {
     let base = u64::from(u32::from(network.network()));
     let size = 1u64 << (32 - network.prefix_len());
