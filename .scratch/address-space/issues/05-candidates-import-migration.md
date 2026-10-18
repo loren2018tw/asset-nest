@@ -17,6 +17,7 @@ Blocked by: 01
   - `ipv4_rule_code(space: &AddressSpace, address: Ipv4Addr) -> &'static str`（不再回 `Result`）：`Outside`／`NonHost`→`ipv4_not_host`；`InPool`→`ipv4_in_pool`；`InExcluded`→`ipv4_in_exclusion`；`Host`→`invalid_ipv4`。
   - 呼叫端（`analyze` 迴圈）在該網段 context 建 `AddressSpace`；建構失敗的處理比照現行該處（`ApiError`）。
   - 刪除本檔 `HostRange` import；`IpNet` 若無他用一併清理。
+- `backend/src/assignments.rs`：刪除 `is_in_pool`／`is_in_exclusion`（票 02 保留，因 `import::ipv4_rule_code` 直接呼叫；本票遷移後唯一使用者消失）與隨之無用的 import／helper。
 - 不動 `kea/sync.rs`／`subnets.rs`／`ips.rs`。
 
 ## 驗收
