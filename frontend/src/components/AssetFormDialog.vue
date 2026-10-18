@@ -541,6 +541,10 @@ const props = defineProps<{
   prefillDescription?: string;
   /** 新增模式的預填介面（如由 Kea 租約進入）；未提供不建立介面草稿。 */
   prefillInterface?: { name: string; mac: string } | null;
+  /** 新增模式的預填指派草稿（如由 IP 清單進入；見 ADR-0025、
+   *  `.scratch/ip-list-new-asset/spec.md`）；未提供不建立指派草稿。
+   *  草稿須綁在介面草稿列上，無預填介面時自動補一筆空 MAC 的 `eth0`。 */
+  prefillAssignment?: AssignmentDraftInput | null;
 }>();
 
 const emit = defineEmits<{
@@ -824,6 +828,7 @@ async function loadInterfaces() {
 
   if (asset === null) {
     const prefill = props.prefillInterface;
+    const assignment = props.prefillAssignment;
     if (prefill !== undefined && prefill !== null) {
       interfaceDrafts.value.push({
         key: ++draftKey,
@@ -832,6 +837,26 @@ async function loadInterfaces() {
         mac: prefill.mac,
         note: "",
         original: null
+      });
+    } else if (assignment !== undefined && assignment !== null) {
+      // 指派草稿須綁在介面草稿列上（ADR-0025）；無預填介面時補一筆空 MAC 的
+      // eth0（MAC 空白＝手動設定介面，可編輯）。
+      interfaceDrafts.value.push({
+        key: ++draftKey,
+        id: null,
+        name: "eth0",
+        mac: "",
+        note: "",
+        original: null
+      });
+    }
+    const host = interfaceDrafts.value[0];
+    if (assignment !== undefined && assignment !== null && host !== undefined) {
+      // 新增模式此刻至多一筆介面草稿（即預填列）；指派草稿綁在其上。
+      assignmentDrafts.value.push({
+        key: ++assignmentDraftKey,
+        rowKey: host.key,
+        ...assignment
       });
     }
     return;

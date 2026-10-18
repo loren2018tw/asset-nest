@@ -162,6 +162,23 @@
       </template>
       <template #body-cell-actions="props">
         <q-td :props="props" class="text-right">
+          <!-- 新增資產及指派 IP（見 .scratch/ip-list-new-asset/spec.md）：可用位址
+               建檔並指派該位址（與租約清單同名按鈕不同，此版真的指派）。
+               池內／排除不可指派、手動／保留已綁訂資產，皆停用；v6 不顯示（登錄即指派）。 -->
+          <span v-if="!isV6">
+            <q-btn
+              flat
+              dense
+              round
+              icon="add_link"
+              aria-label="新增資產及指派 IP"
+              :disable="createDisabledReason(props.row) !== null"
+              @click="openCreateAsset(props.row)"
+            />
+            <q-tooltip>
+              {{ createDisabledReason(props.row) ?? "新增資產及指派 IP" }}
+            </q-tooltip>
+          </span>
           <!-- 觀測歷史（見票 06）：開啟此位址的事件時間軸與用過的 MAC -->
           <q-btn
             flat
@@ -202,7 +219,7 @@
             round
             icon="edit"
             disable
-            aria-label="指派"
+            aria-label="指派 IP 給資產"
           >
             <q-tooltip>池內位址不可指派</q-tooltip>
           </q-btn>
@@ -214,7 +231,7 @@
             round
             icon="edit"
             disable
-            aria-label="指派"
+            aria-label="指派 IP 給資產"
           >
             <q-tooltip>排除範圍內位址不可指派</q-tooltip>
           </q-btn>
@@ -224,9 +241,13 @@
             dense
             round
             icon="edit"
-            :aria-label="props.row.assignment ? '編輯指派' : '指派'"
+            :aria-label="props.row.assignment ? '編輯指派' : '指派 IP 給資產'"
             @click="openAssignment(props.row)"
-          />
+          >
+            <q-tooltip>
+              {{ props.row.assignment ? "編輯指派" : "指派 IP 給資產" }}
+            </q-tooltip>
+          </q-btn>
         </q-td>
       </template>
       <template #no-data>
@@ -254,6 +275,17 @@
       v-model="assetDialogOpen"
       :asset="assetEditing"
       @saved="onBoundAssetSaved"
+    />
+
+    <!-- 新增資產及指派 IP（見 .scratch/ip-list-new-asset/spec.md）：由可用位址列
+         預填介面草稿與指派草稿；描述不預填（列上無 hostname），未傳
+         prefill-description 即為空字串。儲存後重載清單、停留原頁。 -->
+    <asset-form-dialog
+      v-model="createDialogOpen"
+      :asset="null"
+      :prefill-interface="createPrefillInterface"
+      :prefill-assignment="createPrefillAssignment"
+      @saved="onCreateAssetSaved"
     />
 
     <observation-history-dialog
@@ -284,6 +316,10 @@ import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import {
+  subnetDisplayLabel,
+  type AssignmentDraftInput
+} from "@/utils/assignmentDraft";
 import { debounce } from "@/utils/debounce";
 import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
@@ -337,6 +373,9 @@ const assetDialogOpen = ref(false);
 const assetEditing = ref<Asset | null>(null);
 /** 讀取資產詳情中的列位址；同時間僅允許一列（供列上 loading）。 */
 const assetLoadingAddress = ref<string | null>(null);
+/** 新增資產及指派 IP（見 .scratch/ip-list-new-asset/spec.md）：由可用位址列開啟。 */
+const createDialogOpen = ref(false);
+const createEntry = ref<IpEntry | null>(null);
 /** 觀測歷史對話框（見票 06）：以列位址開啟。 */
 const observationOpen = ref(false);
 const observationEntry = ref<IpEntry | null>(null);
@@ -638,6 +677,62 @@ async function openBoundAsset(entry: IpEntry) {
 
 /** 資產編輯儲存後：重載清單（描述／位置，或對話框內取消的指派）。 */
 function onBoundAssetSaved() {
+  void fetchIps();
+}
+
+// ── 新增資產及指派 IP（見 .scratch/ip-list-new-asset/spec.md）───────────────
+
+/** 新增資產及指派 IP 的停用原因；`null`＝可用列（啟用）。
+ *  手動設定與保留皆代表已綁訂資產（`status_of` 以指派用途推導），重複建檔無意義。 */
+function createDisabledReason(entry: IpEntry): string | null {
+  switch (entry.status) {
+    case "in_pool":
+      return "池內位址不可指派";
+    case "excluded":
+      return "排除範圍內位址不可指派";
+    case "static":
+    case "reservation":
+      return "此位址已有綁訂資產";
+    case "available":
+      return null;
+  }
+}
+
+/** 開啟新增資產對話框：預填介面草稿（有觀測 MAC 時）與該位址的指派草稿。 */
+function openCreateAsset(entry: IpEntry) {
+  createEntry.value = entry;
+  createDialogOpen.value = true;
+}
+
+/** 介面草稿預填：有觀測 MAC 時 `eth0`＋MAC；否則 `null`
+ *  （對話框會為指派草稿補一筆空 MAC 的 `eth0`）。 */
+const createPrefillInterface = computed(() => {
+  const entry = createEntry.value;
+  if (entry === null || entry.last_seen_mac === null) {
+    return null;
+  }
+  return { name: "eth0", mac: entry.last_seen_mac };
+});
+
+/** 指派草稿預填：該列位址、用途手動設定（可用位址在 DHCP 位址池外，屬手動
+ *  管理空間）；要 Kea 保留者取消草稿後自介面草稿「指派 IP」重選。 */
+const createPrefillAssignment = computed<AssignmentDraftInput | null>(() => {
+  const entry = createEntry.value;
+  const current = subnet.value;
+  if (entry === null || current === null) {
+    return null;
+  }
+  return {
+    address: entry.address,
+    purpose: "static",
+    hostname: null,
+    subnetId: subnetId.value,
+    subnetLabel: subnetDisplayLabel(current.name, current.cidr)
+  };
+});
+
+/** 新資產（含指派草稿落地）儲存後：重載清單、停留原頁。 */
+function onCreateAssetSaved() {
   void fetchIps();
 }
 

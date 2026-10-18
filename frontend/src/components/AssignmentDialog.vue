@@ -285,7 +285,8 @@ const dialogTitle = computed(() => {
   if (isV6.value) {
     return isEdit.value ? "編輯位址" : "新增位址";
   }
-  return isEdit.value ? "編輯指派" : "指派 IP";
+  // 未指派情境更名「指派 IP 給資產」：與列上「新增資產及指派 IP」（建新資產）區別
+  return isEdit.value ? "編輯指派" : "指派 IP 給資產";
 });
 
 const submitLabel = computed(() => {
