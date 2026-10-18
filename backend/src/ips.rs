@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use ipnet::{IpNet, Ipv4Net};
 use serde::Serialize;
 
-use crate::address_space::AddressSpace;
+use crate::address_space::{AddressSpace, Placement};
 use crate::api::ApiError;
 use crate::assignments::{IpAssignment, ListedAssignment};
 use crate::conflicts;
@@ -67,32 +67,6 @@ impl HostRange {
     /// 依數值升冪走訪所有 host 位址。
     pub fn iter(&self) -> impl Iterator<Item = Ipv4Addr> + '_ {
         (u64::from(self.first)..=u64::from(self.last)).map(|value| Ipv4Addr::from(value as u32))
-    }
-}
-
-/// 解析後的 pool 範圍；端點皆含。
-#[derive(Debug, Clone, Copy)]
-struct PoolRange {
-    start: Ipv4Addr,
-    end: Ipv4Addr,
-}
-
-impl PoolRange {
-    fn contains(&self, address: Ipv4Addr) -> bool {
-        self.start <= address && address <= self.end
-    }
-}
-
-/// 解析後的排除範圍；端點皆含（見 ADR-0020）。
-#[derive(Debug, Clone, Copy)]
-struct ExclusionRange {
-    start: Ipv4Addr,
-    end: Ipv4Addr,
-}
-
-impl ExclusionRange {
-    fn contains(&self, address: Ipv4Addr) -> bool {
-        self.start <= address && address <= self.end
     }
 }
 
@@ -258,36 +232,36 @@ pub struct IpEntry {
 /// 搜尋、狀態篩選與分頁皆為伺服器端。`assignments` 為該網段的指派列（見票 05）；
 /// `observation` 帶入有效涵蓋與現況列（批次讀取、不落地；見票 02）。
 /// 每列 `conflicts` 由 [`crate::conflicts`] 即時偵測填入。
+/// 位址空間（host 範圍、pool 與排除範圍）只建構一次、兩族路徑共用（見票 04）。
 pub fn list(
     subnet: &Subnet,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
     observation: &ObservationView,
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
-    match parse_network(&subnet.cidr)? {
-        IpNet::V4(network) => list_v4(subnet, &network, filter, assignments, observation),
-        IpNet::V6(_) => list_v6(subnet, filter, assignments),
+    let space = AddressSpace::new(subnet)?;
+    match space.network() {
+        IpNet::V4(_) => list_v4(&space, filter, assignments, observation),
+        IpNet::V6(_) => list_v6(&space, filter, assignments),
     }
 }
 
-/// v4：由網段範圍枚舉一頁 IP 列；回傳（當頁列、符合總數）。
+/// v4：由位址空間枚舉一頁 IP 列；回傳（當頁列、符合總數）。
 ///
 /// 預設排序（`address` 升冪）：無關鍵字時以算術位移取當頁、其餘情況線性掃描
 /// 並即時分頁（完整位址的前綴展開亦走掃描，見票 10）。
 /// 非預設排序須完整掃描符合篩選的位址後排序再取當頁；成本與關鍵字搜尋同級、
 /// 不設位址數上限（已定案取捨，見 spec §7、票 14）。
 fn list_v4(
-    subnet: &Subnet,
-    network: &Ipv4Net,
+    space: &AddressSpace,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
     observation: &ObservationView,
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
-    let pools = parse_pools(subnet)?;
-    let exclusions = parse_exclusions(subnet)?;
-    let range = HostRange::of(network);
+    // `list_v4` 僅由 v4 分派進入；v4 位址空間恆有 host 範圍。
+    let range = space.hosts().expect("v4 網段必有 host 範圍");
     // 語意衝突＋觀測衍生衝突（即時計算；觀測碼僅在 IP 清單列呈現，見票 07）。
-    let conflicts = merged_conflicts(subnet, assignments, &observation.presence)?;
+    let conflicts = merged_conflicts(space, assignments, &observation.presence)?;
 
     // 指派資料以位址文字索引；用途經資料庫 CHECK 驗證，異常視為內部錯誤。
     let mut by_address: HashMap<&str, &ListedAssignment> =
@@ -311,10 +285,9 @@ fn list_v4(
     }
     extras.sort_unstable();
 
-    // v4 清單共用輸入：指派、衝突與觀測現況（見票 02、票 07）。
+    // v4 清單共用輸入：位址空間、指派、衝突與觀測現況（見票 02、票 04、票 07）。
     let context = V4Context {
-        pools: &pools,
-        exclusions: &exclusions,
+        space,
         assignments: &by_address,
         conflicts: &conflicts,
         presence: &observation.presence,
@@ -444,7 +417,7 @@ fn push_sort_key_v4(
         .and_then(|presence| presence.last_seen_at.as_deref());
     keys.push(SortKey::new(
         u128::from(address.to_bits()),
-        status_of(context.pools, context.exclusions, address, assignment),
+        status_of(context.space, address, assignment),
         assignment,
         last_seen,
     ));
@@ -468,7 +441,7 @@ fn matches_v4_filters(
     query_lower: Option<&str>,
 ) -> bool {
     if let Some(status) = status {
-        if status_of(context.pools, context.exclusions, address, assignment) != status.as_str() {
+        if status_of(context.space, address, assignment) != status.as_str() {
             return false;
         }
     }
@@ -485,11 +458,10 @@ fn matches_v4_filters(
                     .get(address_text)
                     .and_then(|presence| presence.last_seen_mac.as_deref());
                 assignment.is_none()
-                    && !context.pools.iter().any(|pool| pool.contains(address))
-                    && !context
-                        .exclusions
-                        .iter()
-                        .any(|exclusion| exclusion.contains(address))
+                    && !matches!(
+                        context.space.placement(IpAddr::V4(address)),
+                        Placement::InPool | Placement::InExcluded
+                    )
                     && seen_mac.is_some()
             }
             IpObservedFilter::ObservedMacMismatch => context
@@ -511,11 +483,11 @@ fn matches_v4_filters(
     true
 }
 
-/// v4 清單的共用輸入：指派索引、衝突、觀測現況與觀測篩選（見票 02、票 07）。
+/// v4 清單的共用輸入：位址空間、指派索引、衝突、觀測現況與觀測篩選
+/// （見票 02、票 04、票 07）。
 struct V4Context<'a> {
-    pools: &'a [PoolRange],
-    /// 排除範圍（見 ADR-0020）；v4 來源為 Subnet 載入值。
-    exclusions: &'a [ExclusionRange],
+    /// 網段位址空間（host 範圍、pool 與排除範圍；見票 04）。
+    space: &'a AddressSpace,
     assignments: &'a HashMap<&'a str, &'a ListedAssignment>,
     conflicts: &'a HashMap<String, Vec<&'static str>>,
     presence: &'a HashMap<String, Presence>,
@@ -563,14 +535,19 @@ impl V4Scanner<'_> {
 /// 觀測現況由 `(subnet_id, address)` 左併（見票 02）；
 /// `conflicts` 為指派語意碼＋觀測衍生碼（見票 07）。
 fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
-    let in_pool = context.pools.iter().any(|pool| pool.contains(address));
+    // 池內標記為 pool 成員判定（非落點；見票 04），與舊行為逐字等價。
+    let in_pool = context
+        .space
+        .pools()
+        .iter()
+        .any(|pool| pool.contains(address));
     let text = address.to_string();
     let assignment = context.assignments.get(text.as_str()).copied();
     let presence = context.presence.get(text.as_str());
     IpEntry {
         address: IpAddr::V4(address),
         in_pool,
-        status: status_of(context.pools, context.exclusions, address, assignment),
+        status: status_of(context.space, address, assignment),
         purpose: assignment.map(|item| purpose_str(&item.purpose)),
         assignment: assignment.map(ListedAssignment::target),
         // 未指派列亦可能有觀測碼（ObservedOnUnassigned），故以位址取衝突。
@@ -591,15 +568,15 @@ fn entry_v4(address: Ipv4Addr, context: &V4Context) -> IpEntry {
 ///
 /// 既有語意碼先（依 [`conflicts::detect`] 的固定序），觀測碼接續附加，
 /// 使列標記順序穩定（見票 07）。[`conflicts::observed_codes`] 與
-/// [`conflicts::detect`] 皆即時計算、不落地。
+/// [`conflicts::detect`] 皆即時計算、不落地；以呼叫端已建好的位址空間判定
+/// （見票 04）。
 fn merged_conflicts(
-    subnet: &Subnet,
+    space: &AddressSpace,
     assignments: &[ListedAssignment],
     presence: &HashMap<String, Presence>,
 ) -> Result<HashMap<String, Vec<&'static str>>, ApiError> {
-    let space = AddressSpace::new(subnet)?;
-    let mut merged = conflicts::by_address(&space, assignments)?;
-    for (address, codes) in conflicts::observed_codes(&space, assignments, presence)? {
+    let mut merged = conflicts::by_address(space, assignments)?;
+    for (address, codes) in conflicts::observed_codes(space, assignments, presence)? {
         merged.entry(address).or_default().extend(codes);
     }
     Ok(merged)
@@ -614,7 +591,7 @@ fn merged_conflicts(
 /// 並以 IpOutOfSubnet 衝突標記呈現（見票 06、07）。
 /// v6 恆無觀測：`observed` 篩選一律回空集合（見 spec §讀取端）。
 fn list_v6(
-    subnet: &Subnet,
+    space: &AddressSpace,
     filter: &IpFilter,
     assignments: &[ListedAssignment],
 ) -> Result<(Vec<IpEntry>, u64), ApiError> {
@@ -622,8 +599,7 @@ fn list_v6(
         return Ok((Vec::new(), 0));
     }
 
-    let space = AddressSpace::new(subnet)?;
-    let conflicts = conflicts::by_address(&space, assignments)?;
+    let conflicts = conflicts::by_address(space, assignments)?;
 
     // 指派資料即登錄清單；用途經資料庫 CHECK 驗證，v6 恆為 static，
     // 異常（如直接寫入 reservation）視為內部錯誤。
@@ -718,23 +694,22 @@ fn entry_v6(
     }
 }
 
-/// 列狀態：已指派以用途為準；未指派依序區分池內、排除範圍與可用（見 ADR-0020）。
+/// 列狀態：已指派以用途為準；未指派依落點區分池內、排除範圍與可用
+/// （見 ADR-0020、票 04）。
 fn status_of(
-    pools: &[PoolRange],
-    exclusions: &[ExclusionRange],
+    space: &AddressSpace,
     address: Ipv4Addr,
     assignment: Option<&ListedAssignment>,
 ) -> &'static str {
     match assignment {
         Some(item) => purpose_str(&item.purpose),
-        None if pools.iter().any(|pool| pool.contains(address)) => "in_pool",
-        None if exclusions
-            .iter()
-            .any(|exclusion| exclusion.contains(address)) =>
-        {
-            "excluded"
-        }
-        None => "available",
+        None => match space.placement(IpAddr::V4(address)) {
+            Placement::InPool => "in_pool",
+            Placement::InExcluded => "excluded",
+            // `Outside`／`NonHost` 不會出現於未指派列（列為 host 範圍或指派列）；
+            // 防禦性與 `Host` 同視為可用。
+            Placement::Outside | Placement::NonHost | Placement::Host => "available",
+        },
     }
 }
 
@@ -887,47 +862,6 @@ fn matches_query(
             .mac
             .as_deref()
             .is_some_and(|mac| mac.to_lowercase().contains(query_lower))
-}
-
-/// 解析網段 CIDR（v4／v6）；資料異常回傳內部錯誤。
-fn parse_network(cidr: &str) -> Result<IpNet, ApiError> {
-    cidr.parse()
-        .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))
-}
-
-/// 解析網段的所有 pool 範圍；資料庫內容經結構驗證，格式異常視為內部錯誤。
-fn parse_pools(subnet: &Subnet) -> Result<Vec<PoolRange>, ApiError> {
-    subnet
-        .pools
-        .iter()
-        .map(|pool| {
-            Ok(PoolRange {
-                start: parse_stored_address(&pool.start_ip)?,
-                end: parse_stored_address(&pool.end_ip)?,
-            })
-        })
-        .collect()
-}
-
-/// 解析網段的所有排除範圍（見 ADR-0020）；資料庫內容經結構驗證，
-/// 格式異常視為內部錯誤。
-fn parse_exclusions(subnet: &Subnet) -> Result<Vec<ExclusionRange>, ApiError> {
-    subnet
-        .exclusions
-        .iter()
-        .map(|exclusion| {
-            Ok(ExclusionRange {
-                start: parse_stored_address(&exclusion.start_ip)?,
-                end: parse_stored_address(&exclusion.end_ip)?,
-            })
-        })
-        .collect()
-}
-
-/// 解析資料庫中已驗證過的 v4 位址文字。
-fn parse_stored_address(text: &str) -> Result<Ipv4Addr, ApiError> {
-    text.parse()
-        .map_err(|error| ApiError::internal("位址格式錯誤", error))
 }
 
 #[cfg(test)]
