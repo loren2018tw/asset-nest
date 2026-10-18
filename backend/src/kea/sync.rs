@@ -25,6 +25,7 @@ use super::KeaError;
 use super::http::{
     Client, Ipv4Range, KeaSubnet, ReservationRecord, is_routers_option, parse_pool_entry,
 };
+use crate::address_space::AddressSpace;
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment};
 use crate::conflicts;
@@ -563,7 +564,8 @@ async fn compute_plans(pool: &SqlitePool, client: &Client) -> Result<Vec<SubnetP
         let assignments = assignments::list_for_subnet(pool, subnet.id)
             .await
             .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
-        let conflict_map = conflicts::by_address(&subnet, &assignments)?;
+        let space = AddressSpace::new(&subnet)?;
+        let conflict_map = conflicts::by_address(&space, &assignments)?;
 
         let mut untouchable = HashSet::new();
         let mut desired: Vec<(String, RecordFields)> = Vec::new();

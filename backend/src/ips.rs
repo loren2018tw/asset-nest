@@ -13,6 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use ipnet::{IpNet, Ipv4Net};
 use serde::Serialize;
 
+use crate::address_space::AddressSpace;
 use crate::api::ApiError;
 use crate::assignments::{IpAssignment, ListedAssignment};
 use crate::conflicts;
@@ -596,8 +597,9 @@ fn merged_conflicts(
     assignments: &[ListedAssignment],
     presence: &HashMap<String, Presence>,
 ) -> Result<HashMap<String, Vec<&'static str>>, ApiError> {
-    let mut merged = conflicts::by_address(subnet, assignments)?;
-    for (address, codes) in conflicts::observed_codes(subnet, assignments, presence)? {
+    let space = AddressSpace::new(subnet)?;
+    let mut merged = conflicts::by_address(&space, assignments)?;
+    for (address, codes) in conflicts::observed_codes(&space, assignments, presence)? {
         merged.entry(address).or_default().extend(codes);
     }
     Ok(merged)
@@ -620,7 +622,8 @@ fn list_v6(
         return Ok((Vec::new(), 0));
     }
 
-    let conflicts = conflicts::by_address(subnet, assignments)?;
+    let space = AddressSpace::new(subnet)?;
+    let conflicts = conflicts::by_address(&space, assignments)?;
 
     // 指派資料即登錄清單；用途經資料庫 CHECK 驗證，v6 恆為 static，
     // 異常（如直接寫入 reservation）視為內部錯誤。

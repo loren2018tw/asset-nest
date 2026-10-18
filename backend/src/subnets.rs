@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
+use crate::address_space::AddressSpace;
 use crate::api::ApiError;
 use crate::assets::{double_option, optional_text};
 use crate::assignments;
@@ -550,7 +551,8 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<SubnetSummary>, ApiError> {
             .await
             .map_err(|error| ApiError::internal("讀取指派清單失敗", error))?;
         let used = assignments.len() as u64;
-        let conflicts = conflicts::detect(&subnet, &assignments)?.len() as u64;
+        let space = AddressSpace::new(&subnet)?;
+        let conflicts = conflicts::detect(&space, &assignments)?.len() as u64;
 
         let family = family_of(&subnet.cidr);
         let total = match subnet.cidr.parse::<IpNet>() {
