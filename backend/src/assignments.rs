@@ -6,7 +6,7 @@
 //! （票 07）——更新既有指派時，出界／落池不再重驗、改以標記呈現。
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr};
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -975,44 +975,6 @@ fn map_write_error(error: sqlx::Error) -> ApiError {
 fn parse_network(cidr: &str) -> Result<IpNet, ApiError> {
     cidr.parse()
         .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))
-}
-
-/// 位址是否落在網段任一 pool 內（端點皆含）；池內位址不可指派（見 spec §7）。
-/// 供匯入標示錯誤原因（見票 02）。
-pub(crate) fn is_in_pool(subnet: &Subnet, address: Ipv4Addr) -> Result<bool, ApiError> {
-    for pool in &subnet.pools {
-        let start: Ipv4Addr = pool
-            .start_ip
-            .parse()
-            .map_err(|error| ApiError::internal("pool 位址格式錯誤", error))?;
-        let end: Ipv4Addr = pool
-            .end_ip
-            .parse()
-            .map_err(|error| ApiError::internal("pool 位址格式錯誤", error))?;
-        if start <= address && address <= end {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// 位址是否落在網段任一排除範圍內（端點皆含）；新指派須先通過此檢查
-/// （見 spec §7、ADR-0020）。
-pub(crate) fn is_in_exclusion(subnet: &Subnet, address: Ipv4Addr) -> Result<bool, ApiError> {
-    for exclusion in &subnet.exclusions {
-        let start: Ipv4Addr = exclusion
-            .start_ip
-            .parse()
-            .map_err(|error| ApiError::internal("排除範圍位址格式錯誤", error))?;
-        let end: Ipv4Addr = exclusion
-            .end_ip
-            .parse()
-            .map_err(|error| ApiError::internal("排除範圍位址格式錯誤", error))?;
-        if start <= address && address <= end {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// 讀取一列；不存在回傳 `None`。

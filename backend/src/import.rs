@@ -9,15 +9,14 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chrono::NaiveDate;
-use ipnet::IpNet;
 use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
 
+use crate::address_space::{AddressSpace, Placement};
 use crate::api::ApiError;
 use crate::assets::{AssetInput, ValidAsset, normalize_tags};
 use crate::assignments::{self, AssignmentTarget};
 use crate::interfaces::{self, InterfaceInput};
-use crate::ips::HostRange;
 use crate::subnets;
 
 /// 檔案大小上限：5 MB（見 spec §2）。
@@ -670,7 +669,8 @@ async fn validate_row(
                             false,
                         ) {
                             Err(error) => {
-                                let code = ipv4_rule_code(&subnet, address)?;
+                                let space = AddressSpace::new(&subnet)?;
+                                let code = ipv4_rule_code(&space, address);
                                 issues.push(Issue::error(
                                     code,
                                     Some(Field::Ipv4),
@@ -963,24 +963,14 @@ fn asset_issue(error: ApiError) -> Issue {
 }
 
 /// IPv4 結構錯誤的細分代碼：host 範圍／pool／排除範圍／其他
-/// （重用 [`HostRange`] 與 pool／排除範圍判定）。
-fn ipv4_rule_code(subnet: &subnets::Subnet, address: Ipv4Addr) -> Result<&'static str, ApiError> {
-    let network: IpNet = subnet
-        .cidr
-        .parse()
-        .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))?;
-    if let IpNet::V4(network) = network {
-        if !HostRange::of(&network).contains(address) {
-            return Ok("ipv4_not_host");
-        }
+/// （以 [`AddressSpace`] 的落點判定）。
+fn ipv4_rule_code(space: &AddressSpace, address: Ipv4Addr) -> &'static str {
+    match space.placement(IpAddr::V4(address)) {
+        Placement::Outside | Placement::NonHost => "ipv4_not_host",
+        Placement::InPool => "ipv4_in_pool",
+        Placement::InExcluded => "ipv4_in_exclusion",
+        Placement::Host => "invalid_ipv4",
     }
-    if assignments::is_in_pool(subnet, address)? {
-        return Ok("ipv4_in_pool");
-    }
-    if assignments::is_in_exclusion(subnet, address)? {
-        return Ok("ipv4_in_exclusion");
-    }
-    Ok("invalid_ipv4")
 }
 
 /// 「位址已被指派／已登錄」訊息中的目前指派對象（比照 ADR-0007 提示資訊樣式）。

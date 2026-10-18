@@ -9,16 +9,16 @@
 //! 視窗內；達 `limit` 即停止，不做無界掃描（見 spec §8 效能界線）。
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::{IpNet, Ipv4Net};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::SqlitePool;
 
+use crate::address_space::{AddressSpace, Placement};
 use crate::api::ApiError;
 use crate::assignments;
-use crate::ips::HostRange;
 use crate::subnets::{self, Subnet};
 
 /// 指派候選（可用位址；見 spec §8）。
@@ -97,13 +97,11 @@ pub async fn find(db: &SqlitePool, q: &str, limit: usize) -> Result<Candidates, 
 
 /// 位址不可作為候選：非 host、已指派、池內或排除範圍內（見 spec §8）。
 fn is_unavailable(entry: &IndexedSubnet, address: Ipv4Addr) -> bool {
-    !entry.hosts.contains(address)
+    entry.space.placement(IpAddr::V4(address)) != Placement::Host
         || entry
             .assignments
             .as_ref()
             .is_some_and(|cache| cache.contains_key(&u32::from(address)))
-        || in_ranges(&entry.pools, address)
-        || in_ranges(&entry.exclusions, address)
 }
 
 /// 完整位址的狀態；判定順序見 spec §8（無所屬網段 → 指派用途 → 非 host →
@@ -132,10 +130,12 @@ async fn status_for(
         .and_then(|cache| cache.get(&u32::from(address)))
     {
         Some(purpose) => purpose_status(purpose),
-        None if !entry.hosts.contains(address) => "out_of_subnet",
-        None if in_ranges(&entry.pools, address) => "in_pool",
-        None if in_ranges(&entry.exclusions, address) => "excluded",
-        None => "available",
+        None => match entry.space.placement(IpAddr::V4(address)) {
+            Placement::Outside | Placement::NonHost => "out_of_subnet",
+            Placement::InPool => "in_pool",
+            Placement::InExcluded => "excluded",
+            Placement::Host => "available",
+        },
     };
 
     Ok(QueryStatus {
@@ -292,15 +292,14 @@ struct V4Index {
     entries: Vec<IndexedSubnet>,
 }
 
-/// 單一 v4 網段的預解析內容；pool／排除範圍為數值區間，指派惰性快取。
+/// 單一 v4 網段的位址空間（落點判定）；指派惰性快取。
 struct IndexedSubnet {
     id: i64,
     cidr: String,
     name: Option<String>,
+    /// 網段（排序與二分搜尋鍵）；由 `space.network()` 取得，`build` 已過濾 v6。
     network: Ipv4Net,
-    hosts: HostRange,
-    pools: Vec<(u32, u32)>,
-    exclusions: Vec<(u32, u32)>,
+    space: AddressSpace,
     /// 指派位址 → 用途；`None`＝尚未讀取（逐網段快取，避免逐位址查詢）。
     assignments: Option<HashMap<u32, String>>,
 }
@@ -310,37 +309,17 @@ impl V4Index {
     fn build(subnets: &[Subnet]) -> Result<Self, ApiError> {
         let mut entries = Vec::new();
         for subnet in subnets {
-            let network: IpNet = subnet
-                .cidr
-                .parse()
-                .map_err(|error| ApiError::internal("網段 CIDR 格式錯誤", error))?;
-            let IpNet::V4(network) = network else {
+            let space = AddressSpace::new(subnet)?;
+            let IpNet::V4(network) = space.network() else {
                 continue;
             };
-
-            let mut pools = Vec::with_capacity(subnet.pools.len());
-            for pool in &subnet.pools {
-                pools.push((
-                    parse_stored_address(&pool.start_ip, "pool 位址格式錯誤")?,
-                    parse_stored_address(&pool.end_ip, "pool 位址格式錯誤")?,
-                ));
-            }
-            let mut exclusions = Vec::with_capacity(subnet.exclusions.len());
-            for exclusion in &subnet.exclusions {
-                exclusions.push((
-                    parse_stored_address(&exclusion.start_ip, "排除範圍位址格式錯誤")?,
-                    parse_stored_address(&exclusion.end_ip, "排除範圍位址格式錯誤")?,
-                ));
-            }
 
             entries.push(IndexedSubnet {
                 id: subnet.id,
                 cidr: subnet.cidr.clone(),
                 name: subnet.name.clone(),
-                hosts: HostRange::of(&network),
                 network,
-                pools,
-                exclusions,
+                space,
                 assignments: None,
             });
         }
@@ -388,21 +367,6 @@ async fn ensure_assignments(
     }
     index.entries[position].assignments = Some(cache);
     Ok(())
-}
-
-/// 位址是否落在任一（起、訖）區間（端點皆含）。
-fn in_ranges(ranges: &[(u32, u32)], address: Ipv4Addr) -> bool {
-    let value = u32::from(address);
-    ranges
-        .iter()
-        .any(|(start, end)| *start <= value && value <= *end)
-}
-
-/// 解析資料庫中已驗證過的 v4 位址文字；異常視為內部錯誤。
-fn parse_stored_address(text: &str, context: &'static str) -> Result<u32, ApiError> {
-    text.parse::<Ipv4Addr>()
-        .map(u32::from)
-        .map_err(|error| ApiError::internal(context, error))
 }
 
 /// 指派用途轉狀態字串；非 static 一律 reservation（比照 `ips::status_of`）。
