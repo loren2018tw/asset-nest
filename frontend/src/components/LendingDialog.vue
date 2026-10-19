@@ -77,6 +77,8 @@ import type { Asset } from "@/api/assets";
 import { createLending, listBorrowers } from "@/api/lendings";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { assetLabel } from "@/utils/assetLabel";
+import { messageOf } from "@/utils/errors";
+import { textOrNull } from "@/utils/text";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -196,14 +198,5 @@ async function submit() {
   } finally {
     saving.value = false;
   }
-}
-
-function textOrNull(value: string): string | null {
-  const text = value.trim();
-  return text === "" ? null : text;
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>

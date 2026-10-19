@@ -260,7 +260,9 @@ import {
   parseIpv4Prefix,
   type ParsedIpv4Prefix
 } from "@/utils/cidr";
+import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { textOrNull } from "@/utils/text";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -921,14 +923,5 @@ function normalizeMac(text: string): string | null {
     return null;
   }
   return hex.match(/.{2}/g)?.join(":") ?? null;
-}
-
-function textOrNull(value: string): string | null {
-  const text = value.trim();
-  return text === "" ? null : text;
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>

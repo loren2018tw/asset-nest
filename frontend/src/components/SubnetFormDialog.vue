@@ -259,6 +259,8 @@ import {
   parseCidr,
   type ParsedCidr
 } from "@/utils/cidr";
+import { messageOf } from "@/utils/errors";
+import { textOrNull } from "@/utils/text";
 
 const $q = useQuasar();
 
@@ -670,15 +672,6 @@ function keaSubnetIdRule(value: string | null) {
 function addressRule(label: string) {
   return (value: string | null) =>
     (value ?? "").trim() !== "" || `${label}為必填`;
-}
-
-function textOrNull(value: string): string | null {
-  const text = value.trim();
-  return text === "" ? null : text;
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function toInput(): SubnetInput {

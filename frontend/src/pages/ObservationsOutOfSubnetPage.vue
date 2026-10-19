@@ -116,6 +116,7 @@ import {
 } from "@/api/observations";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
 import { assetLabel } from "@/utils/assetLabel";
+import { messageOf } from "@/utils/errors";
 import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
@@ -149,10 +150,6 @@ const columns: QTableProps["columns"] = [
 /** 同一網段外位址可歸屬多個觀測網段（ADR-0017），列鍵須含網段。 */
 function rowKey(row: OutOfSubnetObservation): string {
   return `${row.subnet_id}-${row.address}`;
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 async function fetchObservations() {

@@ -76,6 +76,7 @@ import {
 } from "@/api/disposedAssets";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { debounce } from "@/utils/debounce";
+import { messageOf } from "@/utils/errors";
 
 const $q = useQuasar();
 
@@ -137,10 +138,6 @@ interface TableRequest {
     sortBy: string | null;
     descending: boolean;
   };
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 async function fetchDisposedAssets() {

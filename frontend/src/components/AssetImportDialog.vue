@@ -385,6 +385,7 @@ import {
   downloadImportIssueReport,
   issueRowsOf
 } from "@/utils/assetImport";
+import { messageOf } from "@/utils/errors";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -796,10 +797,6 @@ function reasonOf(row: ImportRow): string {
 
 function cellText(value: string | number | null): string {
   return value === null || value === "" ? "—" : String(value);
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>
 

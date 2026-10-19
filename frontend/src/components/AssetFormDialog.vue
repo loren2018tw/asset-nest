@@ -529,9 +529,11 @@ import {
 import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
 import { assetLabel } from "@/utils/assetLabel";
 import { parseAddress } from "@/utils/cidr";
+import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { localDateString } from "@/utils/localDate";
 import { relativeTime } from "@/utils/relativeTime";
+import { textOrNull } from "@/utils/text";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -1191,18 +1193,9 @@ function normalizeMac(text: string): string | null {
   return hex.match(/.{2}/g)?.join(":") ?? null;
 }
 
-function textOrNull(value: string): string | null {
-  const text = value.trim();
-  return text === "" ? null : text;
-}
-
 /** 指派用途標籤（唯讀顯示）。 */
 function assignmentPurposeLabel(purpose: IpPurpose): string {
   return purpose === "reservation" ? "保留" : "手動設定";
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function toInput(): AssetInput {

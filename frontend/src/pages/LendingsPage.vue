@@ -83,6 +83,7 @@ import {
   type LendingWithAsset
 } from "@/api/lendings";
 import { assetLabel } from "@/utils/assetLabel";
+import { messageOf } from "@/utils/errors";
 
 const $q = useQuasar();
 
@@ -143,10 +144,6 @@ interface TableRequest {
     sortBy: string | null;
     descending: boolean;
   };
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 /** 借出／歸還時間（UTC ISO8601）轉本地時間顯示；null 顯示「—」、無法解析原樣。 */

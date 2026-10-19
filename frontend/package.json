@@ -20,6 +20,7 @@
     "dev": "quasar dev",
     "build": "quasar build",
     "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
     "postinstall": "quasar prepare --silent"
   },
   "dependencies": {
@@ -38,6 +39,7 @@
     "oxlint-tsgolint": "^7.0.2001",
     "postcss": "^8.5.8",
     "typescript": "^6.0.0",
+    "vitest": "^5.0.5",
     "vue-tsc": "^3.3.3"
   },
   "engines": {

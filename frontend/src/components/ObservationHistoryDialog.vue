@@ -207,6 +207,7 @@ import {
   type ObservationEventKind
 } from "@/api/observations";
 import { assetLabel } from "@/utils/assetLabel";
+import { messageOf } from "@/utils/errors";
 import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
@@ -304,10 +305,6 @@ function exactTime(value: string | null | undefined): string {
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>
 

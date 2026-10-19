@@ -361,6 +361,7 @@ import {
   downloadMissingInSystemCsv,
   kindLabel
 } from "@/utils/inventoryAudit";
+import { messageOf } from "@/utils/errors";
 
 const $q = useQuasar();
 
@@ -650,10 +651,6 @@ function fileSizeLabel(bytes: number): string {
   return bytes >= 1024 * 1024
     ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
     : `${Math.max(1, Math.round(bytes / 1024))} KB`;
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>
 

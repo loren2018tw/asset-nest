@@ -246,8 +246,10 @@ import type { AddressFamily } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { assetLabel } from "@/utils/assetLabel";
+import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { cancelAssignmentHint } from "@/utils/observationHint";
+import { textOrNull } from "@/utils/text";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -675,14 +677,5 @@ function normalizeMac(text: string): string | null {
     return null;
   }
   return hex.match(/.{2}/g)?.join(":") ?? null;
-}
-
-function textOrNull(value: string): string | null {
-  const text = value.trim();
-  return text === "" ? null : text;
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>

@@ -140,6 +140,7 @@ import { saveBlob } from "@/api/client";
 import KeaSyncDialog from "@/components/KeaSyncDialog.vue";
 import SubnetFormDialog from "@/components/SubnetFormDialog.vue";
 import SubnetImportDialog from "@/components/SubnetImportDialog.vue";
+import { messageOf } from "@/utils/errors";
 
 const $q = useQuasar();
 
@@ -159,10 +160,6 @@ const columns: QTableProps["columns"] = [
   { name: "conflicts", label: "衝突數", field: "conflicts", align: "left" },
   { name: "actions", label: "操作", field: "id", align: "right" }
 ];
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
 
 async function fetchSubnets() {
   loading.value = true;

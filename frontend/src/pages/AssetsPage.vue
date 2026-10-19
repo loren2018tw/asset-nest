@@ -237,6 +237,7 @@ import AssetImportDialog from "@/components/AssetImportDialog.vue";
 import LendingDialog from "@/components/LendingDialog.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { debounce } from "@/utils/debounce";
+import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { relativeTime } from "@/utils/relativeTime";
 
@@ -373,10 +374,6 @@ interface TableRequest {
     sortBy: string | null;
     descending: boolean;
   };
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 async function fetchAssets() {

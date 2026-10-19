@@ -321,6 +321,7 @@ import {
   type AssignmentDraftInput
 } from "@/utils/assignmentDraft";
 import { debounce } from "@/utils/debounce";
+import { messageOf } from "@/utils/errors";
 import { sourceLabel } from "@/utils/observationSource";
 import { relativeTime } from "@/utils/relativeTime";
 
@@ -488,10 +489,6 @@ function conflictLabel(code: string): string {
 
 function conflictHint(code: string): string {
   return conflictInfo[code]?.hint ?? "語意衝突（僅提示，不阻擋）";
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function statusLabel(status: IpStatus): string {

@@ -162,14 +162,15 @@ curl -fsSL https://raw.githubusercontent.com/loren2018tw/asset-nest/main/deploy/
 
 ## 常用指令
 
-| 指令              | 說明                                                        |
-| ----------------- | ----------------------------------------------------------- |
-| `pnpm dev`        | 同時啟動前後端                                              |
-| `pnpm build`      | 建置前端與後端（release）                                   |
-| `pnpm lint:check` | 前端 lint / format 檢查                                     |
-| `pnpm test`       | 後端測試（cargo test）                                      |
-| `pnpm test:agent` | 觀測代理測試（cargo test）                                  |
-| `pnpm test:kea`   | Kea 真機連線測試（version-get；讀 `.env` 的 `KEA_API_URL`） |
+| 指令                 | 說明                                                        |
+| -------------------- | ----------------------------------------------------------- |
+| `pnpm dev`           | 同時啟動前後端                                              |
+| `pnpm build`         | 建置前端與後端（release）                                   |
+| `pnpm lint:check`    | 前端 lint / format 檢查                                     |
+| `pnpm test`          | 後端測試（cargo test）                                      |
+| `pnpm test:frontend` | 前端單元測試（vitest）                                      |
+| `pnpm test:agent`    | 觀測代理測試（cargo test）                                  |
+| `pnpm test:kea`      | Kea 真機連線測試（version-get；讀 `.env` 的 `KEA_API_URL`） |
 
 ## CI
 

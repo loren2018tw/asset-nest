@@ -330,6 +330,7 @@ import {
   type SubnetImportRowStatus,
   type SubnetImportSummary
 } from "@/api/subnets";
+import { messageOf } from "@/utils/errors";
 import { downloadImportIssueReport, issueRowsOf } from "@/utils/subnetImport";
 
 const props = defineProps<{
@@ -676,10 +677,6 @@ function reasonOf(row: SubnetImportRow): string {
 
 function cellText(value: string | number | null): string {
   return value === null || value === "" ? "—" : String(value);
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 </script>
 

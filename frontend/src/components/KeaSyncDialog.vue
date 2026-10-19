@@ -258,6 +258,7 @@ import {
   type KeaPlanSubnet,
   type KeaSyncPlan
 } from "@/api/kea";
+import { messageOf } from "@/utils/errors";
 
 const props = defineProps<{ modelValue: boolean }>();
 const emit = defineEmits<{ "update:modelValue": [value: boolean] }>();
@@ -373,10 +374,6 @@ async function apply() {
   } finally {
     applying.value = false;
   }
-}
-
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function label(subnet: { name: string | null; cidr: string }): string {
