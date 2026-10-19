@@ -289,4 +289,21 @@ export async function cancelAssignmentFlow(
 
 ## 實作記錄
 
-待實作完成後補記（票 01–06）。
+已實作（2026-10-19，票 01–06 全數完成）。
+
+- 設計會談產出：`c2c9b7c`（spec 與票單）。實作 commits：票 01 `3b0becb`（補記 `cbe7b2b`）、票 02 `8582d31`（補記 `8d431ab`）、票 03 `db9756a`（補記 `ce4e7e5`）、票 04 `03844cd`＋補強 `65ed81e`（補記 `d93feb7`）、票 05 `c4e7f81`＋補強 `05d045f`（補記 `f69a10f`）、票 06 `6dce9d2`（補記即本次 spec 補記）。
+- 終態：
+  - module `frontend/src/utils/assignmentFlow.ts`（703 行）：9 個流程（`createInterfaceFlow`／`assignFromAssetFlow`／`draftAssignmentFlow`／`landAssignmentDrafts`／`saveAssetBody`／`syncInterfaces`／`assignFromSubnetFlow`／`registerIpv6Flow`／`cancelAssignmentFlow`）＋10 個純規則（含 `preflightAssignmentDrafts`／`parseAssignedElsewhere`／`isIpv6`）＋埠型別（`FlowApi`／`FlowDeps`／`FlowNotify`／`TransferConfirm`／`AssignedElsewhere`／`InterfaceRow`／`AssignmentDraftRow`）；無 `@/api/*` runtime import。真 adapter：`utils/assignmentFlowDeps.ts`；共用工具：`utils/mac.ts`／`utils/errors.ts`／`utils/text.ts`；影響摘要：`utils/assetImpact.ts`。
+  - 三個對話框只留呈現與步驟序列：`AssetFormDialog.vue` 1,499→1,300 行、`AssignIpDialog.vue` 934→699 行、`AssignmentDialog.vue` 688→521 行；新增 `components/NewInterfaceForm.vue`（134 行）。
+  - 退場：`utils/assignTransfer.ts` 刪除（`confirmTransfer` 逐字移入 `assignmentFlowDeps.ts`，純解析移入 module）；`messageOf` 16 檔、`textOrNull` 5 檔、`normalizeMac`／`macRule` 3 檔、`interfaceLabel` 4 檔全數收斂（grep 無本地定義）。
+  - 前端測試基礎設施：vitest `^5.0.5`（node 環境）、`frontend/vitest.config.ts`、`frontend` script `test`、根 `test:frontend`、README 補列；測試檔與被測檔同目錄。
+- 驗收（我獨立重跑）：`pnpm --filter frontend test` 6 檔 107 passed／0 failed；`pnpm --filter frontend typecheck` 綠；`pnpm lint:check` 綠；`pnpm build:frontend` `Build succeeded`。行為等價由 module 測試釘住（訊息逐字、呼叫序、通知次數與順序、遇錯即停、殘留草稿靜默清理、移轉取消兩種呈現、v6 不通知 Kea）。
+- 與規格差異（皆已於票檔 Comments 記明；對外行為不變）：
+  1. `parseAssignedElsewhere` 以結構守衛（`name === "ApiError"`）取代 `instanceof ApiError`——module 不 runtime import `@/api/client`（票 03）。
+  2. `InterfaceRow` 含 `key`（`landAssignmentDrafts` 需以 `draft.rowKey` 對列），原「key 留對話框」的註記作廢（票 03）。
+  3. `isIpv6` 改為 module 匯出純規則，供 `registerIpv6Flow` 與 AssignmentDialog 的 `ipv6Rule` 共用（票 05）。
+  4. `NewInterfaceForm` 於 `prepare()` 以 `:key` 重建（等價舊碼每次開啟的重設）；換資產時以 `defineExpose` 的 `collapse()` 只收合、保留欄位（等價舊碼）（票 04、05）。
+  5. 流程呼叫的 `saving` loading 包住同步驗證段——驗證錯誤同一 tick 內完成，無可見差異（票 04、05）。
+  6. 草稿為空時不再呼叫 `landAssignmentDrafts`（舊碼呼叫後立即早退，無 emit／refresh）；對外行為相同（票 06）。
+  7. `NewInterfaceForm` 內部處理器自 `createNewInterface` 改名 `submitNewInterface`（僅為驗收 grep；行為零變動）（票 06）。
+- 後續（未做，屬另案）：候選 4（CSV 匯入管線）、候選 5（IP 清單投影）、候選 6（backend 兩份 MAC／屆齡／在線門檻／agent `host_range`；**前端 MAC 已由本卡交付** `utils/mac.ts`）。
