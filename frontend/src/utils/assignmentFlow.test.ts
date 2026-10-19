@@ -17,6 +17,7 @@ import {
   draftAssignmentFlow,
   interfaceLabel,
   interfaceNameRule,
+  isIpv6,
   landAssignmentDrafts,
   parseAssignedElsewhere,
   preflightAssignmentDrafts,
@@ -312,6 +313,22 @@ describe("interfaceNameRule", () => {
     expect(rule("")).toBe("MAC 空白時名稱為必填");
     expect(rule(null)).toBe("MAC 空白時名稱為必填");
     expect(rule("   ")).toBe("MAC 空白時名稱為必填");
+  });
+});
+
+describe("isIpv6", () => {
+  it("標準（含 :: 壓縮）位址為真；輸入去空白", () => {
+    expect(isIpv6("fd00::10")).toBe(true);
+    expect(isIpv6("  fd00::10  ")).toBe(true);
+  });
+
+  it("IPv4-mapped 位址為真", () => {
+    expect(isIpv6("::ffff:1.2.3.4")).toBe(true);
+  });
+
+  it("IPv4 與含冒號的壞字串為假", () => {
+    expect(isIpv6("1.2.3.4")).toBe(false);
+    expect(isIpv6("fd00::gg")).toBe(false);
   });
 });
 

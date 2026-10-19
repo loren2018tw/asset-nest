@@ -148,6 +148,23 @@ export function interfaceNameRule(
   };
 }
 
+/**
+ * 基本 IPv6 格式驗證（支援 :: 壓縮與 IPv4-mapped）；供網段端 UI 規則
+ * （`AssignmentDialog.ipv6Rule`）與 `registerIpv6Flow` 共用；網段歸屬仍由
+ * 後端驗證。
+ */
+export function isIpv6(value: string): boolean {
+  const text = value.trim();
+  if (!text.includes(":")) {
+    return false;
+  }
+  try {
+    return new URL(`http://[${text}]/`).hostname.startsWith("[");
+  } catch {
+    return false;
+  }
+}
+
 /** 位址狀態的阻擋訊息（見 spec §10.3）：池內／排除／網段外；其餘回 `null`。 */
 export function statusBlockMessage(status: IpQueryStatusKind): string | null {
   switch (status) {
@@ -674,19 +691,6 @@ function toInterfaceInput(row: InterfaceRow): InterfaceInput {
     mac: textOrNull(row.mac),
     note: textOrNull(row.note)
   };
-}
-
-/** 基本 IPv6 格式驗證（支援 :: 壓縮與 IPv4-mapped）；網段歸屬仍由後端驗證。 */
-function isIpv6(value: string): boolean {
-  const text = value.trim();
-  if (!text.includes(":")) {
-    return false;
-  }
-  try {
-    return new URL(`http://[${text}]/`).hostname.startsWith("[");
-  } catch {
-    return false;
-  }
 }
 
 /** 讀取 details 中的字串欄位；缺漏或空白改用 fallback。 */
