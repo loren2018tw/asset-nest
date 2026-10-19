@@ -96,6 +96,7 @@
             />
 
             <new-interface-form
+              :key="newInterfaceFormKey"
               :asset-id="props.asset?.id ?? null"
               @created="onInterfaceCreated"
             />
@@ -275,6 +276,8 @@ const selectedInterfaceId = ref<number | null>(null);
 const assignments = ref<AssetAssignment[]>([]);
 /** 取消中的指派 id；供逐列 loading 與避免重複點擊。 */
 const cancellingId = ref<number | null>(null);
+/** 每次開啟對話框更換 key、重建新增介面表單（等價舊碼的狀態重設）。 */
+const newInterfaceFormKey = ref(0);
 
 const purpose = ref<IpPurpose>("static");
 const hostname = ref("");
@@ -431,6 +434,8 @@ watch(address, value => {
 async function prepare() {
   const token = ++loadToken;
   errorMessage.value = "";
+  // 重設新增介面表單：關窗動畫中重開時子元件不會卸載，靠 key 重建
+  newInterfaceFormKey.value += 1;
   address.value = "";
   clearCandidates();
   hostname.value = "";
