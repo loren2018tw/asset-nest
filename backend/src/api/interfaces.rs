@@ -16,7 +16,6 @@ use crate::assignments;
 use crate::interfaces::{self, Interface, InterfaceInput, InterfacePatch, Warning};
 use crate::kea::push as kea_push;
 use crate::kea::push::KeaSync;
-use crate::kea::sync as kea_sync;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -109,24 +108,17 @@ async fn update_interface(
         }
     }
 
+    // 先擷取舊 MAC 與保留（本地異動前），更新後由 commit 比較 MAC 並以新 MAC
+    // 重推保留（見 ADR-0027）；未涉同步時不附結果。
+    let pending = kea_push::capture_interface_change(&state.db, id).await?;
+
     let interface = interfaces::update(&state.db, id, valid)
         .await
         .map_err(|error| ApiError::internal("更新介面失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到介面"))?;
 
-    // MAC 變更：以新 MAC 重新推送該介面在受管網段的保留（見 ADR-0027）；
-    // 僅在確有推送時附上結果。
-    let kea_sync = if existing.mac != interface.mac {
-        let reservations = assignments::list_reservations_for_interfaces(&state.db, &[id])
-            .await
-            .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
-        let syncs =
-            kea_sync::push_reservation_updates(&state.db, state.kea.as_ref(), &reservations)
-                .await?;
-        if syncs.is_empty() { None } else { Some(syncs) }
-    } else {
-        None
-    };
+    let kea_sync =
+        kea_push::commit_interface_change(&state.db, state.kea.as_ref(), pending).await?;
 
     let warnings = interfaces::mac_warnings(&state.db, interface.mac.as_deref(), id)
         .await

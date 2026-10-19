@@ -2,8 +2,9 @@
 //!
 //! route 只剩三步：本地異動前 [`capture_assignment`]、本地異動、異動後
 //! [`commit_assignment`]；刪除家族同型（[`capture_asset_deletion`]／
-//! [`capture_interface_deletion`] → [`commit_deletions`]）。觸發規則、捕捉查詢
-//! 與 [`KeaSync`] 成形只存在本檔。
+//! [`capture_interface_deletion`] → [`commit_deletions`]）、MAC 編輯家族亦同
+//! （[`capture_interface_change`] → [`commit_interface_change`]）。觸發規則、
+//! 捕捉查詢與 [`KeaSync`] 成形只存在本檔。
 //!
 //! 觸發規則（逐字沿用舊 `kea::sync::after_assignment_change`）：
 //! - 受管網段（v4＋`kea_subnet_id`）且已設 client，缺一不互動；
@@ -282,6 +283,120 @@ async fn commit_deletions_with<P: KeaPush + ?Sized>(
     }
 
     Ok(syncs)
+}
+
+/// 介面 MAC 編輯前的捕捉狀態；由 [`capture_interface_change`] 產生、餵給
+/// [`commit_interface_change`]（欄位私有，route 僅持有）。
+pub struct PendingInterfaceChange {
+    /// 要比較 MAC 的介面 id。
+    interface_id: i64,
+    /// 異動前的 MAC；`None`＝介面不存在或原本即無 MAC。
+    mac_before: Option<String>,
+    /// 異動前該介面上的保留（順序＝查詢序 `id ASC`）。
+    reservations: Vec<Assignment>,
+}
+
+/// 捕捉介面 MAC 編輯前的狀態（本地異動前呼叫；介面不存在＝MAC `None`、
+/// 保留空，永不 404）。
+pub async fn capture_interface_change(
+    db: &SqlitePool,
+    interface_id: i64,
+) -> Result<PendingInterfaceChange, ApiError> {
+    let mac_before = interfaces::get(db, interface_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面失敗", error))?
+        .and_then(|interface| interface.mac);
+    let reservations = assignments::list_reservations_for_interfaces(db, &[interface_id])
+        .await
+        .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
+
+    Ok(PendingInterfaceChange {
+        interface_id,
+        mac_before,
+        reservations,
+    })
+}
+
+/// 介面 MAC 編輯後以新 MAC 重新推送該介面的保留（見 ADR-0027）；回傳 `None`
+/// ＝此異動不涉及 Kea（介面不存在、MAC 未變或無可推送保留）。
+pub async fn commit_interface_change(
+    db: &SqlitePool,
+    kea: Option<&Client>,
+    pending: PendingInterfaceChange,
+) -> Result<Option<Vec<KeaSync>>, ApiError> {
+    let push = kea.map(HttpPush);
+    commit_interface_change_with(db, push.as_ref(), pending).await
+}
+
+/// [`commit_interface_change`] 的內部版本：以 [`KeaPush`] port 注入（module
+/// 測試以 fake 呼叫）；公開函式以 [`HttpPush`] 包 `Option<&Client>` 後呼叫。
+///
+/// 重讀介面（不存在→`None`）；MAC 未變→`None`；變更→對保留逐筆（輸入序）
+/// 以新 MAC upsert；網段以 `subnet_id` 快取、未受管或無 client 跳過；介面
+/// 無 MAC 記 `failed`；結果空→`None`。
+async fn commit_interface_change_with<P: KeaPush + ?Sized>(
+    db: &SqlitePool,
+    kea: Option<&P>,
+    pending: PendingInterfaceChange,
+) -> Result<Option<Vec<KeaSync>>, ApiError> {
+    let PendingInterfaceChange {
+        interface_id,
+        mac_before,
+        reservations,
+    } = pending;
+
+    let interface = interfaces::get(db, interface_id)
+        .await
+        .map_err(|error| ApiError::internal("讀取介面失敗", error))?;
+    let Some(interface) = interface else {
+        return Ok(None);
+    };
+    if interface.mac == mac_before {
+        return Ok(None);
+    }
+
+    let mut subnet_cache: HashMap<i64, Subnet> = HashMap::new();
+    let mut syncs = Vec::new();
+    for assignment in reservations {
+        if !subnet_cache.contains_key(&assignment.subnet_id) {
+            let subnet = subnets::get(db, assignment.subnet_id)
+                .await
+                .map_err(|error| ApiError::internal("讀取網段失敗", error))?
+                .ok_or_else(|| ApiError::internal("讀取網段失敗", "網段不存在"))?;
+            subnet_cache.insert(subnet.id, subnet);
+        }
+        let subnet = &subnet_cache[&assignment.subnet_id];
+        let Some(kea_subnet_id) = subnet.kea_subnet_id else {
+            continue;
+        };
+        let Some(kea) = kea else {
+            continue;
+        };
+
+        let outcome = match &interface.mac {
+            Some(mac) => {
+                let record = ReservationRecord {
+                    ip_address: assignment.address.clone(),
+                    hw_address: mac.clone(),
+                    hostname: assignment.hostname.clone(),
+                };
+                kea.upsert(kea_subnet_id, &record).await
+            }
+            None => Err(KeaError::Data(format!(
+                "保留位址 {} 的介面缺少 MAC",
+                assignment.address
+            ))),
+        };
+        syncs.push(match outcome {
+            Ok(()) => KeaSync::ok(),
+            Err(error) => KeaSync::failed(&error),
+        });
+    }
+
+    if syncs.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(syncs))
 }
 
 #[cfg(test)]
@@ -814,5 +929,180 @@ mod tests {
 
         assert!(syncs.is_empty());
         assert!(fake.commands().is_empty());
+    }
+
+    /// 更新介面 MAC（經領域驗證；供 MAC 編輯系列測試）。
+    async fn update_interface_mac(pool: &SqlitePool, interface_id: i64, mac: &str) {
+        let valid = interfaces::ValidInterface {
+            name: Some("eth0".to_string()),
+            mac: Some(mac.to_string()),
+            note: None,
+        };
+        interfaces::update(pool, interface_id, valid)
+            .await
+            .expect("更新介面")
+            .expect("介面存在");
+    }
+
+    #[tokio::test]
+    async fn interface_mac_change_upserts_reservations_in_input_order() {
+        let pool = test_pool().await;
+        let subnet_second = create_subnet(&pool, "10.1.0.0/24", Some(8)).await;
+        let subnet_first = create_subnet(&pool, "10.0.0.0/24", Some(7)).await;
+        let interface_id = create_interface(&pool, Some("aa:bb:cc:dd:ee:01")).await;
+
+        // 先建的網段後建立保留：查詢序（id ASC）與網段 id 序相反。
+        assign_reservation(&pool, &subnet_second, interface_id, "10.1.0.5").await;
+        assign_reservation(&pool, &subnet_first, interface_id, "10.0.0.5").await;
+
+        let pending = capture_interface_change(&pool, interface_id)
+            .await
+            .expect("捕捉");
+        update_interface_mac(&pool, interface_id, "aa:bb:cc:dd:ee:02").await;
+
+        let fake = FakePush::default();
+        let syncs = commit_interface_change_with(&pool, Some(&fake), pending)
+            .await
+            .expect("推送")
+            .expect("MAC 變更應同步");
+
+        assert_eq!(syncs.len(), 2, "逐筆推送每筆保留");
+        assert!(syncs.iter().all(|sync| sync.status == "ok"));
+        assert_eq!(
+            fake.commands(),
+            vec![
+                Command::Upsert {
+                    subnet_id: 8,
+                    record: ReservationRecord {
+                        ip_address: "10.1.0.5".to_string(),
+                        hw_address: "aa:bb:cc:dd:ee:02".to_string(),
+                        hostname: Some("pc-1".to_string()),
+                    },
+                },
+                Command::Upsert {
+                    subnet_id: 7,
+                    record: ReservationRecord {
+                        ip_address: "10.0.0.5".to_string(),
+                        hw_address: "aa:bb:cc:dd:ee:02".to_string(),
+                        hostname: Some("pc-1".to_string()),
+                    },
+                },
+            ],
+            "順序＝捕捉查詢序、欄位＝新 MAC"
+        );
+    }
+
+    #[tokio::test]
+    async fn interface_mac_unchanged_pushes_nothing() {
+        let pool = test_pool().await;
+        let subnet = create_subnet(&pool, "10.0.0.0/24", Some(7)).await;
+        let interface_id = create_interface(&pool, Some("aa:bb:cc:dd:ee:01")).await;
+        assign_reservation(&pool, &subnet, interface_id, "10.0.0.5").await;
+
+        let pending = capture_interface_change(&pool, interface_id)
+            .await
+            .expect("捕捉");
+        // 只改備註：MAC 未變。
+        let valid = interfaces::ValidInterface {
+            name: Some("eth0".to_string()),
+            mac: Some("aa:bb:cc:dd:ee:01".to_string()),
+            note: Some("改備註".to_string()),
+        };
+        interfaces::update(&pool, interface_id, valid)
+            .await
+            .expect("更新介面")
+            .expect("介面存在");
+
+        let fake = FakePush::default();
+        assert!(
+            commit_interface_change_with(&pool, Some(&fake), pending)
+                .await
+                .expect("推送")
+                .is_none(),
+            "MAC 未變不產生同步結果"
+        );
+        assert!(fake.commands().is_empty(), "MAC 未變不推送");
+    }
+
+    #[tokio::test]
+    async fn interface_mac_change_without_reservations_pushes_nothing() {
+        let pool = test_pool().await;
+        let interface_id = create_interface(&pool, Some("aa:bb:cc:dd:ee:01")).await;
+
+        let pending = capture_interface_change(&pool, interface_id)
+            .await
+            .expect("捕捉");
+        update_interface_mac(&pool, interface_id, "aa:bb:cc:dd:ee:02").await;
+
+        let fake = FakePush::default();
+        assert!(
+            commit_interface_change_with(&pool, Some(&fake), pending)
+                .await
+                .expect("推送")
+                .is_none(),
+            "無保留不產生同步結果"
+        );
+        assert!(fake.commands().is_empty(), "無保留不推送");
+
+        // 介面不存在：捕捉與推送皆不 404、不推送。
+        let pending = capture_interface_change(&pool, 999)
+            .await
+            .expect("捕捉不 404");
+        assert!(
+            commit_interface_change_with(&pool, Some(&fake), pending)
+                .await
+                .expect("推送")
+                .is_none()
+        );
+        assert!(fake.commands().is_empty(), "介面不存在不推送");
+    }
+
+    #[tokio::test]
+    async fn interface_mac_change_skips_unmanaged_subnet_and_missing_client() {
+        let pool = test_pool().await;
+        let managed = create_subnet(&pool, "10.0.0.0/24", Some(7)).await;
+        let unmanaged = create_subnet(&pool, "10.1.0.0/24", None).await;
+        let interface_id = create_interface(&pool, Some("aa:bb:cc:dd:ee:01")).await;
+
+        assign_reservation(&pool, &unmanaged, interface_id, "10.1.0.5").await;
+        assign_reservation(&pool, &managed, interface_id, "10.0.0.5").await;
+
+        // 未受管網段：跳過、不產生同步結果；受管者以新 MAC 重推。
+        let pending = capture_interface_change(&pool, interface_id)
+            .await
+            .expect("捕捉");
+        update_interface_mac(&pool, interface_id, "aa:bb:cc:dd:ee:02").await;
+        let fake = FakePush::default();
+        let syncs = commit_interface_change_with(&pool, Some(&fake), pending)
+            .await
+            .expect("推送")
+            .expect("受管保留應同步");
+
+        assert_eq!(syncs.len(), 1, "未受管不產生同步結果");
+        assert_eq!(
+            fake.commands(),
+            vec![Command::Upsert {
+                subnet_id: 7,
+                record: ReservationRecord {
+                    ip_address: "10.0.0.5".to_string(),
+                    hw_address: "aa:bb:cc:dd:ee:02".to_string(),
+                    hostname: Some("pc-1".to_string()),
+                },
+            }]
+        );
+
+        // 未設 client：受管網段亦不互動、零命令、None。
+        let pending = capture_interface_change(&pool, interface_id)
+            .await
+            .expect("捕捉");
+        update_interface_mac(&pool, interface_id, "aa:bb:cc:dd:ee:03").await;
+        assert!(
+            commit_interface_change_with(&pool, None::<&FakePush>, pending)
+                .await
+                .expect("推送")
+                .is_none(),
+            "無 client 不產生同步結果"
+        );
+        assert_eq!(fake.commands().len(), 1, "無 client 不推送");
     }
 }
