@@ -113,6 +113,7 @@
             />
 
             <new-interface-form
+              ref="newInterfaceFormRef"
               :key="newInterfaceFormKey"
               :asset-id="selectedAsset?.id ?? null"
               :disabled="selectedAsset === null"
@@ -265,8 +266,12 @@ const interfaces = ref<Interface[]>([]);
 const loadingInterfaces = ref(false);
 const selectedInterfaceId = ref<number | null>(null);
 
-/** 每次開啟對話框或更換資產時更換 key、重建新增介面表單（等價舊碼的狀態重設）。 */
+/** 每次開啟對話框更換 key、重建新增介面表單（等價舊碼的狀態重設）。 */
 const newInterfaceFormKey = ref(0);
+/** 新增介面表單：更換資產時僅收合（不清欄位、不清錯誤，等價舊碼的 showNewInterface = false）。 */
+const newInterfaceFormRef = ref<InstanceType<typeof NewInterfaceForm> | null>(
+  null
+);
 
 const purpose = ref<IpPurpose>("static");
 const hostname = ref("");
@@ -378,8 +383,9 @@ async function searchAssets(
 async function onAssetSelected(value: Asset | null) {
   interfaces.value = [];
   selectedInterfaceId.value = null;
-  // 更換資產時收合新增介面表單（等價舊碼的 showNewInterface = false）
-  newInterfaceFormKey.value += 1;
+  // 更換資產時僅收合新增介面表單（欄位值與錯誤訊息照舊保留；
+  // 等價舊碼的 showNewInterface = false）
+  newInterfaceFormRef.value?.collapse();
 
   if (value === null) {
     return;

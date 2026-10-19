@@ -124,4 +124,11 @@ async function createNewInterface() {
     saving.value = false;
   }
 }
+
+/** 供父層於更換資產時僅收合卡片（欄位值與錯誤訊息照舊保留）。 */
+defineExpose({
+  collapse: () => {
+    showNewInterface.value = false;
+  }
+});
 </script>
