@@ -1,20 +1,20 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">系統狀態</div>
-      <div v-if="updatedAt" class="text-caption text-grey-7 q-ml-sm">
-        上次更新：{{ formatTime(updatedAt) }}
-      </div>
-      <q-space />
-      <q-btn
-        color="primary"
-        outline
-        icon="refresh"
-        label="重新整理"
-        :loading="loading"
-        @click="load"
-      />
-    </div>
+    <page-header class="q-mb-lg" eyebrow="Kea · Status" title="系統狀態">
+      <template v-if="updatedAt" #meta>
+        <span class="an-pill">上次更新：{{ formatTime(updatedAt) }}</span>
+      </template>
+      <template #actions>
+        <q-btn
+          flat
+          no-caps
+          icon="refresh"
+          label="重新整理"
+          :loading="loading"
+          @click="load"
+        />
+      </template>
+    </page-header>
 
     <q-banner v-if="loadError" rounded class="bg-negative text-white q-mb-md">
       {{ loadError }}
@@ -24,7 +24,7 @@
       <div class="col-12">
         <q-card flat bordered>
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">asset-nest 服務</div>
+            <div class="an-section-title q-mb-sm">asset-nest 服務</div>
             <template v-if="health">
               <div class="row q-col-gutter-md">
                 <div class="col-6 col-md-3">
@@ -61,7 +61,7 @@
       <div class="col-12 col-md-6">
         <q-card flat bordered class="fit">
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">連線</div>
+            <div class="an-section-title q-mb-sm">連線</div>
             <template v-if="status">
               <template v-if="!status.configured">
                 <q-chip dense color="grey-7" text-color="white">未設定</q-chip>
@@ -96,7 +96,7 @@
       <div class="col-12 col-md-6">
         <q-card flat bordered class="fit">
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">版本</div>
+            <div class="an-section-title q-mb-sm">版本</div>
             <template v-if="versionText !== null">
               <div>{{ versionText }}</div>
             </template>
@@ -116,7 +116,7 @@
       <div class="col-12 col-md-6">
         <q-card flat bordered class="fit">
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">監聽介面</div>
+            <div class="an-section-title q-mb-sm">監聽介面</div>
             <template v-if="status?.interfaces != null">
               <div v-if="status.interfaces.length === 0" class="text-grey-7">
                 未監聽任何介面（不主動服務 DHCP；安裝預設）
@@ -149,7 +149,7 @@
       <div class="col-12 col-md-6">
         <q-card flat bordered class="fit">
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">運行資訊</div>
+            <div class="an-section-title q-mb-sm">運行資訊</div>
             <template v-if="status?.runtime">
               <div class="row q-col-gutter-md">
                 <div class="col-6">
@@ -186,7 +186,7 @@
       <div class="col-12">
         <q-card flat bordered>
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">DHCPv4 摘要</div>
+            <div class="an-section-title q-mb-sm">DHCPv4 摘要</div>
             <template v-if="status?.dhcp4">
               <div class="row q-col-gutter-md">
                 <div class="col-6 col-md-4">
@@ -237,7 +237,7 @@
         <q-card flat bordered>
           <q-card-section>
             <div class="row items-center q-mb-sm">
-              <div class="text-subtitle1">觀測代理</div>
+              <div class="an-section-title">觀測代理</div>
               <div v-if="agents" class="text-caption text-grey-7 q-ml-sm">
                 在線門檻：{{ humanizeDuration(staleSecs) }}內有回報
               </div>
@@ -262,7 +262,7 @@
               row-key="instance_id"
               :loading="loading"
               :pagination="{ rowsPerPage: 0 }"
-              hide-bottom
+              :hide-bottom="agents.length > 0"
             >
               <template #body-cell-name="props">
                 <q-td :props="props">
@@ -346,7 +346,7 @@
       <div class="col-12">
         <q-card flat bordered>
           <q-card-section>
-            <div class="text-subtitle1 q-mb-sm">被拒回報</div>
+            <div class="an-section-title q-mb-sm">被拒回報</div>
             <q-table
               v-if="authFailures"
               :rows="authFailures"
@@ -354,7 +354,7 @@
               row-key="source_ip"
               :loading="loading"
               :pagination="{ rowsPerPage: 0 }"
-              hide-bottom
+              :hide-bottom="authFailures.length > 0"
             >
               <template #body-cell-source_ip="props">
                 <q-td :props="props">
@@ -422,6 +422,7 @@ import {
   type AgentAuthFailure
 } from "@/api/agents";
 import { fetchHealth, type HealthResponse } from "@/api/health";
+import PageHeader from "@/components/PageHeader.vue";
 import { getKeaStatus, type KeaStatus } from "@/api/kea";
 import { clearObservations } from "@/api/observations";
 import { relativeTime } from "@/utils/relativeTime";

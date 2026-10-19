@@ -1,26 +1,28 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">清冊稽核</div>
-      <q-space />
-      <q-btn
-        v-if="phase === 'upload'"
-        color="primary"
-        icon="fact_check"
-        label="開始稽核"
-        :loading="auditing"
-        :disable="!canAudit"
-        @click="startAudit"
-      />
-      <q-btn
-        v-else
-        color="primary"
-        outline
-        icon="restart_alt"
-        label="重新上傳"
-        @click="resetAudit"
-      />
-    </div>
+    <page-header class="q-mb-lg" eyebrow="Inventory audit" title="清冊稽核">
+      <template #actions>
+        <q-btn
+          v-if="phase === 'upload'"
+          unelevated
+          no-caps
+          color="primary"
+          icon="fact_check"
+          label="開始稽核"
+          :loading="auditing"
+          :disable="!canAudit"
+          @click="startAudit"
+        />
+        <q-btn
+          v-else
+          flat
+          no-caps
+          icon="restart_alt"
+          label="重新上傳"
+          @click="resetAudit"
+        />
+      </template>
+    </page-header>
 
     <!-- ① 上傳（檔級錯誤時於上方顯示錯誤區塊；見 spec §6） -->
     <template v-if="phase === 'upload'">
@@ -346,6 +348,7 @@ import { useQuasar } from "quasar";
 import { computed, ref } from "vue";
 
 import { ApiError } from "@/api/client";
+import PageHeader from "@/components/PageHeader.vue";
 import {
   auditInventory,
   fileErrorsOf,

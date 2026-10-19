@@ -1,10 +1,8 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">報廢資產</div>
-    </div>
+    <page-header class="q-mb-lg" eyebrow="Archive" title="報廢資產" />
 
-    <div class="row q-col-gutter-sm q-mb-md">
+    <div class="row q-col-gutter-sm an-toolbar q-mb-md">
       <div class="col-12 col-md-6">
         <q-input
           ref="searchInputRef"
@@ -74,6 +72,7 @@ import {
   restoreDisposedAsset,
   type DisposedAsset
 } from "@/api/disposedAssets";
+import PageHeader from "@/components/PageHeader.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import { debounce } from "@/utils/debounce";
 import { messageOf } from "@/utils/errors";

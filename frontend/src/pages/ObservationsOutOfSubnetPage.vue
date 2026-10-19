@@ -1,17 +1,17 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">網段外觀測</div>
-      <q-space />
-      <q-btn
-        color="primary"
-        outline
-        icon="refresh"
-        label="重新整理"
-        :loading="loading"
-        @click="fetchObservations"
-      />
-    </div>
+    <page-header class="q-mb-lg" eyebrow="Observations" title="網段外觀測">
+      <template #actions>
+        <q-btn
+          flat
+          no-caps
+          icon="refresh"
+          label="重新整理"
+          :loading="loading"
+          @click="fetchObservations"
+        />
+      </template>
+    </page-header>
 
     <q-table
       :rows="observations"
@@ -19,7 +19,7 @@
       :row-key="rowKey"
       :loading="loading"
       :pagination="{ rowsPerPage: 0 }"
-      hide-bottom
+      :hide-bottom="observations.length > 0"
     >
       <template #body-cell-address="props">
         <q-td :props="props">
@@ -115,6 +115,7 @@ import {
   type OutOfSubnetObservation
 } from "@/api/observations";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
+import PageHeader from "@/components/PageHeader.vue";
 import { assetLabel } from "@/utils/assetLabel";
 import { messageOf } from "@/utils/errors";
 import { sourceLabel } from "@/utils/observationSource";

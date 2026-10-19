@@ -27,7 +27,7 @@
       </q-card-section>
 
       <q-card-section v-else-if="report" class="q-gutter-y-md">
-        <q-banner class="bg-grey-2 text-grey-8" rounded>
+        <q-banner class="an-note" rounded>
           完成：新增 {{ reportTotals.added }}／更新
           {{ reportTotals.updated }}／刪除 {{ reportTotals.deleted }}；位址池
           新增 {{ reportTotals.poolAdded }}／刪除
@@ -80,15 +80,11 @@
       </q-card-section>
 
       <q-card-section v-else-if="plan" class="q-gutter-y-md">
-        <q-banner
-          v-if="plan.subnets.length === 0"
-          class="bg-grey-2 text-grey-8"
-          rounded
-        >
+        <q-banner v-if="plan.subnets.length === 0" class="an-note" rounded>
           沒有受管網段（未設定 Kea subnet-id），無需同步。
         </q-banner>
         <template v-else>
-          <q-banner class="bg-grey-2 text-grey-8" rounded>
+          <q-banner class="an-note" rounded>
             將以 asset-nest 為準對齊 Kea：新增 {{ plan.totals.add }}／更新
             {{ plan.totals.update }}／刪除 {{ plan.totals.delete }}／跳過
             {{ plan.totals.skipped }}；位址池 新增

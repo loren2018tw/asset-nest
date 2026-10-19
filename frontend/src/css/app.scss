@@ -1,1 +1,272 @@
-// app global css
+// asset-nest 全域設計系統：Organic Biophilic + Minimalism
+// 設計權杖與 Quasar 元件覆寫；頁面專屬樣式疊加於此之上。
+// （資產管理頁的實驗設計於 2026-10 定案後上收為全系統樣式。）
+
+:root {
+  --an-paper: #f5f3ec;
+  --an-surface: #fffdf8;
+  --an-surface-soft: #faf8f1;
+  --an-ink: #1f2a24;
+  --an-ink-soft: #46564c;
+  --an-muted: #6b7a70;
+  --an-line: #e4e0d3;
+  --an-line-soft: #efece1;
+  --an-forest: #2f5d46;
+  --an-forest-deep: #244737;
+  --an-sage: #7e9b82;
+  --an-sage-soft: #e9efe6;
+  --an-clay: #b06b43;
+  --an-clay-soft: #f7ebdf;
+  --an-brick: #a44a3f;
+  --an-radius-lg: 24px;
+  --an-radius-md: 16px;
+  --an-radius-sm: 12px;
+  --an-shadow: 0 20px 44px -34px rgba(31, 42, 36, 0.5);
+  --an-shadow-soft: 0 16px 34px -30px rgba(31, 42, 36, 0.55);
+}
+
+body.body--light {
+  color: var(--an-ink);
+  font-family:
+    "Roboto", "Noto Sans TC", "Noto Sans CJK TC", "Source Han Sans TC",
+    "PingFang TC", "Microsoft JhengHei", "WenQuanYi Zen Hei", system-ui,
+    sans-serif;
+  background: var(--an-paper);
+}
+
+/* 頁面畫布：暖紙色 + 極淡的有機光暈 */
+
+.q-page {
+  background:
+    radial-gradient(
+      1100px 480px at 106% -6%,
+      rgba(126, 155, 130, 0.16),
+      transparent 60%
+    ),
+    radial-gradient(
+      820px 400px at -8% 2%,
+      rgba(176, 107, 67, 0.06),
+      transparent 55%
+    ),
+    var(--an-paper);
+}
+
+.q-layout-padding {
+  padding: clamp(14px, 2.2vw, 30px);
+}
+
+/* 頂欄與側欄 */
+
+.q-header {
+  border-bottom: 1px solid rgba(20, 32, 26, 0.18);
+  box-shadow: none;
+}
+
+.q-drawer {
+  background: #fbf9f3;
+}
+
+.q-drawer .q-item {
+  min-height: 44px;
+  margin: 2px 8px;
+  border-radius: var(--an-radius-sm);
+}
+
+.q-drawer .q-item--active {
+  color: var(--an-forest-deep);
+  background: var(--an-sage-soft);
+}
+
+.q-drawer .q-item__label--header {
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  color: var(--an-muted);
+}
+
+/* 表格：統一的卡面、表頭、資料列 */
+
+.q-table__card:not(.q-table--flat) {
+  background: var(--an-surface);
+  border: 1px solid var(--an-line-soft);
+  border-radius: var(--an-radius-lg);
+  box-shadow: var(--an-shadow);
+}
+
+.q-table thead tr th {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--an-muted);
+  border-bottom: 1px solid var(--an-line);
+}
+
+.q-table tbody td {
+  font-size: 13.5px;
+  color: var(--an-ink-soft);
+  border-bottom: 1px solid var(--an-line-soft);
+}
+
+.q-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.q-table tbody tr {
+  transition: background-color 0.2s ease;
+}
+
+.q-table tbody tr:hover {
+  background: rgba(126, 155, 130, 0.09);
+}
+
+.q-table__bottom {
+  color: var(--an-muted);
+  border-top: 1px solid var(--an-line-soft);
+}
+
+.q-table__sort-icon {
+  color: var(--an-sage);
+}
+
+/* 卡片、橫幅、對話框 */
+
+.q-card:not(.q-card--flat) {
+  border-radius: var(--an-radius-lg);
+  box-shadow: var(--an-shadow);
+}
+
+.q-card--bordered {
+  border-color: var(--an-line-soft);
+}
+
+.q-card--flat.q-card--bordered {
+  border-radius: var(--an-radius-md);
+}
+
+.q-banner {
+  border-radius: var(--an-radius-md);
+}
+
+.q-dialog .q-card {
+  border-radius: var(--an-radius-lg);
+}
+
+/* 表單欄位：與頁面一致的圓角與底色 */
+
+.q-field--outlined .q-field__control {
+  border-radius: var(--an-radius-sm);
+}
+
+.q-field--outlined .q-field__control:before {
+  border-color: var(--an-line);
+}
+
+.q-field--outlined.q-field--focused .q-field__control:after {
+  border-color: var(--an-forest);
+}
+
+/* 按鈕與晶片 */
+
+.q-btn {
+  text-transform: none;
+  border-radius: var(--an-radius-sm);
+}
+
+.q-btn--round {
+  border-radius: 50%;
+}
+
+.q-chip {
+  border-radius: 999px;
+}
+
+/* 上傳元件 */
+
+.q-uploader {
+  overflow: hidden;
+  background: var(--an-surface);
+  border: 1px solid var(--an-line);
+  border-radius: var(--an-radius-md);
+}
+
+.q-uploader__header {
+  color: var(--an-forest-deep);
+  background: var(--an-sage-soft);
+}
+
+/* 通用區塊樣式（頁面可直接套用） */
+
+.an-panel {
+  background: var(--an-surface);
+  border: 1px solid var(--an-line-soft);
+  border-radius: var(--an-radius-lg);
+  box-shadow: var(--an-shadow);
+}
+
+.an-toolbar {
+  padding: 14px 16px;
+  background: var(--an-surface);
+  border: 1px solid var(--an-line-soft);
+  border-radius: var(--an-radius-lg);
+  box-shadow: var(--an-shadow);
+}
+
+.an-toolbar .q-field--outlined .q-field__control {
+  background: var(--an-surface-soft);
+}
+
+.an-section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.06em;
+  color: var(--an-ink);
+}
+
+.an-note {
+  color: var(--an-ink-soft);
+  background: var(--an-sage-soft);
+  border: 1px solid rgba(47, 93, 70, 0.14);
+}
+
+.an-mono {
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.an-muted {
+  color: var(--an-muted);
+}
+
+.an-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  color: var(--an-ink-soft);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(47, 93, 70, 0.12);
+  border-radius: 999px;
+}
+
+.an-pill--forest {
+  color: var(--an-forest);
+  background: var(--an-sage-soft);
+  border-color: rgba(47, 93, 70, 0.2);
+}
+
+/* 對話框標題：與頁面標題同一語氣 */
+
+.q-dialog .text-h6 {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--an-forest-deep);
+}
+
+/* 無資料提示（QTable 的 bottom 版本；hide-bottom 動態開啟時顯示） */
+
+.q-table__bottom--nodata {
+  justify-content: center;
+  min-height: 60px;
+  color: var(--an-muted);
+}

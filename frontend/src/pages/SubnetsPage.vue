@@ -1,34 +1,41 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">網段設定</div>
-      <q-space />
-      <q-btn
-        color="primary"
-        outline
-        icon="download"
-        label="匯出"
-        :loading="exporting"
-        @click="exportCsv"
-      />
-      <q-btn
-        color="primary"
-        outline
-        icon="upload_file"
-        label="匯入"
-        @click="importOpen = true"
-      />
-      <q-btn
-        color="primary"
-        outline
-        icon="sync"
-        label="Kea 同步"
-        @click="syncOpen = true"
-      />
-      <q-btn color="primary" icon="add" label="新增網段" @click="openCreate" />
-    </div>
+    <page-header class="q-mb-lg" eyebrow="IP management" title="網段設定">
+      <template #actions>
+        <q-btn
+          outline
+          no-caps
+          icon="download"
+          label="匯出"
+          :loading="exporting"
+          @click="exportCsv"
+        />
+        <q-btn
+          outline
+          no-caps
+          icon="upload_file"
+          label="匯入"
+          @click="importOpen = true"
+        />
+        <q-btn
+          outline
+          no-caps
+          icon="sync"
+          label="Kea 同步"
+          @click="syncOpen = true"
+        />
+        <q-btn
+          unelevated
+          no-caps
+          color="primary"
+          icon="add"
+          label="新增網段"
+          @click="openCreate"
+        />
+      </template>
+    </page-header>
 
-    <q-banner rounded class="bg-grey-2 text-grey-8 q-mb-md">
+    <q-banner rounded class="an-note q-mb-md">
       IPv4 與 IPv6 網段分別建立（雙棧以兩筆表示）；pool 與 Kea subnet-id 僅適用
       IPv4。
     </q-banner>
@@ -39,7 +46,7 @@
       row-key="id"
       :loading="loading"
       :pagination="{ rowsPerPage: 0 }"
-      hide-bottom
+      :hide-bottom="subnets.length > 0"
     >
       <template #body-cell-name="props">
         <q-td :props="props">{{ props.value || "—" }}</q-td>
@@ -138,6 +145,7 @@ import {
 } from "@/api/subnets";
 import { saveBlob } from "@/api/client";
 import KeaSyncDialog from "@/components/KeaSyncDialog.vue";
+import PageHeader from "@/components/PageHeader.vue";
 import SubnetFormDialog from "@/components/SubnetFormDialog.vue";
 import SubnetImportDialog from "@/components/SubnetImportDialog.vue";
 import { messageOf } from "@/utils/errors";

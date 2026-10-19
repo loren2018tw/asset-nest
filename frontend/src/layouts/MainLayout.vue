@@ -1,6 +1,6 @@
 <template>
   <q-layout view="lHh Lpr lFf">
-    <q-header elevated>
+    <q-header>
       <q-toolbar>
         <q-btn
           flat
@@ -11,7 +11,12 @@
           @click="toggleLeftDrawer"
         />
 
-        <q-toolbar-title> IT 資產整合管理系統 </q-toolbar-title>
+        <q-toolbar-title class="brand">
+          <span class="brand__mark">
+            <img src="/plant.png" alt="" width="24" height="24" />
+          </span>
+          <span class="brand__name">IT 資產整合管理系統</span>
+        </q-toolbar-title>
 
         <!-- 右上角資訊叢集（見 spec §5.3）：Loren → GitHub → 版本 → 登出 -->
         <div class="row items-center">
@@ -242,3 +247,36 @@ function toggleLeftDrawer() {
   leftDrawerOpen.value = !leftDrawerOpen.value;
 }
 </script>
+
+<style scoped>
+.brand {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.brand__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  background: rgba(255, 255, 255, 0.94);
+  border-radius: 999px;
+  box-shadow: 0 4px 12px -6px rgba(20, 32, 26, 0.5);
+}
+
+.brand__mark img {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.brand__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>

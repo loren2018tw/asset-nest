@@ -38,7 +38,7 @@
             v-if="!history.observed"
             dense
             rounded
-            class="bg-grey-3 q-mb-md"
+            class="an-note q-mb-md"
           >
             未觀測：所屬網段沒有在線觀測代理（尚未安裝或代理離線；IPv6
             網段恆為未觀測）。

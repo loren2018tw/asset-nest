@@ -1,11 +1,14 @@
 <template>
-  <div
-    class="window-height window-width row justify-center items-center bg-grey-2"
-  >
-    <q-card flat bordered class="login-card">
-      <q-card-section class="text-center q-pb-none">
-        <div class="text-h5 text-weight-medium">IT 資產整合管理系統</div>
-        <div class="text-subtitle1 text-grey-7 q-mt-xs">登入</div>
+  <div class="login-page">
+    <q-card flat class="login-card">
+      <q-card-section class="login-card__head">
+        <span class="login-card__mark">
+          <img src="/plant.png" alt="" width="30" height="30" />
+        </span>
+        <div class="login-card__intro">
+          <p class="login-card__eyebrow">Asset nest</p>
+          <h1 class="login-card__title">IT 資產整合管理系統</h1>
+        </div>
       </q-card-section>
 
       <q-card-section>
@@ -43,7 +46,7 @@
             type="submit"
             color="primary"
             label="登入"
-            class="full-width q-mt-lg"
+            class="login-card__submit full-width q-mt-lg"
             :loading="submitting"
             :disable="submitting"
           />
@@ -113,8 +116,80 @@ async function onSubmit(): Promise<void> {
 </script>
 
 <style scoped>
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100vh;
+  padding: 20px;
+  background:
+    radial-gradient(
+      900px 420px at 104% -8%,
+      rgba(126, 155, 130, 0.22),
+      transparent 62%
+    ),
+    radial-gradient(
+      720px 380px at -8% 6%,
+      rgba(176, 107, 67, 0.08),
+      transparent 58%
+    ),
+    var(--an-paper);
+}
+
 .login-card {
-  width: 400px;
+  width: 420px;
   max-width: calc(100vw - 32px);
+  overflow: hidden;
+  background: var(--an-surface);
+  border: 1px solid var(--an-line-soft);
+  border-radius: var(--an-radius-lg);
+  box-shadow: var(--an-shadow);
+}
+
+.login-card__head {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding-bottom: 4px;
+}
+
+.login-card__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  background: var(--an-sage-soft);
+  border-radius: 46% 54% 58% 42% / 52% 46% 54% 48%;
+}
+
+.login-card__mark img {
+  display: block;
+  width: 30px;
+  height: 30px;
+}
+
+.login-card__eyebrow {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--an-sage);
+}
+
+.login-card__title {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  color: var(--an-forest-deep);
+}
+
+.login-card__submit {
+  border-radius: 999px;
 }
 </style>

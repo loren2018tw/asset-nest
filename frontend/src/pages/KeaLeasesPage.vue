@@ -1,20 +1,20 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">租約清單</div>
-      <div v-if="updatedAt" class="text-caption text-grey-7 q-ml-sm">
-        上次更新：{{ formatTime(updatedAt) }}
-      </div>
-      <q-space />
-      <q-btn
-        color="primary"
-        outline
-        icon="refresh"
-        label="重新整理"
-        :loading="loading"
-        @click="load"
-      />
-    </div>
+    <page-header class="q-mb-lg" eyebrow="Kea · Leases" title="租約清單">
+      <template v-if="updatedAt" #meta>
+        <span class="an-pill">上次更新：{{ formatTime(updatedAt) }}</span>
+      </template>
+      <template #actions>
+        <q-btn
+          flat
+          no-caps
+          icon="refresh"
+          label="重新整理"
+          :loading="loading"
+          @click="load"
+        />
+      </template>
+    </page-header>
 
     <q-banner v-if="loadError" rounded class="bg-negative text-white q-mb-md">
       {{ loadError }}
@@ -25,7 +25,7 @@
       </template>
     </q-banner>
 
-    <div class="row q-col-gutter-sm q-mb-md">
+    <div class="row q-col-gutter-sm an-toolbar q-mb-md">
       <div class="col-12 col-md-6">
         <q-input
           v-model="search"
@@ -155,6 +155,7 @@ import { computed, onMounted, ref } from "vue";
 
 import { listKeaLeases, type KeaLease } from "@/api/kea";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
+import PageHeader from "@/components/PageHeader.vue";
 
 const leases = ref<KeaLease[]>([]);
 const loading = ref(false);

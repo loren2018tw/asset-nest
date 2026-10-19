@@ -1,17 +1,15 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <div class="text-h6">資產借還</div>
-    </div>
+    <page-header class="q-mb-lg" eyebrow="Asset lending" title="資產借還" />
 
-    <div class="text-subtitle1 q-mb-sm">出借中</div>
+    <h2 class="an-section-title q-mb-sm">出借中</h2>
     <q-table
       :rows="openLendings"
       :columns="openColumns"
       row-key="id"
       :loading="openLoading"
       :pagination="openPagination"
-      hide-bottom
+      :hide-bottom="openLendings.length > 0"
       no-data-label="目前沒有出借中的資產"
     >
       <template #body-cell-lent_at="props">
@@ -48,7 +46,7 @@
       </template>
     </q-table>
 
-    <div class="text-subtitle1 q-mb-sm q-mt-lg">已歸還紀錄</div>
+    <h2 class="an-section-title q-mb-sm q-mt-lg">已歸還紀錄</h2>
     <q-table
       :rows="returnedRows"
       :columns="returnedColumns"
@@ -82,6 +80,7 @@ import {
   returnLending,
   type LendingWithAsset
 } from "@/api/lendings";
+import PageHeader from "@/components/PageHeader.vue";
 import { assetLabel } from "@/utils/assetLabel";
 import { messageOf } from "@/utils/errors";
 

@@ -1,23 +1,17 @@
 <template>
   <q-page padding>
-    <div class="row items-center q-mb-md">
-      <q-btn
-        flat
-        dense
-        round
-        icon="arrow_back"
-        aria-label="返回網段列表"
-        to="/ips"
-      />
-      <div class="text-h6 q-ml-sm">
-        IP 管理
-        <span v-if="subnet" class="text-grey-7 text-subtitle1 q-ml-sm">
+    <page-header class="q-mb-lg" eyebrow="IP management" title="IP 管理">
+      <template #meta>
+        <span v-if="subnet" class="an-pill">
           {{ subnet.name ? `${subnet.name}｜` : "" }}{{ subnet.cidr }}
         </span>
-      </div>
-    </div>
+      </template>
+      <template #actions>
+        <q-btn flat no-caps icon="arrow_back" label="返回網段列表" to="/ips" />
+      </template>
+    </page-header>
 
-    <div class="row q-col-gutter-sm q-mb-md">
+    <div class="row q-col-gutter-sm an-toolbar q-mb-md">
       <div class="col-12 col-md-3">
         <q-input
           ref="searchInputRef"
@@ -315,6 +309,7 @@ import { fetchSubnet, type AddressFamily, type Subnet } from "@/api/subnets";
 import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssignmentDialog from "@/components/AssignmentDialog.vue";
 import ObservationHistoryDialog from "@/components/ObservationHistoryDialog.vue";
+import PageHeader from "@/components/PageHeader.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import {
   subnetDisplayLabel,
