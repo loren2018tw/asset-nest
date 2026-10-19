@@ -20,8 +20,8 @@ use crate::assets::{self, Asset};
 use crate::assignments;
 use crate::disposed_assets::{self, DisposeInput, DisposedAsset};
 use crate::interfaces;
+use crate::kea::push::KeaSync;
 use crate::kea::sync as kea_sync;
-use crate::kea::sync::KeaSync;
 use crate::lendings;
 
 /// 報廢清單預設每頁筆數（見 spec §4）。

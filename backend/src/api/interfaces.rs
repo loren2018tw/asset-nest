@@ -14,8 +14,8 @@ use crate::api::ApiError;
 use crate::assets;
 use crate::assignments;
 use crate::interfaces::{self, Interface, InterfaceInput, InterfacePatch, Warning};
+use crate::kea::push::KeaSync;
 use crate::kea::sync as kea_sync;
-use crate::kea::sync::KeaSync;
 
 pub fn router() -> Router<AppState> {
     Router::new()

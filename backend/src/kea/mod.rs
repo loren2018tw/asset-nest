@@ -4,6 +4,7 @@
 //! `docs/adr/0011`）。保留推送與租約讀取以 [`KeaGateway`] 定義，待後續階段實作。
 
 pub mod http;
+pub mod push;
 pub mod sync;
 
 use std::net::Ipv4Addr;

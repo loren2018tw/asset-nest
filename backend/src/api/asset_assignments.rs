@@ -17,8 +17,8 @@ use crate::api::ApiError;
 use crate::api::ips::warnings_for_address;
 use crate::assignments::{self, AssetAssignmentInput, Assignment};
 use crate::interfaces::Warning;
-use crate::kea::sync as kea_sync;
-use crate::kea::sync::KeaSync;
+use crate::kea::push as kea_push;
+use crate::kea::push::KeaSync;
 use crate::subnets;
 
 pub fn router() -> Router<AppState> {
@@ -48,13 +48,9 @@ async fn put_asset_assignment(
 
     let (address, transfer, valid) = input.validate()?;
 
-    // 同步判斷需要異動前狀態（移轉時為舊介面的保留）。
-    let before = match subnets::find_by_address(&state.db, address).await? {
-        Some(subnet) => assignments::find(&state.db, subnet.id, &address.to_string())
-            .await
-            .map_err(|error| ApiError::internal("讀取指派失敗", error))?,
-        None => None,
-    };
+    // Kea 推送需異動前狀態（移轉時為舊介面的保留；見 ADR-0011）；
+    // 捕捉必在本地異動前。
+    let pending = kea_push::capture_assignment(&state.db, address).await?;
 
     let (assignment, transferred) =
         assignments::assign_for_asset(&state.db, asset_id, address, valid, transfer).await?;
@@ -66,14 +62,7 @@ async fn put_asset_assignment(
         .ok_or_else(|| ApiError::internal("讀取網段失敗", "網段不存在"))?;
 
     // 推送先於警示：警示偵測失敗時不影響 Kea 同步（見 ADR-0027）。
-    let kea_sync = kea_sync::after_assignment_change(
-        &state.db,
-        state.kea.as_ref(),
-        &subnet,
-        before.as_ref(),
-        Some(&assignment),
-    )
-    .await?;
+    let kea_sync = kea_push::commit_assignment(&state.db, state.kea.as_ref(), pending).await?;
     let warnings = warnings_for_address(&state, &subnet, &assignment.address).await?;
 
     Ok(Json(AssetAssignmentResponse {

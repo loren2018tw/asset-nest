@@ -23,8 +23,8 @@ use crate::interfaces::Warning;
 use crate::ips::{
     self, IpEntry, IpFilter, IpObservedFilter, IpSortDir, IpSortField, IpStatusFilter,
 };
-use crate::kea::sync as kea_sync;
-use crate::kea::sync::KeaSync;
+use crate::kea::push as kea_push;
+use crate::kea::push::KeaSync;
 use crate::observation::{self, ObservationView};
 use crate::subnets;
 
@@ -267,20 +267,12 @@ async fn put_assignment(
     let address = parse_address(&address)?;
     let valid = input.validate()?;
 
-    // 同步判斷需要異動前狀態（保留→static 時刪除 Kea 保留）。
-    let before = assignments::find(&state.db, subnet.id, &address.to_string())
-        .await
-        .map_err(|error| ApiError::internal("讀取指派失敗", error))?;
+    // Kea 推送需異動前狀態（保留→static 時刪除 Kea 保留；見 ADR-0011）；
+    // 捕捉必在本地異動前，推送於異動後。
+    let pending = kea_push::capture_assignment(&state.db, address).await?;
 
     let assignment = assignments::assign(&state.db, &subnet, address, valid).await?;
-    let kea_sync = kea_sync::after_assignment_change(
-        &state.db,
-        state.kea.as_ref(),
-        &subnet,
-        before.as_ref(),
-        Some(&assignment),
-    )
-    .await?;
+    let kea_sync = kea_push::commit_assignment(&state.db, state.kea.as_ref(), pending).await?;
 
     respond_with_warnings(&state, &subnet, assignment, kea_sync).await
 }
@@ -294,17 +286,16 @@ async fn delete_assignment(
 ) -> Result<Json<AssignmentDeleted>, ApiError> {
     let Path((id, address)) = path.map_err(|_| ApiError::validation("路徑參數格式錯誤"))?;
 
-    let subnet = subnets::get(&state.db, id)
+    subnets::get(&state.db, id)
         .await
         .map_err(|error| ApiError::internal("讀取網段失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到網段"))?;
 
     let address = parse_address(&address)?;
 
-    // 同步判斷需要異動前狀態（取消保留時刪除 Kea 保留）。
-    let before = assignments::find(&state.db, subnet.id, &address.to_string())
-        .await
-        .map_err(|error| ApiError::internal("讀取指派失敗", error))?;
+    // Kea 推送需異動前狀態（取消保留時刪除 Kea 保留；見 ADR-0011）；
+    // 捕捉必在本地異動前，推送於異動後（取消失敗回 404，不推送）。
+    let pending = kea_push::capture_assignment(&state.db, address).await?;
 
     let cancelled = assignments::cancel(&state.db, id, address)
         .await
@@ -314,14 +305,7 @@ async fn delete_assignment(
         return Err(ApiError::not_found("找不到指派"));
     }
 
-    let kea_sync = kea_sync::after_assignment_change(
-        &state.db,
-        state.kea.as_ref(),
-        &subnet,
-        before.as_ref(),
-        None,
-    )
-    .await?;
+    let kea_sync = kea_push::commit_assignment(&state.db, state.kea.as_ref(), pending).await?;
 
     Ok(Json(AssignmentDeleted { kea_sync }))
 }

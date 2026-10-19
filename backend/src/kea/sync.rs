@@ -24,6 +24,7 @@ use super::KeaError;
 use super::http::{
     Client, Ipv4Range, KeaSubnet, ReservationRecord, is_routers_option, parse_pool_entry,
 };
+use super::push::KeaSync;
 use crate::address_space::AddressSpace;
 use crate::api::ApiError;
 use crate::assignments::{self, Assignment};
@@ -33,31 +34,6 @@ use crate::subnets::Subnet;
 
 /// 完整同步的併發上限。
 const SYNC_CONCURRENCY: usize = 6;
-
-/// 單筆推送結果（隨指派回應附帶；僅在應同步時出現）。
-#[derive(Debug, Clone, Serialize)]
-pub struct KeaSync {
-    /// `ok` 或 `failed`。
-    pub status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl KeaSync {
-    fn ok() -> Self {
-        Self {
-            status: "ok",
-            message: None,
-        }
-    }
-
-    fn failed(error: &KeaError) -> Self {
-        Self {
-            status: "failed",
-            message: Some(error.to_string()),
-        }
-    }
-}
 
 /// 指派異動後推送單筆保留；回傳 `None`＝此異動不涉及 Kea。
 ///

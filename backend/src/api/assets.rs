@@ -18,8 +18,8 @@ use crate::assets::{
 };
 use crate::assignments::{self, AssetAssignment};
 use crate::interfaces::{self, Interface};
+use crate::kea::push::KeaSync;
 use crate::kea::sync as kea_sync;
-use crate::kea::sync::KeaSync;
 use crate::lendings::{self, LendingBrief};
 
 /// 清單預設每頁筆數（見 spec §6）。
