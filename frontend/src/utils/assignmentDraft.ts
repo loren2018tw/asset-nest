@@ -30,6 +30,24 @@ export function sameAddress(a: string, b: string): boolean {
   return parsedA.family === parsedB.family && parsedA.value === parsedB.value;
 }
 
+/** 同介面同網段的其他位址（同位址＝更新不算衝突）；無衝突回 `null`。 */
+export function sameSubnetConflict(
+  existing: { address: string; subnetId: number | null }[],
+  addressText: string,
+  subnetId: number | null
+): string | null {
+  if (subnetId === null) {
+    return null;
+  }
+  for (const item of existing) {
+    if (item.subnetId !== subnetId || sameAddress(item.address, addressText)) {
+      continue;
+    }
+    return item.address;
+  }
+  return null;
+}
+
 /** 網段顯示標籤：「名稱｜CIDR」；無名稱或 CIDR 缺漏時僅顯示 CIDR。 */
 export function subnetDisplayLabel(
   name: string | null,

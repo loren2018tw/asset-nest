@@ -249,7 +249,7 @@ import PeerMacHint from "@/components/PeerMacHint.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
 import {
   resolveSubnetByAddress,
-  sameAddress,
+  sameSubnetConflict,
   subnetDisplayLabel,
   type AssignmentDraftInput
 } from "@/utils/assignmentDraft";
@@ -795,24 +795,6 @@ async function statusForAddress(text: string): Promise<IpQueryStatus | null> {
   } catch {
     return null;
   }
-}
-
-/** 同介面同網段的其他位址（同位址＝更新不算衝突）；無衝突回 `null`。 */
-function sameSubnetConflict(
-  existing: { address: string; subnetId: number | null }[],
-  addressText: string,
-  subnetId: number | null
-): string | null {
-  if (subnetId === null) {
-    return null;
-  }
-  for (const item of existing) {
-    if (item.subnetId !== subnetId || sameAddress(item.address, addressText)) {
-      continue;
-    }
-    return item.address;
-  }
-  return null;
 }
 
 function onSaved(saved: AssetAssignmentSaved) {
