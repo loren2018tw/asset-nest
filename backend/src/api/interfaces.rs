@@ -14,6 +14,7 @@ use crate::api::ApiError;
 use crate::assets;
 use crate::assignments;
 use crate::interfaces::{self, Interface, InterfaceInput, InterfacePatch, Warning};
+use crate::kea::push as kea_push;
 use crate::kea::push::KeaSync;
 use crate::kea::sync as kea_sync;
 
@@ -144,10 +145,9 @@ async fn delete_interface(
 ) -> Result<Json<InterfaceDeleted>, ApiError> {
     let Path(id) = id.map_err(|_| ApiError::validation("介面 id 格式錯誤"))?;
 
-    // 先擷取保留（刪除後指派連動消失），本地刪除後逐筆推送 Kea（見 ADR-0027）。
-    let reservations = assignments::list_reservations_for_interfaces(&state.db, &[id])
-        .await
-        .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
+    // 先擷取保留（刪除後指派連動消失），本地刪除後逐筆推送 Kea（見 ADR-0027）；
+    // 捕捉必在本地異動前，刪除失敗回 404、不推送。
+    let pending = kea_push::capture_interface_deletion(&state.db, id).await?;
 
     let deleted = interfaces::delete(&state.db, id)
         .await
@@ -157,8 +157,7 @@ async fn delete_interface(
         return Err(ApiError::not_found("找不到介面"));
     }
 
-    let kea_sync =
-        kea_sync::push_reservation_deletes(&state.db, state.kea.as_ref(), &reservations).await?;
+    let kea_sync = kea_push::commit_deletions(&state.db, state.kea.as_ref(), pending).await?;
 
     Ok(Json(InterfaceDeleted { kea_sync }))
 }

@@ -17,11 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::api::ApiError;
 use crate::assets::{self, Asset};
-use crate::assignments;
 use crate::disposed_assets::{self, DisposeInput, DisposedAsset};
-use crate::interfaces;
+use crate::kea::push as kea_push;
 use crate::kea::push::KeaSync;
-use crate::kea::sync as kea_sync;
 use crate::lendings;
 
 /// 報廢清單預設每頁筆數（見 spec §4）。
@@ -87,22 +85,16 @@ async fn dispose_asset(
         return Err(ApiError::conflict("此資產出借中，請先歸還"));
     }
 
-    // 先擷取保留（搬移後指派連動消失），再搬移、後推送 Kea（見 ADR-0027）。
-    let interfaces = interfaces::list_for_asset(&state.db, asset_id)
-        .await
-        .map_err(|error| ApiError::internal("讀取介面失敗", error))?;
-    let interface_ids: Vec<i64> = interfaces.iter().map(|interface| interface.id).collect();
-    let reservations = assignments::list_reservations_for_interfaces(&state.db, &interface_ids)
-        .await
-        .map_err(|error| ApiError::internal("讀取保留指派失敗", error))?;
+    // 先擷取保留（搬移後指派連動消失），再搬移、後推送 Kea（見 ADR-0027）；
+    // 捕捉必在本地異動前，搬移失敗回 404、不推送。
+    let pending = kea_push::capture_asset_deletion(&state.db, asset_id).await?;
 
     let disposed = disposed_assets::dispose(&state.db, asset_id, valid)
         .await
         .map_err(|error| ApiError::internal("報廢資產失敗", error))?
         .ok_or_else(|| ApiError::not_found("找不到資產"))?;
 
-    let kea_sync =
-        kea_sync::push_reservation_deletes(&state.db, state.kea.as_ref(), &reservations).await?;
+    let kea_sync = kea_push::commit_deletions(&state.db, state.kea.as_ref(), pending).await?;
 
     Ok((
         StatusCode::CREATED,
