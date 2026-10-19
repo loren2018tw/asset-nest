@@ -48,7 +48,7 @@
           color="primary"
           label="建立"
           :loading="saving"
-          @click="createNewInterface"
+          @click="submitNewInterface"
         />
       </div>
     </div>
@@ -100,7 +100,7 @@ function fillNewInterfaceMac(mac: string) {
 }
 
 /** 當場新增介面（名稱／MAC）；成功後收合卡片、重設欄位並回報父層。 */
-async function createNewInterface() {
+async function submitNewInterface() {
   const assetId = props.assetId;
   if (assetId === null) {
     return;

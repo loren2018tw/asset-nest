@@ -236,6 +236,7 @@ import AssetFormDialog from "@/components/AssetFormDialog.vue";
 import AssetImportDialog from "@/components/AssetImportDialog.vue";
 import LendingDialog from "@/components/LendingDialog.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import { summarizeAssetImpact } from "@/utils/assetImpact";
 import { debounce } from "@/utils/debounce";
 import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
@@ -573,25 +574,18 @@ async function confirmDeleteWithImpact(asset: Asset) {
     return;
   }
 
-  const interfaceCount = detail.interfaces.length;
-  const assignmentCount = detail.assignments.length;
-  const reservationCount = detail.assignments.filter(
-    item => item.purpose === "reservation"
-  ).length;
-
-  const lastSeen =
-    detail.last_seen_at === null ? "—" : relativeTime(detail.last_seen_at);
-  const macs = detail.interfaces
-    .map(item => item.mac)
-    .filter((mac): mac is string => mac !== null && mac !== "");
-  const macLabel = macs.length > 0 ? macs.join("、") : "—";
+  const impact = summarizeAssetImpact({
+    interfaces: detail.interfaces,
+    assignments: detail.assignments,
+    lastSeenAt: detail.last_seen_at
+  });
 
   $q.dialog({
     title: "刪除資產",
     message:
-      `將刪除 ${interfaceCount} 個介面、${assignmentCount} 筆指派` +
-      `（含 ${reservationCount} 筆保留）。<br>` +
-      `最後可見：${lastSeen}；介面 MAC：${macLabel}。<br>` +
+      `將刪除 ${impact.interfaceCount} 個介面、${impact.assignmentCount} 筆指派` +
+      `（含 ${impact.reservationCount} 筆保留）。<br>` +
+      `最後可見：${impact.lastSeen}；介面 MAC：${impact.macLabel}。<br>` +
       `僅提示，不阻擋刪除。確定要刪除「${escapeHtml(asset.description)}」？`,
     html: true,
     cancel: true,

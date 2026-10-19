@@ -40,7 +40,7 @@ import { textOrNull } from "@/utils/text";
 
 // ---------- 型別：流程埠與列結構 ----------
 
-/** 移轉確認所需的現任指派摘要（原 assignTransfer.AssignedElsewhere，逐字移入）。 */
+/** 移轉確認所需的現任指派摘要（逐字沿用；見 spec §介面）。 */
 export interface AssignedElsewhere {
   asset_property_no: string | null;
   asset_description: string;

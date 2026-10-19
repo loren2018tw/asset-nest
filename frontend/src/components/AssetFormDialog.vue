@@ -495,28 +495,17 @@ import { useQuasar, type QSelect } from "quasar";
 import { computed, nextTick, ref, watch } from "vue";
 
 import {
-  createAsset,
   deleteAsset,
   fetchAsset,
   fetchLocations,
   fetchTags,
   findByDeviceSerial,
-  updateAsset,
   type Asset,
   type AssetAssignment,
   type AssetInput
 } from "@/api/assets";
-import type { AssetAssignmentSaved } from "@/api/assignments";
 import { disposeAsset } from "@/api/disposedAssets";
-import {
-  createInterface,
-  deleteInterface,
-  updateInterface,
-  type Interface,
-  type InterfaceInput
-} from "@/api/interfaces";
-import { cancelAssignment } from "@/api/ips";
-import type { KeaSyncState } from "@/api/kea";
+import type { Interface } from "@/api/interfaces";
 import type { LendingBrief } from "@/api/lendings";
 import { listSubnets, type SubnetSummary } from "@/api/subnets";
 import AssignIpDialog from "@/components/AssignIpDialog.vue";
@@ -529,9 +518,17 @@ import {
 import {
   assignmentPurposeLabel,
   cancelAssignmentConfirmMessage,
-  interfaceNameRule
+  cancelAssignmentFlow,
+  interfaceNameRule,
+  landAssignmentDrafts,
+  preflightAssignmentDrafts,
+  saveAssetBody,
+  syncInterfaces,
+  type AssignmentDraftRow,
+  type InterfaceRow
 } from "@/utils/assignmentFlow";
-import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
+import { assignmentFlowDeps } from "@/utils/assignmentFlowDeps";
+import { summarizeAssetImpact } from "@/utils/assetImpact";
 import { assetLabel } from "@/utils/assetLabel";
 import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
@@ -560,6 +557,8 @@ const emit = defineEmits<{
 }>();
 
 const $q = useQuasar();
+/** 指派流程 module 的依賴（真 adapter：`@/api/*` 與 `$q`；見 spec §介面）。 */
+const deps = assignmentFlowDeps($q);
 
 interface FormState {
   property_no: string;
@@ -574,26 +573,11 @@ interface FormState {
   tags: string[];
 }
 
-/** 對話框中的介面編輯列；`id === null`＝尚未儲存的新介面。 */
-interface InterfaceDraft {
-  key: number;
-  id: number | null;
-  name: string;
-  mac: string;
-  note: string;
-  /** 載入／上次儲存後的原始值；新介面為 `null`。供儲存時差異比對。 */
-  original: {
-    name: string | null;
-    mac: string | null;
-    note: string | null;
-  } | null;
-}
+/** 對話框中的介面編輯列（module `InterfaceRow`）；`id === null`＝尚未儲存的新介面。 */
+type InterfaceDraft = InterfaceRow;
 
-/** 指派草稿：綁定介面草稿列（`rowKey`），儲存時才落地（見 spec §4、ADR-0025）。 */
-interface AssignmentDraft extends AssignmentDraftInput {
-  key: number;
-  rowKey: number;
-}
+/** 指派草稿（module `AssignmentDraftRow`）：綁定介面草稿列（`rowKey`），儲存時才落地（見 spec §4、ADR-0025）。 */
+type AssignmentDraft = AssignmentDraftRow;
 
 function emptyForm(): FormState {
   return {
@@ -692,22 +676,14 @@ const isLentAsset = computed(() => {
   return lending !== null && lending !== undefined;
 });
 
-/** 報廢子對話框的影響摘要（比照 `AssetsPage.confirmDeleteWithImpact`；見 spec §5）。 */
-const disposalImpact = computed(() => {
-  const reservationCount = assignments.value.filter(
-    item => item.purpose === "reservation"
-  ).length;
-  const macs = originalInterfaces.value
-    .map(item => item.mac)
-    .filter((mac): mac is string => mac !== null && mac !== "");
-  return {
-    interfaceCount: originalInterfaces.value.length,
-    assignmentCount: assignments.value.length,
-    reservationCount,
-    lastSeen: lastSeenAt.value === null ? "—" : relativeTime(lastSeenAt.value),
-    macLabel: macs.length > 0 ? macs.join("、") : "—"
-  };
-});
+/** 報廢子對話框的影響摘要（與 `AssetsPage` 共用 `summarizeAssetImpact`；見 spec §5）。 */
+const disposalImpact = computed(() =>
+  summarizeAssetImpact({
+    interfaces: originalInterfaces.value,
+    assignments: assignments.value,
+    lastSeenAt: lastSeenAt.value
+  })
+);
 
 watch(
   () => props.modelValue,
@@ -1120,13 +1096,18 @@ async function cancelAssignmentItem(item: AssetAssignment) {
   }
   cancellingAssignmentId.value = item.id;
   try {
-    const result = await cancelAssignment(item.subnet_id, item.address);
-    notifyKeaSync($q, result.kea_sync);
+    const result = await cancelAssignmentFlow(
+      deps,
+      item.subnet_id,
+      item.address
+    );
+    if (!result.ok) {
+      $q.notify({ type: "negative", message: result.message });
+      return;
+    }
     $q.notify({ type: "positive", message: "已取消指派" });
     emit("saved");
     await refreshAssignments(assetId);
-  } catch (cause) {
-    $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
     cancellingAssignmentId.value = null;
   }
@@ -1181,192 +1162,52 @@ function toInput(): AssetInput {
   };
 }
 
-function toInterfaceInput(row: InterfaceDraft): InterfaceInput {
-  return {
-    name: textOrNull(row.name),
-    mac: textOrNull(row.mac),
-    note: textOrNull(row.note)
-  };
-}
-
-/** 與上次儲存值比較（MAC 以正規化後比對），避免無謂的 PATCH。 */
-function interfaceChanged(row: InterfaceDraft): boolean {
-  const original = row.original;
-  if (original === null) {
-    return true;
-  }
-  return (
-    row.name.trim() !== (original.name ?? "") ||
-    (normalizeMac(row.mac) ?? "") !== (original.mac ?? "") ||
-    row.note.trim() !== (original.note ?? "")
-  );
-}
-
-/**
- * 儲存介面：新增／編輯後再刪除已移除者。
- * 回傳不阻擋的警示訊息（例如全系統重複 MAC），供儲存後提示；
- * Kea 推送失敗（MAC 變更、刪除）即時以 warning 提示（見 ADR-0027）。
- */
-async function syncInterfaces(assetId: number): Promise<string[]> {
-  const warnings: string[] = [];
-  const keaSyncs: KeaSyncState[] = [];
-  const keptIds = new Set<number>();
-
-  for (const row of interfaceDrafts.value) {
-    const input = toInterfaceInput(row);
-
-    if (row.id === null) {
-      const saved = await createInterface(assetId, input);
-      row.id = saved.id;
-      row.name = saved.name ?? "";
-      row.mac = saved.mac ?? "";
-      row.note = saved.note ?? "";
-      row.original = { name: saved.name, mac: saved.mac, note: saved.note };
-      // 新介面已落地：納入既有介面並保留（供後續指派／重試；避免下次儲存誤刪）
-      keptIds.add(saved.id);
-      originalInterfaces.value.push(saved);
-      warnings.push(...saved.warnings.map(warning => warning.message));
-      continue;
-    }
-
-    keptIds.add(row.id);
-    if (!interfaceChanged(row)) {
-      continue;
-    }
-
-    const saved = await updateInterface(row.id, input);
-    row.name = saved.name ?? "";
-    row.mac = saved.mac ?? "";
-    row.note = saved.note ?? "";
-    row.original = { name: saved.name, mac: saved.mac, note: saved.note };
-    warnings.push(...saved.warnings.map(warning => warning.message));
-    keaSyncs.push(...(saved.kea_sync ?? []));
-  }
-
-  // 已移除的既有介面：在新增／編輯成功後才刪除
-  const removed: number[] = [];
-  for (const item of originalInterfaces.value) {
-    if (keptIds.has(item.id)) {
-      continue;
-    }
-    const deleted = await deleteInterface(item.id);
-    keaSyncs.push(...deleted.kea_sync);
-    removed.push(item.id);
-  }
-  originalInterfaces.value = originalInterfaces.value.filter(
-    item => !removed.includes(item.id)
-  );
-
-  // 多筆失敗僅提示一次（訊息比照 utils/keaSync.ts）
-  notifyKeaSync(
-    $q,
-    keaSyncs.find(sync => sync.status === "failed")
-  );
-
-  return warnings;
-}
-
-/** 儲存前預檢指派草稿：保留需介面 MAC（見 spec §5.1）；無誤回 `null`。 */
-function preflightAssignmentDrafts(): string | null {
-  for (const draft of assignmentDrafts.value) {
-    if (draft.purpose !== "reservation") {
-      continue;
-    }
-    const row = interfaceDrafts.value.find(item => item.key === draft.rowKey);
-    if (row === undefined || normalizeMac(row.mac) === null) {
-      return `保留指派 ${draft.address} 需要介面 MAC；請補上 MAC 或改為手動設定。`;
-    }
-  }
-  return null;
-}
-
-/**
- * 逐筆落地指派草稿（見 spec §5.2）：遇錯即停；已成功者自草稿移除，
- * 失敗者保留供重試。移轉確認被取消視同失敗（回傳後由呼叫端提示）。
- */
-async function landAssignmentDrafts(assetId: number) {
-  if (assignmentDrafts.value.length === 0) {
-    return;
-  }
-
-  for (const draft of assignmentDrafts.value) {
-    const row = interfaceDrafts.value.find(item => item.key === draft.rowKey);
-    if (row === undefined || row.id === null) {
-      // 介面已不存在（理論上草稿已連動移除）；僅清理殘留
-      assignmentDrafts.value = assignmentDrafts.value.filter(
-        item => item.key !== draft.key
-      );
-      continue;
-    }
-
-    let saved: AssetAssignmentSaved | null = null;
-    try {
-      saved = await assignFromAssetWithTransfer($q, assetId, {
-        address: draft.address,
-        interface_id: row.id,
-        purpose: draft.purpose,
-        hostname: draft.hostname
-      });
-    } catch (cause) {
-      errorMessage.value = messageOf(cause);
-      emit("saved");
-      await refreshAssignments(assetId);
-      return;
-    }
-
-    if (saved === null) {
-      errorMessage.value = `位址 ${draft.address} 未移轉，指派尚未建立。`;
-      emit("saved");
-      await refreshAssignments(assetId);
-      return;
-    }
-
-    for (const warning of saved.warnings) {
-      $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
-    }
-    notifyKeaSync($q, saved.kea_sync);
-    assignmentDrafts.value = assignmentDrafts.value.filter(
-      item => item.key !== draft.key
-    );
-  }
-
-  // 指派已落地：通知外層刷新（清單「已指派 IP」欄）
-  emit("saved");
-  await refreshAssignments(assetId);
-}
-
 async function submit() {
   saving.value = true;
   errorMessage.value = "";
 
   try {
-    const preflight = preflightAssignmentDrafts();
+    const preflight = preflightAssignmentDrafts(
+      assignmentDrafts.value,
+      interfaceDrafts.value
+    );
     if (preflight !== null) {
       errorMessage.value = preflight;
       return;
     }
 
-    const input = toInput();
-    let assetId = savedAssetId.value ?? props.asset?.id ?? null;
-
-    if (assetId === null) {
-      const created = await createAsset(input);
-      assetId = created.id;
-      savedAssetId.value = created.id;
-    } else {
-      await updateAsset(assetId, input);
+    const body = await saveAssetBody(deps, {
+      input: toInput(),
+      savedAssetId: savedAssetId.value,
+      editingAssetId: props.asset?.id ?? null
+    });
+    if (body.createdId !== null) {
+      savedAssetId.value = body.createdId;
     }
 
     // 資產已寫入：立即通知外部刷新，即使後續介面同步失敗或使用者取消也不失真
     emit("saved");
 
-    const warnings = await syncInterfaces(assetId);
-    for (const message of warnings) {
-      $q.notify({ type: "warning", message, timeout: 6000 });
-    }
+    const sync = await syncInterfaces(deps, body.assetId, {
+      rows: interfaceDrafts.value,
+      original: originalInterfaces.value
+    });
+    interfaceDrafts.value = sync.rows;
+    originalInterfaces.value = sync.original;
 
     // 指派草稿於介面落地後逐筆落地（見 spec §5.1）
-    await landAssignmentDrafts(assetId);
+    if (assignmentDrafts.value.length > 0) {
+      const land = await landAssignmentDrafts(deps, body.assetId, {
+        drafts: assignmentDrafts.value,
+        rows: interfaceDrafts.value
+      });
+      assignmentDrafts.value = land.drafts;
+      if (land.error !== null) {
+        errorMessage.value = land.error;
+      }
+      emit("saved");
+      await refreshAssignments(body.assetId);
+    }
 
     if (assignmentDrafts.value.length === 0) {
       open.value = false;
