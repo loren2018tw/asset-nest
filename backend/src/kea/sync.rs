@@ -1,9 +1,8 @@
-//! Kea 保留推送與完整同步（見 `docs/adr/0011`）。
+//! Kea 完整同步（見 `docs/adr/0011`）。
 //!
-//! 單筆：指派／改用途／改 hostname／取消指派時即時推送該筆保留（僅受管網段＋
-//! 保留用途）；資產／介面刪除與介面 MAC 編輯另走 [`push_reservation_deletes`]／
-//! [`push_reservation_updates`]（見 `docs/adr/0027`）。Kea 失敗僅警示、不阻擋
-//! 本地儲存，由完整同步修復。
+//! 即時單筆推送（指派／改用途、資產／介面刪除、介面 MAC 編輯；見
+//! `docs/adr/0027`）見 [`push`](super::push)；Kea 失敗僅警示、不阻擋本地儲存，
+//! 由完整同步修復。
 //! 完整同步：以 asset-nest 為準對齊受管網段的 Kea 保留（新增／更新／刪除）
 //! 與網段層設定（pool、gateway；見 `docs/adr/0013`），並建立 Kea 端缺少的
 //! 受管網段（`subnet4-add`；見 `docs/adr/0023`）；先產生計畫（dry-run）
@@ -24,149 +23,13 @@ use super::KeaError;
 use super::http::{
     Client, Ipv4Range, KeaSubnet, ReservationRecord, is_routers_option, parse_pool_entry,
 };
-use super::push::KeaSync;
 use crate::address_space::AddressSpace;
 use crate::api::ApiError;
-use crate::assignments::{self, Assignment};
+use crate::assignments;
 use crate::conflicts;
-use crate::interfaces;
-use crate::subnets::Subnet;
 
 /// 完整同步的併發上限。
 const SYNC_CONCURRENCY: usize = 6;
-
-/// 指派異動後推送單筆保留；回傳 `None`＝此異動不涉及 Kea。
-///
-/// 觸發條件：受管網段（v4＋`kea_subnet_id`）且（新狀態為保留用途，或舊狀態為
-/// 保留用途＝改為 static／取消指派時刪除）。Kea 失敗僅回警示（見 ADR-0011）。
-pub async fn after_assignment_change(
-    pool: &SqlitePool,
-    client: Option<&Client>,
-    subnet: &Subnet,
-    before: Option<&Assignment>,
-    after: Option<&Assignment>,
-) -> Result<Option<KeaSync>, ApiError> {
-    let (Some(kea_subnet_id), Some(client)) = (subnet.kea_subnet_id, client) else {
-        return Ok(None);
-    };
-
-    let desired = after.filter(|assignment| assignment.purpose == "reservation");
-    let before_was_reservation =
-        before.is_some_and(|assignment| assignment.purpose == "reservation");
-
-    if desired.is_none() && !before_was_reservation {
-        return Ok(None);
-    }
-
-    let outcome = match desired {
-        Some(assignment) => {
-            let interface = interfaces::get(pool, assignment.interface_id)
-                .await
-                .map_err(|error| ApiError::internal("讀取介面失敗", error))?;
-            match interface.and_then(|interface| interface.mac) {
-                Some(mac) => {
-                    let record = ReservationRecord {
-                        ip_address: assignment.address.clone(),
-                        hw_address: mac,
-                        hostname: assignment.hostname.clone(),
-                    };
-                    upsert(client, kea_subnet_id, &record).await
-                }
-                None => Err(KeaError::Data(format!(
-                    "保留位址 {} 的介面缺少 MAC",
-                    assignment.address
-                ))),
-            }
-        }
-        None => {
-            let assignment =
-                before.ok_or_else(|| ApiError::internal("Kea 同步失敗", "缺少變更前的指派狀態"))?;
-            match client
-                .reservation_del(kea_subnet_id, &assignment.address)
-                .await
-            {
-                Ok(changed) => {
-                    if changed {
-                        client.config_write().await
-                    } else {
-                        Ok(())
-                    }
-                }
-                Err(error) => Err(error),
-            }
-        }
-    };
-
-    Ok(Some(match outcome {
-        Ok(()) => KeaSync::ok(),
-        Err(error) => KeaSync::failed(&error),
-    }))
-}
-
-/// 刪除資產／介面前：對這些保留指派逐筆刪除 Kea 保留（見 ADR-0027）。
-///
-/// 呼叫端僅傳入「保留」用途指派；未受管網段或未設 client 者不產生推送結果。
-pub async fn push_reservation_deletes(
-    pool: &SqlitePool,
-    client: Option<&Client>,
-    reservations: &[Assignment],
-) -> Result<Vec<KeaSync>, ApiError> {
-    push_each(pool, client, reservations, false).await
-}
-
-/// 介面 MAC 變更後：對這些保留指派逐筆依現況重新推送（以最新 MAC upsert；
-/// 見 ADR-0027）。
-pub async fn push_reservation_updates(
-    pool: &SqlitePool,
-    client: Option<&Client>,
-    reservations: &[Assignment],
-) -> Result<Vec<KeaSync>, ApiError> {
-    push_each(pool, client, reservations, true).await
-}
-
-/// 逐筆批次推送；`refresh = false`＝刪除（`after = None`）、`true`＝更新
-/// （`after = Some`，由 [`after_assignment_change`] 以資料庫現值組保留）。
-/// 網段以 `subnet_id` 快取；未涉同步者不列入回傳。
-async fn push_each(
-    pool: &SqlitePool,
-    client: Option<&Client>,
-    reservations: &[Assignment],
-    refresh: bool,
-) -> Result<Vec<KeaSync>, ApiError> {
-    let mut subnet_cache: HashMap<i64, Subnet> = HashMap::new();
-    let mut syncs = Vec::new();
-    for assignment in reservations {
-        if !subnet_cache.contains_key(&assignment.subnet_id) {
-            let subnet = crate::subnets::get(pool, assignment.subnet_id)
-                .await
-                .map_err(|error| ApiError::internal("讀取網段失敗", error))?
-                .ok_or_else(|| ApiError::internal("讀取網段失敗", "網段不存在"))?;
-            subnet_cache.insert(subnet.id, subnet);
-        }
-        let subnet = &subnet_cache[&assignment.subnet_id];
-        let after = if refresh { Some(assignment) } else { None };
-        if let Some(sync) =
-            after_assignment_change(pool, client, subnet, Some(assignment), after).await?
-        {
-            syncs.push(sync);
-        }
-    }
-
-    Ok(syncs)
-}
-
-/// 幂等 upsert：先刪除（不存在視同已刪）再新增，最後 `config-write` 持久化。
-async fn upsert(
-    client: &Client,
-    kea_subnet_id: i64,
-    record: &ReservationRecord,
-) -> Result<(), KeaError> {
-    client
-        .reservation_del(kea_subnet_id, &record.ip_address)
-        .await?;
-    client.reservation_add(kea_subnet_id, record).await?;
-    client.config_write().await
-}
 
 /// 完整同步計畫（dry-run 回應；見 ADR-0011）。
 #[derive(Debug, Serialize)]

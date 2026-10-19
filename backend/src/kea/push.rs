@@ -6,7 +6,7 @@
 //! （[`capture_interface_change`] → [`commit_interface_change`]）。觸發規則、
 //! 捕捉查詢與 [`KeaSync`] 成形只存在本檔。
 //!
-//! 觸發規則（逐字沿用舊 `kea::sync::after_assignment_change`）：
+//! 觸發規則：
 //! - 受管網段（v4＋`kea_subnet_id`）且已設 client，缺一不互動；
 //! - `after` 為保留→upsert（介面無 MAC→`KeaError::Data`→failed sync）；
 //! - `before` 為保留、`after` 非保留（轉 static／取消）→delete；
@@ -37,7 +37,7 @@ pub struct KeaSync {
 }
 
 impl KeaSync {
-    /// 成功結果；供 [`super::sync`] 的舊推送函式共用（票 04 前暫留）。
+    /// 成功結果。
     pub(crate) fn ok() -> Self {
         Self {
             status: "ok",
