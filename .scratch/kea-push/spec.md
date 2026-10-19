@@ -123,4 +123,14 @@ struct HttpPush<'a>(&'a Client);
 
 ## 實作記錄
 
-（待票 01–04 完成後補記）
+已實作（2026-10-19，票 01–04 全數完成）。
+
+- 設計會談產出：`992782f`（spec 與票單）。實作 commits：票 01 `8343625`、票 02 `ab47505`、票 03 `a7c6b21`、票 04 `1b32cae`（各票補記見票檔 `## Comments`）。
+- 終態：即時推送單一 module（`kea::push`）：4 個 capture＋3 個 commit＋內部 `KeaPush` port（正式 `HttpPush`／測試 `FakePush`）；route 只做 capture→本地異動→commit；`kea/sync.rs` 只留完整同步；五個 route 不再有任何保留查詢或推送判斷。
+- 驗收：`cargo test` 479 passed／0 failed／6 ignored（`kea_connectivity` 需真機 Kea，既有）；`cargo fmt --check` 綠；`cargo check --all-targets` 無警告；`backend/src` 對 `KeaGateway`／`after_assignment_change`／`push_reservation_*`／`push_each`／`NotImplemented` 零殘留（各端點 JSON 形狀不變）。
+- 與規格差異：
+  1. internal commit 的 port 參數為泛型 `Option<&P> where P: KeaPush + ?Sized`（async fn trait 無 dyn 相容性，E0038）；公開函式與測試注入用法不變。
+  2. `commit_interface_change` 對同一介面只重讀一次並共用其 MAC（舊碼逐筆重讀，等價）；MAC 比較基準為本地異動前的起始讀取（spec 決策 2）。
+  3. `api/ips.rs` DELETE 的 `subnets::get` 保留為純 404 檢查（不再綁定 subnet 變數）。
+  4. 票 04 順帶修正 `push.rs` 兩處因退場而失效的註解（零行為）。
+- 後續（未做，屬另案）：架構審視報告候選 3–6（前端指派流程、匯入管線、IP 清單投影、領域原始值）。
