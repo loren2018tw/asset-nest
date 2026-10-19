@@ -123,7 +123,7 @@
                     outlined
                     dense
                     label="名稱"
-                    :rules="[newInterfaceNameRule]"
+                    :rules="[interfaceNameRule(newInterface.mac)]"
                     lazy-rules
                   />
                 </div>
@@ -253,6 +253,14 @@ import {
   subnetDisplayLabel,
   type AssignmentDraftInput
 } from "@/utils/assignmentDraft";
+import {
+  assignmentPurposeLabel,
+  cancelAssignmentConfirmMessage,
+  interfaceLabel,
+  interfaceNameRule,
+  purposeOptionsFor,
+  statusBlockMessage
+} from "@/utils/assignmentFlow";
 import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
 import { assetLabel } from "@/utils/assetLabel";
 import {
@@ -262,6 +270,7 @@ import {
 } from "@/utils/cidr";
 import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { macRule, normalizeMac } from "@/utils/mac";
 import { textOrNull } from "@/utils/text";
 
 const props = defineProps<{
@@ -416,16 +425,7 @@ const interfaceOptions = computed(() =>
 /** 依輸入位址判斷地址族：v6 用途固定手動、不顯示選項（見 spec §7）。 */
 const isV6 = computed(() => parseAddress(address.value)?.family === "ipv6");
 
-const purposeOptions = computed<
-  { label: string; value: IpPurpose; disable: boolean }[]
->(() => [
-  { label: "手動設定（static）", value: "static", disable: false },
-  {
-    label: "DHCPv4 保留（reservation）",
-    value: "reservation",
-    disable: selectedMac.value === null
-  }
-]);
+const purposeOptions = computed(() => purposeOptionsFor(selectedMac.value));
 
 /**
  * `query_status` 提示（見 spec §10.3）：`available` 不顯示；與目前輸入
@@ -438,27 +438,17 @@ const queryStatusHint = computed<{ message: string; color: string } | null>(
       return null;
     }
 
+    const blockMessage = statusBlockMessage(status.status);
+    if (blockMessage !== null) {
+      return { message: blockMessage, color: "text-negative" };
+    }
+
     switch (status.status) {
-      case "in_pool":
-        return {
-          message: "此位址在 DHCP 位址池內，不可指派",
-          color: "text-negative"
-        };
-      case "excluded":
-        return {
-          message: "此位址在排除範圍內，不可指派",
-          color: "text-negative"
-        };
       case "static":
       case "reservation":
         return {
           message: "此位址已指派；送出後可確認移轉",
           color: "text-grey-7"
-        };
-      case "out_of_subnet":
-        return {
-          message: "此位址不在任何網段可指派的範圍內",
-          color: "text-negative"
         };
       default:
         return null;
@@ -538,12 +528,6 @@ async function prepare() {
       loadingInterfaces.value = false;
     }
   }
-}
-
-/** 介面顯示：名稱／MAC；無 MAC 時標示。 */
-function interfaceLabel(name: string | null, mac: string | null): string {
-  const label = name ?? "未命名";
-  return mac === null ? `${label}（無 MAC）` : `${label} ｜ ${mac}`;
 }
 
 /** 將連線主機 MAC 填入當場新增介面的 MAC 欄位。 */
@@ -844,11 +828,6 @@ function onSaved(saved: AssetAssignmentSaved) {
   open.value = false;
 }
 
-/** 指派用途標籤（清單顯示）。 */
-function assignmentPurposeLabel(purpose: IpPurpose): string {
-  return purpose === "reservation" ? "保留" : "手動設定";
-}
-
 /** 重載該資產的已指派 IP，供取消後即時更新清單。 */
 async function refreshAssignments() {
   const asset = props.asset;
@@ -861,10 +840,7 @@ async function refreshAssignments() {
 
 /** 取消指派前確認；v6 取消後自登錄清單移除（見票 06）。 */
 function confirmCancelAssignment(item: AssetAssignment) {
-  const message =
-    parseAddress(item.address)?.family === "ipv6"
-      ? `確定要取消 ${item.address} 的指派？取消後該位址將自登錄清單移除。`
-      : `確定要取消 ${item.address} 的指派？取消後該位址回到「可用」。`;
+  const message = cancelAssignmentConfirmMessage(item.address);
   $q.dialog({
     title: "取消指派",
     message,
@@ -896,32 +872,5 @@ function addressRule(value: string | null) {
     return "位址為必填";
   }
   return parseAddress(text) !== null || "位址格式錯誤（例：10.0.0.5、fd00::5）";
-}
-
-function newInterfaceNameRule(value: string | null) {
-  if ((value ?? "").trim() !== "") {
-    return true;
-  }
-  return newInterface.value.mac.trim() !== "" || "MAC 空白時名稱為必填";
-}
-
-function macRule(value: string | null) {
-  const text = (value ?? "").trim();
-  if (text === "") {
-    return true;
-  }
-  return (
-    normalizeMac(text) !== null ||
-    "MAC 格式錯誤：須為 12 位十六進位（可用冒號、連字號或無分隔）"
-  );
-}
-
-/** 將常見 MAC 輸入格式正規化為小寫冒號格式；無法解析回傳 `null`。 */
-function normalizeMac(text: string): string | null {
-  const hex = text.replace(/[:.-]/g, "").toLowerCase();
-  if (!/^[0-9a-f]{12}$/.test(hex)) {
-    return null;
-  }
-  return hex.match(/.{2}/g)?.join(":") ?? null;
 }
 </script>

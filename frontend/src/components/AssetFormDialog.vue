@@ -208,7 +208,7 @@
                     outlined
                     dense
                     label="名稱"
-                    :rules="[interfaceNameRule(row)]"
+                    :rules="[interfaceNameRule(row.mac)]"
                     lazy-rules
                   />
                 </div>
@@ -515,7 +515,7 @@ import {
   type Interface,
   type InterfaceInput
 } from "@/api/interfaces";
-import { cancelAssignment, type IpPurpose } from "@/api/ips";
+import { cancelAssignment } from "@/api/ips";
 import type { KeaSyncState } from "@/api/kea";
 import type { LendingBrief } from "@/api/lendings";
 import { listSubnets, type SubnetSummary } from "@/api/subnets";
@@ -526,12 +526,17 @@ import {
   sameAddress,
   type AssignmentDraftInput
 } from "@/utils/assignmentDraft";
+import {
+  assignmentPurposeLabel,
+  cancelAssignmentConfirmMessage,
+  interfaceNameRule
+} from "@/utils/assignmentFlow";
 import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
 import { assetLabel } from "@/utils/assetLabel";
-import { parseAddress } from "@/utils/cidr";
 import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
 import { localDateString } from "@/utils/localDate";
+import { macRule, normalizeMac } from "@/utils/mac";
 import { relativeTime } from "@/utils/relativeTime";
 import { textOrNull } from "@/utils/text";
 
@@ -1097,10 +1102,7 @@ async function refreshAssignments(assetId: number) {
 
 /** 取消指派前確認；v6 取消後自登錄清單移除（見票 06）。 */
 function confirmCancelAssignment(item: AssetAssignment) {
-  const message =
-    parseAddress(item.address)?.family === "ipv6"
-      ? `確定要取消 ${item.address} 的指派？取消後該位址將自登錄清單移除。`
-      : `確定要取消 ${item.address} 的指派？取消後該位址回到「可用」。`;
+  const message = cancelAssignmentConfirmMessage(item.address);
   $q.dialog({
     title: "取消指派",
     message,
@@ -1161,41 +1163,6 @@ function lifespanRule(value: string | null) {
 
   const years = Number(text);
   return (Number.isInteger(years) && years >= 0) || "年限須為非負整數";
-}
-
-/** MAC 空白時名稱必填（見 spec §3.1）；有 MAC 時名稱選填。 */
-function interfaceNameRule(row: InterfaceDraft) {
-  return (value: string | null) => {
-    if ((value ?? "").trim() !== "") {
-      return true;
-    }
-    return row.mac.trim() !== "" || "MAC 空白時名稱為必填";
-  };
-}
-
-function macRule(value: string | null) {
-  const text = (value ?? "").trim();
-  if (text === "") {
-    return true;
-  }
-  return (
-    normalizeMac(text) !== null ||
-    "MAC 格式錯誤：須為 12 位十六進位（可用冒號、連字號或無分隔）"
-  );
-}
-
-/** 將常見 MAC 輸入格式正規化為小寫冒號格式；無法解析回傳 `null`。 */
-function normalizeMac(text: string): string | null {
-  const hex = text.replace(/[:.-]/g, "").toLowerCase();
-  if (!/^[0-9a-f]{12}$/.test(hex)) {
-    return null;
-  }
-  return hex.match(/.{2}/g)?.join(":") ?? null;
-}
-
-/** 指派用途標籤（唯讀顯示）。 */
-function assignmentPurposeLabel(purpose: IpPurpose): string {
-  return purpose === "reservation" ? "保留" : "手動設定";
 }
 
 function toInput(): AssetInput {

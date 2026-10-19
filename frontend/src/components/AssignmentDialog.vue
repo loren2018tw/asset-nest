@@ -140,7 +140,7 @@
                     outlined
                     dense
                     label="名稱"
-                    :rules="[newInterfaceNameRule]"
+                    :rules="[interfaceNameRule(newInterface.mac)]"
                     lazy-rules
                   />
                 </div>
@@ -245,9 +245,16 @@ import {
 import type { AddressFamily } from "@/api/subnets";
 import PeerMacHint from "@/components/PeerMacHint.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import {
+  cancelAssignmentConfirmMessage,
+  interfaceLabel,
+  interfaceNameRule,
+  purposeOptionsFor
+} from "@/utils/assignmentFlow";
 import { assetLabel } from "@/utils/assetLabel";
 import { messageOf } from "@/utils/errors";
 import { notifyKeaSync } from "@/utils/keaSync";
+import { macRule, normalizeMac } from "@/utils/mac";
 import { cancelAssignmentHint } from "@/utils/observationHint";
 import { textOrNull } from "@/utils/text";
 
@@ -340,16 +347,7 @@ const selectedMac = computed(() => {
   return found?.mac ?? null;
 });
 
-const purposeOptions = computed<
-  { label: string; value: IpPurpose; disable: boolean }[]
->(() => [
-  { label: "手動設定（static）", value: "static", disable: false },
-  {
-    label: "DHCPv4 保留（reservation）",
-    value: "reservation",
-    disable: selectedMac.value === null
-  }
-]);
+const purposeOptions = computed(() => purposeOptionsFor(selectedMac.value));
 
 const existingAssetLabel = computed(() => {
   const target = existing.value;
@@ -396,12 +394,6 @@ function prepare() {
   if (!isEdit.value) {
     void searchAssets("");
   }
-}
-
-/** 介面顯示：名稱／MAC；無 MAC 時標示。 */
-function interfaceLabel(name: string | null, mac: string | null): string {
-  const label = name ?? "未命名";
-  return mac === null ? `${label}（無 MAC）` : `${label} ｜ ${mac}`;
 }
 
 /** 資產搜尋選項／選取值的顯示標籤：財產編號(描述)；為空時僅描述（見票 15）。 */
@@ -509,9 +501,7 @@ async function createNewInterface() {
 }
 
 function confirmCancel() {
-  const message = isV6.value
-    ? `確定要取消 ${address.value} 的指派？取消後該位址將自登錄清單移除。`
-    : `確定要取消 ${address.value} 的指派？取消後該位址回到「可用」。`;
+  const message = cancelAssignmentConfirmMessage(address.value);
   // 回收防呆：附上該位址的最後可見與最後 MAC（僅提醒、不阻擋；見票 08）。
   $q.dialog({
     title: "取消指派",
@@ -650,32 +640,5 @@ function isIpv6(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function newInterfaceNameRule(value: string | null) {
-  if ((value ?? "").trim() !== "") {
-    return true;
-  }
-  return newInterface.value.mac.trim() !== "" || "MAC 空白時名稱為必填";
-}
-
-function macRule(value: string | null) {
-  const text = (value ?? "").trim();
-  if (text === "") {
-    return true;
-  }
-  return (
-    normalizeMac(text) !== null ||
-    "MAC 格式錯誤：須為 12 位十六進位（可用冒號、連字號或無分隔）"
-  );
-}
-
-/** 將常見 MAC 輸入格式正規化為小寫冒號格式；無法解析回傳 `null`。 */
-function normalizeMac(text: string): string | null {
-  const hex = text.replace(/[:.-]/g, "").toLowerCase();
-  if (!/^[0-9a-f]{12}$/.test(hex)) {
-    return null;
-  }
-  return hex.match(/.{2}/g)?.join(":") ?? null;
 }
 </script>

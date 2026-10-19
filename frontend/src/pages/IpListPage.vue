@@ -320,6 +320,7 @@ import {
   subnetDisplayLabel,
   type AssignmentDraftInput
 } from "@/utils/assignmentDraft";
+import { interfaceLabel } from "@/utils/assignmentFlow";
 import { debounce } from "@/utils/debounce";
 import { messageOf } from "@/utils/errors";
 import { sourceLabel } from "@/utils/observationSource";
@@ -519,11 +520,6 @@ function statusColor(status: IpStatus): string {
     case "reservation":
       return "purple";
   }
-}
-
-function interfaceLabel(name: string | null, mac: string | null): string {
-  const label = name ?? "未命名";
-  return mac === null ? `${label}（無 MAC）` : `${label} ｜ ${mac}`;
 }
 
 /** 指派對象第一行：「描述(廠牌 型號)」；缺者省略、皆缺僅描述（見 spec §4.3、票 16）。 */
