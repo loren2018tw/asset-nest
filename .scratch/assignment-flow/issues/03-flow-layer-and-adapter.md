@@ -1,6 +1,6 @@
 # 03 — assignmentFlow 流程層與真 adapter
 
-Status: todo
+Status: done
 Blocked by: 02
 
 ## 目標
@@ -33,3 +33,10 @@ Blocked by: 02
 2. 本票檔：`Status: done`，`## Comments` 補記（commit hash、測試數、與 spec 的差異）。
 
 ## Comments
+
+- commit：`db9756a`（`指派流程：流程層與真 adapter（票 03）`；只含本票 6 檔，`.scratch` 未入版控）。
+- 指令結果：`pnpm --filter frontend test` 98/98 過（`assignmentFlow.test.ts` 68＋`assignmentDraft.test.ts` 13；本票新增 67，原有 31）；`pnpm --filter frontend typecheck` 過；`pnpm lint:check` 過（oxfmt＋oxlint 全綠）。grep `from "@/api` 於 `utils/assignmentFlow.ts` 僅出現在 `import type`（含 multi-line 區塊）；`@/api/*` 的 runtime import 僅在 `assignmentFlowDeps.ts`。
+- 與 spec 的差異（兩處）：
+  1. `parseAssignedElsewhere` 不以 `instanceof ApiError` 判定：module 不得 runtime import `@/api/client`（spec §損壞與邊界路徑、本票 grep 驗收），改以結構守衛 `cause instanceof Error && cause.name === "ApiError"`（真 `ApiError` 建構時固定 `name`）；訊息、欄位與 fallback（「未知資產」「未知位置」）逐字不變，測試以真 `ApiError` 驗收，並釘住非 Error 物件／一般 Error／reason 不符皆回 `null`。
+  2. `InterfaceRow` 含 `key`（spec §介面原註記「key 由對話框自行擴充」）：`preflightAssignmentDrafts` 與 `landAssignmentDrafts` 須以 `draft.rowKey` 找對應介面列，key 是 module 流程所需的列身分；票 06 的 `InterfaceDraft extends InterfaceRow` 仍可行。
+- 其他：`isApiError`／`interfaceChanged`／`toInterfaceInput`／`isIpv6`／`textOf`／`nullableTextOf` 為 module 內部函式；`assignTransfer.ts` 本體未動（票 06 退場）；`AssignIpDialog` 唯一變更＝移除本地 `sameSubnetConflict` 並改 import（`sameAddress` import 不再需要）。
