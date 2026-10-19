@@ -95,61 +95,10 @@
               "
             />
 
-            <div>
-              <q-btn
-                dense
-                flat
-                color="primary"
-                icon="add"
-                label="新增介面"
-                :disable="savingInterface"
-                @click="showNewInterface = !showNewInterface"
-              />
-            </div>
-
-            <q-card v-if="showNewInterface" flat bordered class="q-pa-sm">
-              <q-banner
-                v-if="newInterfaceError !== ''"
-                dense
-                rounded
-                class="bg-negative text-white q-mb-sm"
-              >
-                {{ newInterfaceError }}
-              </q-banner>
-              <div class="row q-col-gutter-sm items-start">
-                <div class="col-12 col-sm-5">
-                  <q-input
-                    v-model="newInterface.name"
-                    outlined
-                    dense
-                    label="名稱"
-                    :rules="[interfaceNameRule(newInterface.mac)]"
-                    lazy-rules
-                  />
-                </div>
-                <div class="col-12 col-sm-5">
-                  <q-input
-                    v-model="newInterface.mac"
-                    outlined
-                    dense
-                    label="MAC"
-                    :rules="[macRule]"
-                    lazy-rules
-                  />
-                </div>
-                <div class="col-12 col-sm-2 text-right">
-                  <q-btn
-                    dense
-                    flat
-                    color="primary"
-                    label="建立"
-                    :loading="savingInterface"
-                    @click="createNewInterface"
-                  />
-                </div>
-              </div>
-              <PeerMacHint class="q-mt-xs" @fill="fillNewInterfaceMac" />
-            </q-card>
+            <new-interface-form
+              :asset-id="props.asset?.id ?? null"
+              @created="onInterfaceCreated"
+            />
           </template>
 
           <!-- v6 恆為手動設定：無保留選項、無 hostname（見 spec §7） -->
@@ -237,31 +186,28 @@ import { computed, ref, watch } from "vue";
 
 import { fetchAsset, type Asset, type AssetAssignment } from "@/api/assets";
 import type { AssetAssignmentSaved } from "@/api/assignments";
-import { createInterface, type Interface } from "@/api/interfaces";
+import type { Interface, InterfaceSaved } from "@/api/interfaces";
 import {
   findIpCandidates,
   type IpCandidate,
   type IpQueryStatus
 } from "@/api/ipCandidates";
-import { cancelAssignment, type IpPurpose } from "@/api/ips";
+import type { IpPurpose } from "@/api/ips";
 import type { SubnetSummary } from "@/api/subnets";
-import PeerMacHint from "@/components/PeerMacHint.vue";
+import NewInterfaceForm from "@/components/NewInterfaceForm.vue";
 import { useCompositionGuard } from "@/composables/useCompositionGuard";
+import type { AssignmentDraftInput } from "@/utils/assignmentDraft";
 import {
-  resolveSubnetByAddress,
-  sameSubnetConflict,
-  subnetDisplayLabel,
-  type AssignmentDraftInput
-} from "@/utils/assignmentDraft";
-import {
+  assignFromAssetFlow,
   assignmentPurposeLabel,
   cancelAssignmentConfirmMessage,
+  cancelAssignmentFlow,
+  draftAssignmentFlow,
   interfaceLabel,
-  interfaceNameRule,
   purposeOptionsFor,
   statusBlockMessage
 } from "@/utils/assignmentFlow";
-import { assignFromAssetWithTransfer } from "@/utils/assignTransfer";
+import { assignmentFlowDeps } from "@/utils/assignmentFlowDeps";
 import { assetLabel } from "@/utils/assetLabel";
 import {
   parseAddress,
@@ -269,9 +215,7 @@ import {
   type ParsedIpv4Prefix
 } from "@/utils/cidr";
 import { messageOf } from "@/utils/errors";
-import { notifyKeaSync } from "@/utils/keaSync";
-import { macRule, normalizeMac } from "@/utils/mac";
-import { textOrNull } from "@/utils/text";
+import { normalizeMac } from "@/utils/mac";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -301,6 +245,8 @@ const emit = defineEmits<{
 }>();
 
 const $q = useQuasar();
+/** 流程依賴（真 adapter）：指派／草稿／取消與通知全經本埠。 */
+const deps = assignmentFlowDeps($q);
 
 const open = computed({
   get: () => props.modelValue,
@@ -329,11 +275,6 @@ const selectedInterfaceId = ref<number | null>(null);
 const assignments = ref<AssetAssignment[]>([]);
 /** 取消中的指派 id；供逐列 loading 與避免重複點擊。 */
 const cancellingId = ref<number | null>(null);
-
-const showNewInterface = ref(false);
-const newInterface = ref({ name: "", mac: "" });
-const savingInterface = ref(false);
-const newInterfaceError = ref("");
 
 const purpose = ref<IpPurpose>("static");
 const hostname = ref("");
@@ -490,13 +431,10 @@ watch(address, value => {
 async function prepare() {
   const token = ++loadToken;
   errorMessage.value = "";
-  newInterfaceError.value = "";
   address.value = "";
   clearCandidates();
   hostname.value = "";
   purpose.value = "static";
-  showNewInterface.value = false;
-  newInterface.value = { name: "", mac: "" };
   interfaces.value = [];
   selectedInterfaceId.value = null;
   assignments.value = [];
@@ -530,50 +468,10 @@ async function prepare() {
   }
 }
 
-/** 將連線主機 MAC 填入當場新增介面的 MAC 欄位。 */
-function fillNewInterfaceMac(mac: string) {
-  newInterface.value.mac = mac;
-}
-
-/** 當場新增介面（名稱／MAC），成功後自動選取。 */
-async function createNewInterface() {
-  const name = newInterface.value.name.trim();
-  const mac = newInterface.value.mac.trim();
-
-  if (name === "" && mac === "") {
-    newInterfaceError.value = "MAC 空白時名稱為必填";
-    return;
-  }
-  if (mac !== "" && normalizeMac(mac) === null) {
-    newInterfaceError.value =
-      "MAC 格式錯誤：須為 12 位十六進位（可用冒號、連字號或無分隔）";
-    return;
-  }
-
-  savingInterface.value = true;
-  newInterfaceError.value = "";
-  try {
-    const asset = props.asset;
-    if (asset === null || asset === undefined) {
-      return;
-    }
-    const saved = await createInterface(asset.id, {
-      name: textOrNull(name),
-      mac: textOrNull(mac),
-      note: null
-    });
-    for (const warning of saved.warnings) {
-      $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
-    }
-    interfaces.value = [...interfaces.value, saved];
-    selectedInterfaceId.value = saved.id;
-    showNewInterface.value = false;
-    newInterface.value = { name: "", mac: "" };
-  } catch (cause) {
-    newInterfaceError.value = messageOf(cause);
-  } finally {
-    savingInterface.value = false;
-  }
+/** 新增介面成功（`NewInterfaceForm` 回報）：加入清單並自動選取。 */
+function onInterfaceCreated(saved: InterfaceSaved) {
+  interfaces.value = [...interfaces.value, saved];
+  selectedInterfaceId.value = saved.id;
 }
 
 /**
@@ -655,24 +553,9 @@ async function submit() {
   errorMessage.value = "";
 
   const text = address.value.trim();
-  if (parseAddress(text) === null) {
-    errorMessage.value = "IP 位址格式錯誤（例：10.0.0.5、fd00::5）";
-    return;
-  }
 
   if (isDraft.value) {
     await submitDraft(text);
-    return;
-  }
-
-  const target = selectedInterface.value;
-  if (target === null) {
-    errorMessage.value = "請選擇介面";
-    return;
-  }
-
-  if (purpose.value === "reservation" && selectedMac.value === null) {
-    errorMessage.value = "所選介面無 MAC，不可設為保留";
     return;
   }
 
@@ -681,103 +564,51 @@ async function submit() {
     return;
   }
 
-  const input = {
-    address: text,
-    interface_id: target.id,
-    purpose: isV6.value ? ("static" as const) : purpose.value,
-    hostname:
-      !isV6.value && purpose.value === "reservation"
-        ? textOrNull(hostname.value)
-        : null
-  };
-
   saving.value = true;
   try {
-    const saved = await assignFromAssetWithTransfer($q, asset.id, input);
-    if (saved === null) {
+    // 格式→介面→保留 MAC 的驗證、呼叫順序與移轉確認皆在流程內
+    const result = await assignFromAssetFlow(deps, asset.id, {
+      text,
+      interfaceId: selectedInterface.value?.id ?? null,
+      purpose: purpose.value,
+      hostname: hostname.value,
+      mac: selectedMac.value
+    });
+    if (result.status === "error") {
+      errorMessage.value = result.message;
+      return;
+    }
+    if (result.status === "cancelled") {
       // 使用者在移轉確認中取消：不指派、不提示錯誤
       return;
     }
-    onSaved(saved);
-  } catch (cause) {
-    errorMessage.value = messageOf(cause);
+    onSaved(result.saved);
   } finally {
     saving.value = false;
   }
 }
 
 /**
- * 草稿模式送出（見 spec §4.3）：預檢後回傳指派草稿（不落地）。
- * v4 以 `query_status` 擋池內／排除／不在網段；v6 以網段清單比對；
- * 同介面同網段同位址＝更新、不同位址＝擋下。
+ * 草稿模式送出（見 spec §4.3）：預檢（保留 MAC→狀態查詢→同網段衝突）後
+ * 回傳指派草稿（不落地）；`statusLookup` 用本對話框的同字串快取查詢。
  */
 async function submitDraft(text: string) {
-  const draft = props.draft;
-  const parsed = parseAddress(text);
-  if (draft === null || draft === undefined || parsed === null) {
-    return;
-  }
-
-  if (purpose.value === "reservation" && selectedMac.value === null) {
-    errorMessage.value = "所選介面無 MAC，不可設為保留";
-    return;
-  }
-
-  const purposeValue: IpPurpose = isV6.value ? "static" : purpose.value;
-  const hostnameValue =
-    !isV6.value && purposeValue === "reservation"
-      ? textOrNull(hostname.value)
-      : null;
-
   saving.value = true;
   try {
-    let subnetId: number | null = null;
-    let subnetLabel: string | null = null;
-
-    if (parsed.family === "ipv4") {
-      const status = await statusForAddress(text);
-      if (status === null) {
-        errorMessage.value = `無法查詢位址 ${text} 的狀態；請確認格式正確，或稍後再試`;
-        return;
-      }
-      switch (status.status) {
-        case "in_pool":
-          errorMessage.value = "此位址在 DHCP 位址池內，不可指派";
-          return;
-        case "excluded":
-          errorMessage.value = "此位址在排除範圍內，不可指派";
-          return;
-        case "out_of_subnet":
-          errorMessage.value = "此位址不在任何網段可指派的範圍內";
-          return;
-        default:
-          break;
-      }
-      subnetId = status.subnet_id;
-      subnetLabel = subnetDisplayLabel(status.subnet_name, status.subnet_cidr);
-    } else if (draft.subnets !== null) {
-      const resolved = resolveSubnetByAddress(draft.subnets, parsed);
-      if (resolved === null) {
-        errorMessage.value = `位址 ${text} 不在任何網段內`;
-        return;
-      }
-      subnetId = resolved.subnetId;
-      subnetLabel = resolved.subnetLabel;
-    }
-
-    const conflict = sameSubnetConflict(draft.existing, text, subnetId);
-    if (conflict !== null) {
-      errorMessage.value = `此介面在此網段已有位址 ${conflict}（同一介面同一網段至多一個位址）`;
+    const result = await draftAssignmentFlow({
+      text,
+      purpose: purpose.value,
+      hostname: hostname.value,
+      mac: selectedMac.value,
+      existing: props.draft?.existing ?? [],
+      subnets: props.draft?.subnets ?? null,
+      statusLookup: statusForAddress
+    });
+    if ("error" in result) {
+      errorMessage.value = result.error;
       return;
     }
-
-    emit("draft", {
-      address: text,
-      purpose: purposeValue,
-      hostname: hostnameValue,
-      subnetId,
-      subnetLabel
-    });
+    emit("draft", result.draft);
     open.value = false;
   } finally {
     saving.value = false;
@@ -798,10 +629,7 @@ async function statusForAddress(text: string): Promise<IpQueryStatus | null> {
 }
 
 function onSaved(saved: AssetAssignmentSaved) {
-  for (const warning of saved.warnings) {
-    $q.notify({ type: "warning", message: warning.message, timeout: 6000 });
-  }
-  notifyKeaSync($q, saved.kea_sync);
+  // warnings 與 Kea 推送結果已由流程提示（時機與次數照舊）
   $q.notify({
     type: "positive",
     message: saved.transferred ? "已移轉並指派" : "已指派"
@@ -836,12 +664,20 @@ function confirmCancelAssignment(item: AssetAssignment) {
 async function cancelAssignmentItem(item: AssetAssignment) {
   cancellingId.value = item.id;
   try {
-    const result = await cancelAssignment(item.subnet_id, item.address);
-    notifyKeaSync($q, result.kea_sync);
+    const result = await cancelAssignmentFlow(
+      deps,
+      item.subnet_id,
+      item.address
+    );
+    if (!result.ok) {
+      $q.notify({ type: "negative", message: result.message });
+      return;
+    }
     $q.notify({ type: "positive", message: "已取消指派" });
     emit("saved");
     await refreshAssignments();
   } catch (cause) {
+    // 清單重載失敗（流程錯誤已於上方呈現）
     $q.notify({ type: "negative", message: messageOf(cause) });
   } finally {
     cancellingId.value = null;
