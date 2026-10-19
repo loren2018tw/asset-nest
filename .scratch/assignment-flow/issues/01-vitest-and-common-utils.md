@@ -1,6 +1,6 @@
 # 01 — vitest 基礎設施與 errors／text 收斂
 
-Status: todo
+Status: done
 Blocked by: —
 
 ## 目標
@@ -33,3 +33,18 @@ Blocked by: —
 2. 本票檔：`Status: done`，`## Comments` 補記 commit hash、測試數與取捨（含逐檔確認結果）。
 
 ## Comments
+
+- 實作完成，commit：`3b0becb0e5491b266cb040e71ff439ae92d86160`（`指派流程：vitest 基礎設施與錯誤／文字工具收斂（票 01）`）；本票檔變更不隨 commit（留待統一補記）。
+- 安裝：`pnpm --filter frontend add -D vitest` → `vitest@^5.0.5`（實跑 5.0.5）；`pnpm --filter frontend test` 可跑。
+- 驗收結果（全綠）：
+  - `pnpm --filter frontend test`：2 test files、6 tests passed（errors.test.ts 3、text.test.ts 3）。
+  - `pnpm --filter frontend typecheck`：`vue-tsc --noEmit` 無錯（exit 0）。
+  - `pnpm lint:check`：oxfmt --check 78 檔格式正確、oxlint 無錯（exit 0）。
+- 逐檔確認：21 個本地函式本體與新 util **逐字一致**，無任何不一致（含 format）；替換僅增 21 行 import、刪 63 行函式本體＋21 行空行，呼叫端與其他內容未動。
+  - `messageOf` 16 檔：pages/ObservationsOutOfSubnetPage.vue、pages/AssetsPage.vue、pages/SubnetsPage.vue、pages/InventoryAuditPage.vue、pages/IpListPage.vue、pages/LendingsPage.vue、pages/DisposedAssetsPage.vue、components/LendingDialog.vue、components/KeaSyncDialog.vue、components/AssetFormDialog.vue、components/AssignmentDialog.vue、components/AssetImportDialog.vue、components/SubnetImportDialog.vue、components/AssignIpDialog.vue、components/SubnetFormDialog.vue、components/ObservationHistoryDialog.vue。
+  - `textOrNull` 5 檔：components/LendingDialog.vue、components/AssetFormDialog.vue、components/AssignmentDialog.vue、components/AssignIpDialog.vue、components/SubnetFormDialog.vue。
+- 取捨：
+  - 格式以 `frontend/oxfmt.config.ts` 實檔為準（`semi: true`、雙引號、printWidth 80、trailingComma none）——repo 現行碼與 oxfmt 皆帶分號，故未採「無分號」寫法；`lint:check` 綠。
+  - `vitest.config.ts`：`@` 別名以 `fileURLToPath(new URL("./src", import.meta.url))`；`environment: "node"`、`include: ["src/**/*.test.ts"]`；未引入 jsdom／happy-dom／外掛。
+  - README 表格加入新列時一併重排欄寬（僅空白調整），比照先前新增 `test:agent` 的作法。
+  - 本地函式位於檔尾者（7 檔）刪除時吸收其前導空行、其餘吸收尾隨空行，皆保持單一空行分隔。
