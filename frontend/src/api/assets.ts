@@ -26,7 +26,7 @@ export interface Asset {
   note: string | null;
   /** 標籤：多值自由文字（後端正規化、不分大小寫去重）。 */
   tags: string[];
-  /** 屆齡：購置日期＋年限早於今天（僅提示）。 */
+  /** 屆期：購置日期＋年限早於今天（僅提示）。 */
   expired: boolean;
   created_at: string;
   updated_at: string;

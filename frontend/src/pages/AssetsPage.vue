@@ -284,9 +284,9 @@
             <q-td :props="props" class="text-center">
               <span
                 v-if="props.row.expired"
-                class="status-badge status-badge--due"
+                class="status-badge status-badge--expired"
               >
-                屆齡
+                屆期
               </span>
               <span v-else class="cell-empty">—</span>
             </q-td>
@@ -357,9 +357,9 @@
                 <span class="asset-card__flags">
                   <span
                     v-if="props.row.expired"
-                    class="status-badge status-badge--due"
+                    class="status-badge status-badge--expired"
                   >
-                    屆齡
+                    屆期
                   </span>
                   <span
                     v-if="isLent(props.row)"
@@ -788,7 +788,7 @@ const columns: QTableProps["columns"] = [
   },
   {
     name: "expired",
-    label: "屆齡",
+    label: "屆期",
     field: "expired",
     align: "center",
     sortable: true,
@@ -1407,7 +1407,7 @@ onMounted(() => {
   border-radius: 999px;
 }
 
-.status-badge--due {
+.status-badge--expired {
   color: #8c4a2f;
   background: var(--an-clay-soft);
 }

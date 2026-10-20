@@ -1,4 +1,4 @@
-//! 資產管理整合測試：CRUD、必填驗證、搜尋與篩選、屆齡計算（見票 01）、
+//! 資產管理整合測試：CRUD、必填驗證、搜尋與篩選、屆期計算（見票 01）、
 //! 標籤、標籤篩選、伺服器端排序與 `GET /tags`（見票 11）、清單已指派 IP
 //! 欄與 MAC／IP 搜尋（見票 12）、資產匯出（見票 04）。
 
@@ -362,7 +362,7 @@ async fn create_read_update_delete_asset() {
     assert_eq!(created["location"], "機房 A");
     assert_eq!(created["brand"], "Dell");
     assert_eq!(created["tags"], json!([]), "未提供標籤時為空陣列");
-    assert_eq!(created["expired"], true, "2000 年購置＋5 年已屆齡");
+    assert_eq!(created["expired"], true, "2000 年購置＋5 年已屆期");
     assert!(
         created["created_at"]
             .as_str()
@@ -737,7 +737,7 @@ async fn expired_flag_is_computed_by_server() {
     let format_date = |date: chrono::NaiveDate| date.format("%Y-%m-%d").to_string();
 
     let cases = [
-        // （購置日期, 年限, 期望屆齡）
+        // （購置日期, 年限, 期望屆期）
         (Some(today - Duration::days(4000)), Some(10), true),
         (Some(today), Some(0), false),
         (Some(today - Duration::days(1)), Some(0), true),
@@ -760,7 +760,7 @@ async fn expired_flag_is_computed_by_server() {
         );
     }
 
-    // 屆齡僅提示，不影響任何操作
+    // 屆期僅提示，不影響任何操作
     let (_, page) = send(&pool, Method::GET, "/api/v1/assets", None).await;
     let expired_id = page["items"]
         .as_array()
@@ -768,17 +768,17 @@ async fn expired_flag_is_computed_by_server() {
         .iter()
         .find(|item| item["expired"] == true)
         .and_then(|item| item["id"].as_i64())
-        .expect("清單中有屆齡資產");
+        .expect("清單中有屆期資產");
 
     let (status, updated) = send(
         &pool,
         Method::PATCH,
         &format!("/api/v1/assets/{expired_id}"),
-        Some(json!({ "note": "屆齡仍可編輯" })),
+        Some(json!({ "note": "屆期仍可編輯" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["note"], "屆齡仍可編輯");
+    assert_eq!(updated["note"], "屆期仍可編輯");
 
     let (status, _) = send(
         &pool,
@@ -787,7 +787,7 @@ async fn expired_flag_is_computed_by_server() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "屆齡仍可刪除");
+    assert_eq!(status, StatusCode::OK, "屆期仍可刪除");
 }
 
 #[tokio::test]
@@ -938,7 +938,7 @@ async fn descriptions(pool: &SqlitePool, query: &str) -> Vec<String> {
 async fn list_sorts_by_whitelisted_columns_with_direction() {
     let pool = test_pool().await;
 
-    // A：屆齡、標籤 ["b"]；B：未屆齡、標籤 ["a"]；C：無選填值、無標籤
+    // A：屆期、標籤 ["b"]；B：未屆期、標籤 ["a"]；C：無選填值、無標籤
     create_asset(
         &pool,
         json!({
@@ -1004,7 +1004,7 @@ async fn list_sorts_by_whitelisted_columns_with_direction() {
         // tags 以 JSON 字串排序：["a"] < ["b"] < []
         ("sort=tags&dir=asc", vec!["alpha", "Bravo", "Charlie"]),
         ("sort=tags&dir=desc", vec!["Charlie", "Bravo", "alpha"]),
-        // expired：升冪未屆齡在前（同值以 id 決勝）
+        // expired：升冪未屆期在前（同值以 id 決勝）
         ("sort=expired&dir=asc", vec!["alpha", "Charlie", "Bravo"]),
         ("sort=expired&dir=desc", vec!["Bravo", "alpha", "Charlie"]),
     ];
@@ -1162,7 +1162,7 @@ async fn expired_sort_is_consistent_with_rust_flag() {
             sorted.sort_unstable_by(|a, b| b.cmp(a));
             sorted
         };
-        assert_eq!(flags, expected, "dir={dir} 的屆齡排序與旗標不一致");
+        assert_eq!(flags, expected, "dir={dir} 的屆期排序與旗標不一致");
     }
 }
 

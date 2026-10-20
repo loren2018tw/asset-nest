@@ -42,7 +42,7 @@
 5. **檔案切分（沿用 `utils/` 平放）**：`utils/mac.ts`、`utils/errors.ts`、`utils/text.ts`、`utils/assignmentFlow.ts`（module 本體）、`utils/assetImpact.ts`、`utils/assignmentFlowDeps.ts`。module 不搬進 `domain/`（repo 無此慣例）。
 6. **測試基礎設施**：frontend 加 devDep `vitest`（node 環境、不需 jsdom）；`frontend/vitest.config.ts`（`@` 別名、`include: ["src/**/*.test.ts"]`）；frontend script `"test": "vitest run"`；根 `"test:frontend"`；根 `test` 維持只跑 cargo；CI 不動；測試檔與被測檔同目錄。只測純 module；不裝 `@vue/test-utils`（元件由 typecheck／lint／build 把關）。
 7. **共用小工具全收**：`messageOf` 16 檔、`textOrNull` 5 檔、`normalizeMac`／`macRule` 3 檔、`interfaceLabel` 4 檔（含 IpListPage）。
-8. **MAC 與候選 6 分工**：前端 MAC 正規化由本卡收成 `utils/mac.ts`；候選 6 只做 backend 兩份（observation／interfaces）與 agent `host_range` 共用、在線門檻、屆齡。
+8. **MAC 與候選 6 分工**：前端 MAC 正規化由本卡收成 `utils/mac.ts`；候選 6 只做 backend 兩份（observation／interfaces）與 agent `host_range` 共用、在線門檻、屆期。
 9. **名稱與紀錄**：module 名 `assignmentFlow`；不新增 ADR（ADR-0006／0007／0025／0027 續用）；`GLOSSARY.md` 不動（無新領域名詞）；`escapeHtml`（4 檔）不在本卡。
 
 ## 介面（草案）
@@ -280,7 +280,7 @@ export async function cancelAssignmentFlow(
 - IpListPage 的預填 helpers、AssetFormDialog 取消新增的三選擇、資產欄位驗證（`requiredRule`／`lifespanRule`…）。
 - `escapeHtml`（4 檔）、`relativeTime` 等既有 util 的再整理。
 - 元件測試框架（`@vue/test-utils`／jsdom）、root `test` 併跑前端、CI 變更。
-- 後端／`agent/` 任何變更；候選 4（匯入管線）、5（IP 清單投影）、6（backend MAC／屆齡／在線門檻／agent host 範圍）。
+- 後端／`agent/` 任何變更；候選 4（匯入管線）、5（IP 清單投影）、6（backend MAC／屆期／在線門檻／agent host 範圍）。
 - 任何 API、文案、通知順序、開關窗條件、資料流變更。
 
 ## 損壞與邊界路徑
@@ -306,4 +306,4 @@ export async function cancelAssignmentFlow(
   5. 流程呼叫的 `saving` loading 包住同步驗證段——驗證錯誤同一 tick 內完成，無可見差異（票 04、05）。
   6. 草稿為空時不再呼叫 `landAssignmentDrafts`（舊碼呼叫後立即早退，無 emit／refresh）；對外行為相同（票 06）。
   7. `NewInterfaceForm` 內部處理器自 `createNewInterface` 改名 `submitNewInterface`（僅為驗收 grep；行為零變動）（票 06）。
-- 後續（未做，屬另案）：候選 4（CSV 匯入管線）、候選 5（IP 清單投影）、候選 6（backend 兩份 MAC／屆齡／在線門檻／agent `host_range`；**前端 MAC 已由本卡交付** `utils/mac.ts`）。
+- 後續（未做，屬另案）：候選 4（CSV 匯入管線）、候選 5（IP 清單投影）、候選 6（backend 兩份 MAC／屆期／在線門檻／agent `host_range`；**前端 MAC 已由本卡交付** `utils/mac.ts`）。

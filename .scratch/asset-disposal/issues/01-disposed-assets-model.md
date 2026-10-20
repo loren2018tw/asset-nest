@@ -57,5 +57,5 @@ Blocked by: —
 - `list` 回傳 `(Vec<DisposedAsset>, i64)`（items＋total），而非 `{items, total, page, per_page}` 結構——分頁包裝屬 API 層（票 02）職責，與 `assets::list`、`lendings::list_returned` 一致。
 - `restore` 的 `id` 為報廢列自身 id（API 路徑 `/disposed-assets/{id}/restore`），復原入庫用 `asset_id`；與 spec §3 一致。
 - `dispose` 以模組內私有 `AssetSnapshotRow` 讀取 `assets` 整列（`assets::AssetRow` 為模組私有無法重用），未新增公開 API。
-- `DisposedAsset` 不含 `expired` 屆齡旗標（spec §3 未列；報廢列非在管資產）。
+- `DisposedAsset` 不含 `expired` 屆期旗標（spec §3 未列；報廢列非在管資產）。
 - 測試時間欄位以固定值入庫（`created_at`／`updated_at`），避免同秒內 `updated_at` 更新難以斷言（秒精度）。

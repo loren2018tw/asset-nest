@@ -1,4 +1,4 @@
-//! 資產（Asset）領域模組：欄位驗證、屆齡判斷與資料庫存取。
+//! 資產（Asset）領域模組：欄位驗證、屆期判斷與資料庫存取。
 //!
 //! 詞彙依 `GLOSSARY.md`；規則見 `.scratch/asset-ip-management/spec.md` §2.1、§3。
 
@@ -34,7 +34,7 @@ struct AssetRow {
     updated_at: String,
 }
 
-/// API 回傳的資產（含後端計算的屆齡旗標）。
+/// API 回傳的資產（含後端計算的屆期旗標）。
 #[derive(Debug, Serialize)]
 pub struct Asset {
     pub id: i64,
@@ -49,7 +49,7 @@ pub struct Asset {
     pub note: Option<String>,
     /// 標籤：多值自由文字（正規化後、不分大小寫去重）。
     pub tags: Vec<String>,
-    /// 屆齡：`purchase_date + lifespan_years < 今天`（僅提示，不影響操作）。
+    /// 屆期：`purchase_date + lifespan_years < 今天`（僅提示，不影響操作）。
     pub expired: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -754,7 +754,7 @@ fn tags_json(tags: &[String]) -> String {
     serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// 屆齡的 SQL 運算式（1＝屆齡）；語意與 [`is_expired`] 一致，供排序使用（見票 11）。
+/// 屆期的 SQL 運算式（1＝屆期）；語意與 [`is_expired`] 一致，供排序使用（見票 11）。
 ///
 /// - 以 `date('now', 'localtime')` 對齊 Rust 的 `Local::now().date_naive()`。
 /// - SQLite 的 `+N years` 對 2/29 會進位到 3/1，Rust 會退至 2/28，故特別修正。
@@ -820,7 +820,7 @@ fn validate_lifespan(value: Option<i64>) -> Result<Option<i64>, ApiError> {
     }
 }
 
-/// 屆齡：`purchase_date + lifespan_years < 今天`；缺購置日期或年限即無從判斷。
+/// 屆期：`purchase_date + lifespan_years < 今天`；缺購置日期或年限即無從判斷。
 fn is_expired(purchase_date: Option<&str>, lifespan_years: Option<i64>, today: NaiveDate) -> bool {
     let (Some(raw), Some(years)) = (purchase_date, lifespan_years) else {
         return false;
